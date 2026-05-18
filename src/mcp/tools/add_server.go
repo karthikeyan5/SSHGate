@@ -583,7 +583,7 @@ func runSSH(ctx context.Context, client *ssh.Client, cmd string) ([]byte, []byte
 // suppress tilde expansion, and the constants are statically known to
 // be free of shell metacharacters.
 func uploadFile(ctx context.Context, c *ssh.Client, body []byte, remotePath, mode string) error {
-	if strings.ContainsAny(remotePath, " \t\"'\\$`|&;<>(){}*?[]!#") {
+	if strings.ContainsAny(remotePath, " \t\n\r\x00\"'\\$`|&;<>(){}*?[]!#") {
 		return fmt.Errorf("upload: remotePath %q contains shell metacharacters", remotePath)
 	}
 	sess, err := c.NewSession()
