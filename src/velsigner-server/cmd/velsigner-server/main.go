@@ -47,6 +47,7 @@ import (
 	"time"
 
 	velsignerserver "github.com/karthikeyan5/sshgate/src/velsigner-server"
+	"github.com/karthikeyan5/sshgate/src/velsigner-server/store"
 )
 
 const version = "0.2.0-scaffold-1"
@@ -60,7 +61,7 @@ func run(args []string) int {
 	fs.SetOutput(os.Stderr)
 	apiKeyFile := fs.String("api-key-file", "", "Path to a 0600 file containing the bearer API key")
 	addr := fs.String("addr", ":8443", "Listen address (host:port). Default :8443; TLS terminated upstream.")
-	_ = fs.String("db", "/var/lib/velsigner-server/state.db", "SQLite database path (wired in scaffold commit 2)")
+	dbPath := fs.String("db", "/var/lib/velsigner-server/state.db", "SQLite database path")
 	_ = fs.String("config", defaultConfigPath(), "TOML config file (reserved for v2.1)")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	if err := fs.Parse(args); err != nil {
@@ -87,9 +88,19 @@ func run(args []string) int {
 	}
 
 	logger := log.New(os.Stderr, "velsigner-server: ", log.LstdFlags|log.Lmicroseconds)
-	// Store is nil in scaffold commit 1 — handlers return placeholders.
-	// Commit 2 wires this to a sqlite-backed implementation.
-	srv := velsignerserver.NewServer(apiKey, nil, logger)
+
+	// SQLite store. Open creates the file + applies the schema on
+	// first run; subsequent starts no-op. The file's containing dir
+	// must exist and be writable by the velsigner-server user
+	// (install/deploy.sh provisions /var/lib/velsigner-server).
+	db, err := store.Open(*dbPath)
+	if err != nil {
+		logf("open store: %v", err)
+		return 1
+	}
+	defer func() { _ = db.Close() }()
+
+	srv := velsignerserver.NewServer(apiKey, db, logger)
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

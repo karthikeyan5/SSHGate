@@ -5,6 +5,9 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/karthikeyan5/sshgate/src/velsigner-server/store"
 )
 
 // Server is the hosted velsigner-server HTTP handler. It owns the route
@@ -22,10 +25,17 @@ type Server struct {
 	// per-client keys + WebAuthn/TOTP for the human approval surface.
 	APIKey string
 
-	// Store is the persistence layer. v2.0 ships a SQLite-backed
-	// implementation (commit 2 of the scaffold series); v2.0 commit 1
-	// runs against a nil Store and returns canned placeholders.
-	Store Store
+	// Store is the persistence layer. Scaffold commit 2 wires this to
+	// a sqlite-backed implementation in store/sqlite.go. When nil,
+	// the /v1/sign and /v1/poll handlers fall back to in-memory
+	// placeholder behaviour (kept for backward-compat with the
+	// commit-1 test fixtures + smoke runs without a DB file).
+	Store store.Store
+
+	// PollWait bounds the long-poll wait inside /v1/poll/{id}. The
+	// HTTP client may pass a shorter wait via ?wait= (v2.1); for now
+	// this is the only knob. Defaults to 30s in NewServer.
+	PollWait time.Duration
 
 	// Logger receives one line per request (method, path, status,
 	// duration). Defaults to log.Default() if nil.
@@ -34,22 +44,13 @@ type Server struct {
 	mux *http.ServeMux
 }
 
-// Store is the persistence interface used by handlers. Defined here
-// (rather than imported from the store package) so server.go has no
-// dependency on a concrete backend. The store/ package's exported
-// Store type embeds this minimal contract.
-//
-// Commit 2 of the scaffold series fills this in and wires it into
-// handlers; in commit 1 the field is unused.
-type Store interface{}
-
 // NewServer builds a Server with routes registered. The Server's
 // ServeHTTP method is safe for concurrent use.
 //
 // auth is the bearer token; passing the empty string is a programming
 // error (the server would let every request through) and panics so the
 // mistake surfaces during test setup, not in production traffic.
-func NewServer(auth string, store Store, logger *log.Logger) *Server {
+func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 	if auth == "" {
 		panic("velsignerserver: NewServer: APIKey is required")
 	}
@@ -57,10 +58,11 @@ func NewServer(auth string, store Store, logger *log.Logger) *Server {
 		logger = log.Default()
 	}
 	s := &Server{
-		APIKey: auth,
-		Store:  store,
-		Logger: logger,
-		mux:    http.NewServeMux(),
+		APIKey:   auth,
+		Store:    st,
+		PollWait: 30 * time.Second,
+		Logger:   logger,
+		mux:      http.NewServeMux(),
 	}
 	s.routes()
 	return s

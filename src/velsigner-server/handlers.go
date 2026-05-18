@@ -1,9 +1,13 @@
 package velsignerserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/velsigner-server/store"
 )
 
 // signRequest is the body shape of POST /v1/sign. It mirrors the
@@ -83,9 +87,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-// handleSign accepts a /v1/sign request. v2.0 SCAFFOLD: parse the body,
-// generate a request_id, return 202 with the poll URL. The actual
-// store insert + approval workflow lands in scaffold commit 2.
+// handleSign accepts a /v1/sign request. Validates the body, inserts
+// a pending row in the store, returns 202 with the poll URL. When
+// Store is nil the handler skips persistence (commit-1 fallback).
+//
+// Approval itself is OUT of scope for v2.0 scaffold: there is no
+// human-in-the-loop yet (no web UI, no WebAuthn). Rows stay pending
+// until either an external mechanism flips them via UpdateStatus or
+// /v1/poll times out. v2.1 wires the approval UI.
 func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	var req signRequest
 	dec := json.NewDecoder(r.Body)
@@ -113,46 +122,140 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Placeholder: emit a stable-looking request_id so test clients
-	// can assert the shape. Scaffold commit 2 replaces this with a
-	// store-inserted row.
 	rid := generateRequestID()
+
+	if s.Store != nil {
+		// Re-encode the commands as canonical JSON so the stored
+		// blob matches what /v1/audit will serve back. We use the
+		// validated req.Commands rather than r.Body so any
+		// pretty-printed/whitespace-laden inputs normalise.
+		blob, err := json.Marshal(req.Commands)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "marshal commands: "+err.Error())
+			return
+		}
+		insertCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		ins := &store.Request{
+			RequestID: rid,
+			Status:    store.StatusPending,
+			ClientID:  req.ClientID,
+			Commands:  blob,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := s.Store.Insert(insertCtx, ins); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "store insert: "+err.Error())
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusAccepted, signAcceptedResponse{
 		RequestID: rid,
 		PollURL:   "/v1/poll/" + rid,
 	})
 }
 
-// handlePoll long-polls for a resolution. v2.0 SCAFFOLD: returns 200
-// with {status: "timeout"} after a short delay. Scaffold commit 2
-// wires this to Store.WaitForResolution against the SQLite store.
+// handlePoll long-polls for a resolution via Store.WaitForResolution.
+// When Store is nil the handler returns {status: "timeout"} after a
+// short synthetic wait (kept for commit-1 fallback test fixtures).
+//
+// The wait window is s.PollWait (default 30s) for now; v2.1 will
+// honour a ?wait= query param per spec §"v2 vision → Wire protocol".
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	rid := r.PathValue("request_id")
 	if rid == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing request_id in path")
 		return
 	}
-	// v2.0 scaffold: no real backing store yet. We honour ctx.Done()
-	// so a client disconnect doesn't pin a goroutine; otherwise we
-	// return "timeout" after a brief synthetic wait. The 100ms wait
-	// makes long-poll behaviour visible in tests without slowing the
-	// suite.
-	select {
-	case <-time.After(100 * time.Millisecond):
-	case <-r.Context().Done():
-		// Client gave up; nothing to write — context is cancelled.
+
+	if s.Store == nil {
+		// Commit-1 fallback path. The 100ms synthetic wait keeps
+		// long-poll behaviour visible without slowing the suite.
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		writeJSON(w, http.StatusOK, pollResponse{
+			RequestID: rid,
+			Status:    "timeout",
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, pollResponse{
-		RequestID: rid,
-		Status:    "timeout",
-	})
+
+	res, err := s.Store.WaitForResolution(r.Context(), rid, s.PollWait)
+	if err != nil {
+		// Distinguish not-found (the only well-defined error in
+		// the spec) from generic infrastructure failures.
+		if isNotFound(err) {
+			writeJSONError(w, http.StatusNotFound, "unknown request_id")
+			return
+		}
+		// ctx cancellation surfaces as context.Canceled — the
+		// client has gone, so writing a response is best-effort.
+		writeJSONError(w, http.StatusInternalServerError, "wait: "+err.Error())
+		return
+	}
+
+	resp := pollResponse{
+		RequestID:  res.RequestID,
+		Status:     string(res.Status),
+		ApprovedBy: res.ApprovedBy,
+		ApprovedAt: res.ResolvedAt,
+	}
+	if res.Status == store.StatusPending {
+		// The poll window elapsed without a resolution. Report
+		// "timeout" to the client; the row itself remains pending
+		// in the store so a future poll can resume.
+		resp.Status = string(store.StatusTimeout)
+	} else if res.Status == store.StatusApproved && len(res.Signatures) > 0 {
+		var sigs []signedCmd
+		if err := json.Unmarshal(res.Signatures, &sigs); err == nil {
+			resp.Signatures = sigs
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleAudit returns the recent audit list. v2.0 SCAFFOLD: returns
-// an empty list. Scaffold commit 2 wires Store.RecentAudit.
-func (s *Server) handleAudit(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, auditResponse{Entries: []auditEntry{}})
+// handleAudit returns the recent audit list. When Store is nil the
+// handler returns an empty list (commit-1 fallback).
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if s.Store == nil {
+		writeJSON(w, http.StatusOK, auditResponse{Entries: []auditEntry{}})
+		return
+	}
+	rows, err := s.Store.RecentAudit(r.Context(), 100)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "audit: "+err.Error())
+		return
+	}
+	out := auditResponse{Entries: make([]auditEntry, 0, len(rows))}
+	for _, row := range rows {
+		var cmdObjs []signRequestCmd
+		_ = json.Unmarshal(row.Commands, &cmdObjs)
+		cmds := make([]string, len(cmdObjs))
+		for i, c := range cmdObjs {
+			cmds[i] = c.Cmd
+		}
+		out.Entries = append(out.Entries, auditEntry{
+			RequestID:  row.RequestID,
+			Status:     string(row.Status),
+			ClientID:   row.ClientID,
+			Commands:   cmds,
+			ApprovedBy: row.ApprovedBy,
+			CreatedAt:  row.CreatedAt,
+			ResolvedAt: row.ResolvedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// isNotFound is a thin alias for errors.Is against the store's
+// not-found sentinel — kept inline so handlers.go expresses the
+// transport-layer mapping ("404 if and only if the row was missing")
+// in one spot.
+func isNotFound(err error) bool {
+	return errors.Is(err, store.ErrNotFound)
 }
 
 // writeJSON marshals v and writes it with Content-Type set. Errors
