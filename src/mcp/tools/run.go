@@ -68,6 +68,12 @@ type Runner struct {
 	// passed to the daemon as ttl_seconds. Zero means
 	// DefaultWriteTTLSec.
 	WriteTTLSec int64
+
+	// AddServerCfg overrides the defaults used by AddServer (paths to
+	// the velgate binary, signing pubkey, and SSHGate dedicated
+	// pubkey). Tests inject this; production leaves it zero and the
+	// resolver populates each field from $XDG_CONFIG_HOME / env.
+	AddServerCfg AddServerConfig
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —

@@ -99,12 +99,17 @@ func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
 	return f.Sync()
 }
 
-// fingerprint returns the SHA256 fingerprint of key in the standard
-// OpenSSH "SHA256:..." form (no padding).
-func fingerprint(key ssh.PublicKey) string {
+// Fingerprint returns the SHA256 fingerprint of key in the standard
+// OpenSSH "SHA256:..." form (no padding). Exported because the
+// add_server tool reports it back to the operator after pinning.
+func Fingerprint(key ssh.PublicKey) string {
 	sum := sha256.Sum256(key.Marshal())
 	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
 }
+
+// fingerprint is kept as a package-local alias to avoid touching the
+// existing call sites.
+func fingerprint(key ssh.PublicKey) string { return Fingerprint(key) }
 
 // fingerprintFromKnown returns the SHA256 fingerprint of the first
 // known key, falling back to a placeholder if the slice is empty.

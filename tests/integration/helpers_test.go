@@ -249,6 +249,37 @@ func generateVelgateKeyPair(t *testing.T) (privPath, pubPath string) {
 	return privPath, pubPath
 }
 
+// generateStandaloneSSHKey creates a fresh Ed25519 SSH client keypair
+// in t.TempDir() and returns the private and public file paths. Unlike
+// generateSSHKey it does NOT touch the fixtures dir or the container —
+// it's used for the SSHGate-dedicated key in Phase-3 auto-setup tests.
+func generateStandaloneSSHKey(t *testing.T) (privPath, pubPath string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519: %v", err)
+	}
+	block, err := sshlib.MarshalPrivateKey(priv, "sshgate-dedicated")
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	dir := t.TempDir()
+	privPath = filepath.Join(dir, "sshgate_ed25519")
+	if err := os.WriteFile(privPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("write private key: %v", err)
+	}
+	sshPub, err := sshlib.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("ssh.NewPublicKey: %v", err)
+	}
+	pubBytes := sshlib.MarshalAuthorizedKey(sshPub)
+	pubPath = filepath.Join(dir, "sshgate_ed25519.pub")
+	if err := os.WriteFile(pubPath, pubBytes, 0o644); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	return privPath, pubPath
+}
+
 // buildVelgateLinux cross-compiles velgate for linux/amd64 into
 // <repoRoot>/bin/velgate-linux-amd64 and returns its path. We invoke
 // `go build` directly rather than `make velgate-linux` so the test

@@ -58,6 +58,11 @@ const ToolName = "run"
 // surface name is "mcp__sshgate__run_batch".
 const ToolNameRunBatch = "run_batch"
 
+// ToolNameAddServer registers a new server alias with auto-setup
+// (uploads velgate, rewrites authorized_keys, verifies). Claude Code's
+// surface name is "mcp__sshgate__add_server".
+const ToolNameAddServer = "add_server"
+
 // Server is the MCP front-end. It owns a single tool implementation
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
@@ -96,6 +101,17 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolNameRunBatch,
 		Description: "Run a sequence of shell commands on a registered server. Reads run directly; all writes are bundled into a single approval (one Telegram tap). stop_on_error defaults to true.",
 	}, s.runBatchHandler)
+
+	// add_server — auto-setup. Bootstraps via the operator's existing
+	// SSH access (key file path or ssh-agent), uploads velgate, rewrites
+	// authorized_keys with command="..." forcing for the SSHGate
+	// dedicated key, verifies via the VELGATE_OK probe, and registers
+	// the alias. Idempotent — re-add on a server with the canonical
+	// restricted entry already in place skips the rewrite.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameAddServer,
+		Description: "Register a new server alias and install velgate on it. Bootstrap leg uses your existing SSH access (bootstrap_key_path or bootstrap_agent=true). Auto-setup uploads velgate + signing key, rewrites authorized_keys, verifies via the VELGATE_OK probe, then atomically registers the alias.",
+	}, s.addServerHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -146,6 +162,23 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	}, out, nil
 }
 
+// addServerHandler is the typed tool handler for add_server. Errors
+// surface as MCP tool errors (IsError=true) so Claude can see exactly
+// why setup failed; on success the structured AddServerOutput carries
+// the captured host fingerprint and the remote binary path.
+func (s *Server) addServerHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.AddServerInput) (*mcpsdk.CallToolResult, tools.AddServerOutput, error) {
+	out, err := s.Runner.AddServer(ctx, in)
+	if err != nil {
+		s.Logger.Printf("add_server alias=%s err=%v", in.Alias, err)
+		return nil, tools.AddServerOutput{}, err
+	}
+	s.Logger.Printf("add_server alias=%s host=%s port=%d user=%s fp=%s idempotent=%v",
+		out.Alias, out.Host, out.Port, out.User, out.Fingerprint, out.Idempotent)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatAddServerSummary(out)}},
+	}, out, nil
+}
+
 // formatRunSummary returns a short human-readable summary of out for
 // fallback TextContent. Stdout/stderr are truncated to keep the
 // chat-side log compact; structured content carries the full output.
@@ -188,6 +221,25 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n[...truncated]"
+}
+
+// formatAddServerSummary renders a short human summary for the
+// fallback TextContent block. Structured output carries the full
+// AddServerOutput.
+func formatAddServerSummary(out tools.AddServerOutput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "added %s (%s@%s:%d)", out.Alias, out.User, out.Host, out.Port)
+	if out.Idempotent {
+		b.WriteString(" [idempotent: existing restricted entry detected]")
+	}
+	if out.Fingerprint != "" {
+		fmt.Fprintf(&b, "\nhost fingerprint: %s", out.Fingerprint)
+	}
+	if out.BinaryPath != "" {
+		fmt.Fprintf(&b, "\nvelgate: %s", out.BinaryPath)
+	}
+	fmt.Fprintf(&b, "\nverified_ok=%v", out.VerifiedOK)
+	return b.String()
 }
 
 // readerCloser / writerCloser adapt plain io.Reader / io.Writer to
