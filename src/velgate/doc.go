@@ -1,0 +1,21 @@
+// Package velgate implements the remote-side gate that runs on each
+// SSHGate-protected server. It is invoked by OpenSSH via
+// command="~/.velgate/velgate" forcing on the SSHGate dedicated key, so
+// every connection using that key is funnelled through this binary.
+//
+// The package exports three pieces used by both the cmd/velgate entry
+// point and the integration tests:
+//
+//   - VerifySigned parses a VELGATE_SIG: line, verifies its Ed25519
+//     signature against the bundled velgate.pub, and enforces the spec's
+//     time bounds. It returns the inner cmd string for execution.
+//   - Exec runs a shell command via /bin/sh -c, streaming stdout/stderr
+//     to the caller and forwarding SIGTERM/SIGINT to the child.
+//   - LoadPubKey loads the Ed25519 public key from a file, refusing to
+//     read it if the mode is more permissive than 0644.
+//
+// All operator-side log messages are written to stderr with the
+// "velgate: " prefix; stdout is reserved for the executed inner
+// command's stdout. Exit codes follow BSD sysexits where applicable
+// (see cmd/velgate/main.go).
+package velgate
