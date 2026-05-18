@@ -160,3 +160,38 @@ WRITE	curl --data "k=v" https://example.com
 # Unknown commands default to write.
 WRITE	frobnicate --foo
 WRITE	madeupbinary arg1 arg2
+
+# --- v1.1 Task B: refined pipe/chain segment classification ---
+# All-read pipelines/chains are now READ (v1 used to flag these as WRITE).
+READ	cat /etc/hosts | grep foo
+READ	ps aux | head -5
+READ	ls /tmp | wc -l
+READ	journalctl -u nginx | tail -20
+READ	df -h ; free -m
+READ	uptime && uname -a
+READ	cat /tmp/x|grep foo
+# Output redirects keep the chain a WRITE even if every command in it is a read.
+WRITE	cat /etc/hosts > /tmp/copy
+WRITE	echo hi | tee -a /tmp/foo
+# Command and process substitution are opaque → fail-safe WRITE.
+WRITE	ls $(rm /tmp/x)
+WRITE	echo `whoami`
+WRITE	diff <(ls /a) <(ls /b)
+WRITE	tee >(cat) < /dev/null
+
+# --- v1.1 Task B: tightened git/wget/curl rules (Mi3, Mi4) ---
+WRITE	git stash
+WRITE	git stash push
+WRITE	git stash pop
+WRITE	git restore main.go
+WRITE	git switch main
+WRITE	git config --set user.name alice
+READ	git stash list
+READ	git stash show stash@{0}
+READ	git config --get user.name
+WRITE	wget https://example.com/file.tar
+READ	wget -O- https://example.com/cfg
+READ	wget --output-document=- https://example.com/cfg
+WRITE	curl -o /tmp/x https://example.com
+WRITE	curl --output /tmp/x https://example.com
+READ	curl https://example.com/api/status

@@ -90,8 +90,10 @@ func hasPrintable(s string) bool {
 	return false
 }
 
-// containsSubstitution reports whether s contains a $(...) or backtick
-// command substitution at top level (outside quotes).
+// containsSubstitution reports whether s contains a command substitution
+// (`$(...)` or backticks) or a process substitution (`<(...)`, `>(...)`)
+// at top level (outside quotes). Any such construct is opaque to the
+// classifier and routes the whole command through the gate.
 func containsSubstitution(s string) bool {
 	var quote byte
 	for i := 0; i < len(s); i++ {
@@ -108,6 +110,16 @@ func containsSubstitution(s string) bool {
 		case '`':
 			return true
 		case '$':
+			if i+1 < len(s) && s[i+1] == '(' {
+				return true
+			}
+		case '<', '>':
+			// Process substitution: `<(cmd)` or `>(cmd)`. We must NOT
+			// confuse `>(` with the output redirect `>` — the redirect
+			// check runs separately via hasTopLevelRedirect, and a bare
+			// `>` followed by anything other than `(` is a redirect, not
+			// a process substitution. Here we only flag the `<(` / `>(`
+			// pair.
 			if i+1 < len(s) && s[i+1] == '(' {
 				return true
 			}
@@ -407,8 +419,10 @@ func sedRule(args []string) Kind {
 	return KindRead
 }
 
-// curlRule: `curl` is read unless it specifies a write HTTP method or
-// carries a request body (-d/--data...).
+// curlRule: `curl` is read unless it specifies a write HTTP method,
+// carries a request body (-d/--data...), or writes the response body
+// to a local file (-o FILE / --output FILE / -O / --remote-name).
+// `curl -o -` (stdout) stays read.
 func curlRule(args []string) Kind {
 	for i, a := range args {
 		switch a {
@@ -422,11 +436,24 @@ func curlRule(args []string) Kind {
 		case "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
 			"-F", "--form", "-T", "--upload-file":
 			return KindWrite
+		case "-o", "--output":
+			// `-o FILE` writes to disk; `-o -` is stdout (still read).
+			if i+1 < len(args) && args[i+1] != "-" {
+				return KindWrite
+			}
+		case "-O", "--remote-name", "--remote-name-all":
+			// `-O` saves to a filename derived from the URL.
+			return KindWrite
 		}
 		if strings.HasPrefix(a, "--data=") || strings.HasPrefix(a, "--data-raw=") ||
 			strings.HasPrefix(a, "--data-binary=") || strings.HasPrefix(a, "--data-urlencode=") ||
 			strings.HasPrefix(a, "--form=") {
 			return KindWrite
+		}
+		if strings.HasPrefix(a, "--output=") {
+			if strings.TrimPrefix(a, "--output=") != "-" {
+				return KindWrite
+			}
 		}
 		if strings.HasPrefix(a, "-X") && len(a) > 2 {
 			m := strings.ToUpper(a[2:])
@@ -438,14 +465,34 @@ func curlRule(args []string) Kind {
 	return KindRead
 }
 
-// wgetRule: `wget` is read for the simple "download to stdout" form;
-// anything else (saving to disk by default, --post-data, etc.) is write.
-// The corpus exercise is `wget -q -O- <url>`.
+// wgetRule: `wget URL` defaults to saving the response to `./URL.tail`
+// on disk — that is a write to the local filesystem. Per code-review Mi4
+// the read-side form requires explicit stdout output: `-O-` (or its long
+// form `--output-document=-`). Anything else — including bare URLs and
+// any --post-data / --method=POST/PUT/DELETE/PATCH — is write.
 func wgetRule(args []string) Kind {
-	// Treat any --post-data / --method=POST as write; otherwise read.
-	for _, a := range args {
-		if a == "--post-data" || strings.HasPrefix(a, "--post-data=") ||
-			a == "--post-file" || strings.HasPrefix(a, "--post-file=") {
+	stdoutOutput := false
+	for i, a := range args {
+		switch {
+		case a == "-O-", a == "--output-document=-":
+			stdoutOutput = true
+		case a == "-O", a == "--output-document":
+			// Explicit output file: read only if the operand is `-`.
+			if i+1 < len(args) && args[i+1] == "-" {
+				stdoutOutput = true
+			} else {
+				return KindWrite
+			}
+		case strings.HasPrefix(a, "--output-document="):
+			// Already handled the "=-" exact case above; any other value
+			// names a file and is a write.
+			return KindWrite
+		case strings.HasPrefix(a, "-O") && len(a) > 2:
+			// Combined short flag like `-Ofile` or `-O-`. `-O-` matched
+			// the exact-equals case above; `-O<anything>` else is a file.
+			return KindWrite
+		case a == "--post-data", strings.HasPrefix(a, "--post-data="),
+			a == "--post-file", strings.HasPrefix(a, "--post-file="):
 			return KindWrite
 		}
 		if strings.HasPrefix(a, "--method=") {
@@ -455,7 +502,10 @@ func wgetRule(args []string) Kind {
 			}
 		}
 	}
-	return KindRead
+	if stdoutOutput {
+		return KindRead
+	}
+	return KindWrite
 }
 
 // systemctlRule: only inspection subcommands are read. Anything that can
@@ -495,22 +545,69 @@ func dockerRule(args []string) Kind {
 	return KindWrite
 }
 
-// gitRule: read-only porcelain only. Anything that updates refs, the index,
-// or the working tree is write.
+// gitRule: read-only porcelain only. Anything that updates refs, the
+// index, or the working tree is write. Per code-review Mi3 we treat
+// `git stash` (and its mutating subcommands) as write; only the
+// inspection subcommands `stash list` / `stash show` are read.
+// `git config --set` (and write-side variants like --unset/--add) are
+// write; `git config --get` and bare `git config <name>` are read.
 func gitRule(args []string) Kind {
 	sub := firstNonFlag(args)
 	switch sub {
 	case "status", "log", "diff", "show", "branch",
-		"blame", "describe", "config", "remote",
-		"rev-parse", "ls-files", "ls-remote", "shortlog",
-		"stash":
-		// `git branch -d`, `git config --set`, and `git stash push` exist
-		// and are writes — but the v1 corpus only exercises read forms and
-		// the spec lists branch/log/diff/show/status as read. We accept
-		// the false-negative risk here and keep the rule simple.
+		"blame", "describe", "remote",
+		"rev-parse", "ls-files", "ls-remote", "shortlog":
+		// `git branch -d/-D` is a write, but the corpus doesn't exercise
+		// it and detecting requires arg scanning across the porcelain.
+		// Acceptable v1.1 tradeoff — caller still sees the command and
+		// the Telegram approval is one tap away if they pass -d.
 		return KindRead
+	case "stash":
+		return gitStashKind(args)
+	case "config":
+		return gitConfigKind(args)
 	}
 	return KindWrite
+}
+
+// gitStashKind classifies `git stash <sub>`. Bare `git stash` is
+// shorthand for `git stash push` (mutating). Only `list` and `show`
+// are read-only inspection.
+func gitStashKind(args []string) Kind {
+	// Find the subcommand after "stash" (skipping flags).
+	seen := false
+	for _, a := range args {
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		if !seen {
+			// This is "stash" itself.
+			seen = true
+			continue
+		}
+		switch a {
+		case "list", "show":
+			return KindRead
+		}
+		return KindWrite
+	}
+	// Bare `git stash` (no sub) — defaults to `stash push`, which is write.
+	return KindWrite
+}
+
+// gitConfigKind classifies `git config ...`. Write subflags
+// (--set/--unset/--add/--replace-all/--remove-section/--rename-section/
+// -e/--edit) mutate; --get/--get-all/--list/-l/--show-origin and bare
+// reads are read.
+func gitConfigKind(args []string) Kind {
+	for _, a := range args {
+		switch a {
+		case "--set", "--unset", "--unset-all", "--add", "--replace-all",
+			"--remove-section", "--rename-section", "-e", "--edit":
+			return KindWrite
+		}
+	}
+	return KindRead
 }
 
 // firstNonFlag returns the first arg that doesn't start with '-', or "".

@@ -45,6 +45,33 @@ func TestClassify_EdgeCases(t *testing.T) {
 		{"whitespace only", "   \t  ", KindUnknown},
 		{"null bytes only", "\x00\x00", KindUnknown},
 		{"very long unknown command", "frobnicate " + strings.Repeat("x", 10_000), KindWrite},
+
+		// v1.1 Task B: pipe/chain segment classification edge cases.
+		{"empty segments via double semicolon", "ls ;; cat /etc/hosts", KindRead},
+		{"trailing pipe is whitespace-eaten", "ls |", KindRead},
+		{"leading semicolon", "; ls -la", KindRead},
+		{"nested command substitution", "echo $(echo $(ls))", KindWrite},
+		{"backtick substitution", "echo `whoami`", KindWrite},
+		{"process substitution input", "diff <(ls /a) <(ls /b)", KindWrite},
+		{"process substitution output", "tee >(cat) < /dev/null", KindWrite},
+		{"mixed read pipe + write chain", "cat /tmp/x | tee /tmp/y && rm /tmp/z", KindWrite},
+		{"whitespace-tolerant pipe", "cat /tmp/x|grep foo", KindRead},
+		{"redirect inside chain still write", "ls && echo hi > /tmp/x", KindWrite},
+
+		// Mi3/Mi4 regression coverage.
+		{"git stash bare", "git stash", KindWrite},
+		{"git stash push -m", "git stash push -m wip", KindWrite},
+		{"git stash list", "git stash list", KindRead},
+		{"git stash show w/ ref", "git stash show stash@{0}", KindRead},
+		{"git config --set is write", "git config --set foo bar", KindWrite},
+		{"git config --get is read", "git config --get foo", KindRead},
+		{"wget bare URL is write", "wget https://example.com/file.tar", KindWrite},
+		{"wget -O- is read", "wget -O- https://example.com", KindRead},
+		{"wget -O file is write", "wget -O /tmp/x https://example.com", KindWrite},
+		{"wget --output-document=- is read", "wget --output-document=- https://example.com", KindRead},
+		{"curl -o /tmp/x is write", "curl -o /tmp/x https://example.com", KindWrite},
+		{"curl -o - is read", "curl -o - https://example.com", KindRead},
+		{"curl -O remote-name is write", "curl -O https://example.com/file.tar", KindWrite},
 	}
 
 	for _, tc := range cases {
