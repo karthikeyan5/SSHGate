@@ -74,6 +74,12 @@ type Runner struct {
 	// pubkey). Tests inject this; production leaves it zero and the
 	// resolver populates each field from $XDG_CONFIG_HOME / env.
 	AddServerCfg AddServerConfig
+
+	// VelsignerSockPath is the absolute path to the velsigner Unix
+	// socket. Status() dials this path to report velsigner reachability;
+	// other tools route through Sign (which carries its own SocketPath).
+	// Production wires the same path into both.
+	VelsignerSockPath string
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —

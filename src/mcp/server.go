@@ -63,6 +63,15 @@ const ToolNameRunBatch = "run_batch"
 // surface name is "mcp__sshgate__add_server".
 const ToolNameAddServer = "add_server"
 
+// ToolNameListServers lists registered server aliases with their
+// connection details. Claude Code's surface name is
+// "mcp__sshgate__list_servers".
+const ToolNameListServers = "list_servers"
+
+// ToolNameStatus reports velsigner-socket and per-server reachability.
+// Claude Code's surface name is "mcp__sshgate__status".
+const ToolNameStatus = "status"
+
 // Server is the MCP front-end. It owns a single tool implementation
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
@@ -112,6 +121,18 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolNameAddServer,
 		Description: "Register a new server alias and install velgate on it. Bootstrap leg uses your existing SSH access (bootstrap_key_path or bootstrap_agent=true). Auto-setup uploads velgate + signing key, rewrites authorized_keys, verifies via the VELGATE_OK probe, then atomically registers the alias.",
 	}, s.addServerHandler)
+
+	// list_servers — returns every registered alias with its host/port/user.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameListServers,
+		Description: "List every registered SSHGate server (alias, host, port, user, added_at). Output is sorted alphabetically by alias.",
+	}, s.listServersHandler)
+
+	// status — health probe of velsigner and every registered server.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameStatus,
+		Description: "Report velsigner-socket reachability and per-server SSH reachability (via the VELGATE_OK probe). Server probes run in parallel with a short timeout.",
+	}, s.statusHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -221,6 +242,70 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n[...truncated]"
+}
+
+// listServersHandler is the typed handler for sshgate.list_servers.
+// The structured ListServersOutput carries the alphabetically-sorted
+// registry contents; the TextContent fallback is a one-line summary.
+func (s *Server) listServersHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.ListServersInput) (*mcpsdk.CallToolResult, tools.ListServersOutput, error) {
+	out, err := s.Runner.ListServers(ctx, in)
+	if err != nil {
+		s.Logger.Printf("list_servers err=%v", err)
+		return nil, tools.ListServersOutput{}, err
+	}
+	s.Logger.Printf("list_servers total=%d", out.Total)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatListServersSummary(out)}},
+	}, out, nil
+}
+
+// statusHandler is the typed handler for sshgate.status. Per-target
+// failures are returned as part of the structured output; only a true
+// configuration error (nil dependency) surfaces as an MCP tool error.
+func (s *Server) statusHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.StatusInput) (*mcpsdk.CallToolResult, tools.StatusOutput, error) {
+	out, err := s.Runner.Status(ctx, in)
+	if err != nil {
+		s.Logger.Printf("status err=%v", err)
+		return nil, tools.StatusOutput{}, err
+	}
+	s.Logger.Printf("status velsigner_reachable=%v servers=%d", out.VelsignerSocket.Reachable, len(out.Servers))
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatStatusSummary(out)}},
+	}, out, nil
+}
+
+// formatListServersSummary returns a compact human listing for the
+// fallback TextContent block. Structured content carries the full
+// ListServersOutput.
+func formatListServersSummary(out tools.ListServersOutput) string {
+	if out.Total == 0 {
+		return "no registered servers"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d server(s):", out.Total)
+	for _, s := range out.Servers {
+		fmt.Fprintf(&b, "\n  %s  %s@%s:%d", s.Alias, s.User, s.Host, s.Port)
+	}
+	return b.String()
+}
+
+// formatStatusSummary renders a short health summary for the fallback
+// TextContent block. Structured content carries the full StatusOutput.
+func formatStatusSummary(out tools.StatusOutput) string {
+	var b strings.Builder
+	if out.VelsignerSocket.Reachable {
+		fmt.Fprintf(&b, "velsigner: reachable (%s)", out.VelsignerSocket.Path)
+	} else {
+		fmt.Fprintf(&b, "velsigner: UNREACHABLE (%s): %s", out.VelsignerSocket.Path, out.VelsignerSocket.Error)
+	}
+	for _, sv := range out.Servers {
+		if sv.Reachable {
+			fmt.Fprintf(&b, "\n  %s: ok %dms", sv.Alias, sv.PingMS)
+		} else {
+			fmt.Fprintf(&b, "\n  %s: DOWN %s", sv.Alias, sv.Error)
+		}
+	}
+	return b.String()
 }
 
 // formatAddServerSummary renders a short human summary for the

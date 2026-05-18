@@ -103,7 +103,12 @@ func run(args []string) int {
 
 	signer := &signpkg.Client{SocketPath: socketPath, Timeout: signTimeout}
 	sshClient := &sshpkg.Client{KeyPath: keyPath, KnownHostsPath: khPath, Timeout: sshTimeout}
-	runner := &tools.Runner{Servers: servers, Sign: signer, SSH: sshClient}
+	runner := &tools.Runner{
+		Servers:           servers,
+		Sign:              signer,
+		SSH:               sshClient,
+		VelsignerSockPath: socketPath,
+	}
 
 	server := &mcp.Server{Runner: runner, Logger: logger}
 
