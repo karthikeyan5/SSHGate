@@ -31,7 +31,7 @@ READ	uname -a
 READ	hostname
 READ	whoami
 READ	id
-READ	groups karthi
+READ	groups testuser
 READ	ps aux
 READ	top -b -n 1
 READ	pgrep -f nginx

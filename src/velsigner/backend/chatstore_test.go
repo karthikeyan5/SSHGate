@@ -76,7 +76,7 @@ func TestFileChatStore_SaveLoadRoundtrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := &backend.FileChatStore{Path: filepath.Join(dir, "peer.json")}
-	if err := s.Save(12345678); err != nil {
+	if err := s.Save(99999999); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	id, ok, err := s.Load()
@@ -86,8 +86,8 @@ func TestFileChatStore_SaveLoadRoundtrip(t *testing.T) {
 	if !ok {
 		t.Fatal("ok = false after Save")
 	}
-	if id != 12345678 {
-		t.Errorf("id = %d; want 12345678", id)
+	if id != 99999999 {
+		t.Errorf("id = %d; want 99999999", id)
 	}
 }
 

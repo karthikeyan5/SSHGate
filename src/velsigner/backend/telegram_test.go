@@ -264,7 +264,9 @@ func (f *fakeTelegram) callbackAnswersSnapshot() []callbackAnswer {
 
 // --- helpers for the actual tests ---------------------------------------
 
-const allowedUserID = int64(12345678)
+// Test constants — synthetic values chosen so the codebase is publish-safe.
+// AllowedUserID in production is operator-configured via velsigner config.
+const allowedUserID = int64(77777777)
 const allowedChatID = int64(99999999)
 
 func newTestBackend(t *testing.T, fake *fakeTelegram, store backend.ChatStore, reqTimeout time.Duration) *backend.TelegramBackend {
