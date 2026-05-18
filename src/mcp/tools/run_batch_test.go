@@ -153,8 +153,10 @@ func TestRunBatch_AllWrites_OneSignCall(t *testing.T) {
 		if sign.gotCmds[i].Cmd != want {
 			t.Errorf("sign.gotCmds[%d].Cmd=%q; want %q", i, sign.gotCmds[i].Cmd, want)
 		}
-		if sign.gotCmds[i].Server != "1.2.3.4" {
-			t.Errorf("sign.gotCmds[%d].Server=%q; want %q", i, sign.gotCmds[i].Server, "1.2.3.4")
+		// Spec defines Server as the registered alias, not the host
+		// (audit M7).
+		if sign.gotCmds[i].Server != "h1" {
+			t.Errorf("sign.gotCmds[%d].Server=%q; want %q (alias, not host)", i, sign.gotCmds[i].Server, "h1")
 		}
 		if sign.gotCmds[i].TTLSec != 60 {
 			t.Errorf("sign.gotCmds[%d].TTLSec=%d; want 60", i, sign.gotCmds[i].TTLSec)

@@ -109,8 +109,12 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	var writeIdx []int
 	for i, cmd := range in.Commands {
 		if kinds[i] == classify.KindWrite {
+			// Spec defines CmdReq.Server as the registered alias
+			// (recorded in the velsigner audit log), not the
+			// underlying hostname. Passing the alias keeps audit-log
+			// archaeology stable across hostname changes.
 			writeCmds = append(writeCmds, signpkg.CmdReq{
-				Server: entry.Host,
+				Server: in.Alias,
 				Cmd:    cmd,
 				TTLSec: BatchWriteTTLSec,
 			})

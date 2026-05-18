@@ -126,7 +126,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	case classify.KindRead:
 		return r.runRead(ctx, entry, in.Command)
 	case classify.KindWrite:
-		return r.runWrite(ctx, entry, in.Command)
+		return r.runWrite(ctx, in.Alias, entry, in.Command)
 	default:
 		return RunOutput{}, fmt.Errorf("tools: unexpected classification %v", kind)
 	}
@@ -147,7 +147,7 @@ func (r *Runner) runRead(ctx context.Context, e registry.Entry, cmd string) (Run
 	}, nil
 }
 
-func (r *Runner) runWrite(ctx context.Context, e registry.Entry, cmd string) (RunOutput, error) {
+func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string) (RunOutput, error) {
 	ttl := r.WriteTTLSec
 	if ttl <= 0 {
 		ttl = DefaultWriteTTLSec
@@ -156,7 +156,11 @@ func (r *Runner) runWrite(ctx context.Context, e registry.Entry, cmd string) (Ru
 	if err != nil {
 		return RunOutput{Kind: "write"}, fmt.Errorf("tools: request id: %w", err)
 	}
-	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: e.Host, Cmd: cmd, TTLSec: ttl}})
+	// Spec defines CmdReq.Server as the registered alias (recorded in
+	// the velsigner audit log), not the underlying hostname. Passing
+	// the alias keeps audit-log archaeology stable across hostname
+	// changes and matches the format the audit-log examples use.
+	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl}})
 	if err != nil {
 		// Preserve the sentinel for the MCP layer.
 		return RunOutput{Kind: "write"}, fmt.Errorf("tools: sign: %w", err)

@@ -261,6 +261,34 @@ func TestDaemon_ConcurrentRequestsDontCross(t *testing.T) {
 	wg.Wait()
 }
 
+func TestDaemon_AuditRecordsServerFieldVerbatim(t *testing.T) {
+	t.Parallel()
+	// Regression for audit M7: the wire `server` field must be
+	// recorded verbatim in the audit log's Servers slot. Tools/run
+	// is responsible for passing the alias rather than the host;
+	// this test pins the daemon side of that contract so a future
+	// daemon refactor can't silently mangle the field.
+	mock := backend.NewMockBackend()
+	d, _, audit, auditPath := newDaemon(t, mock)
+	defer audit.Close()
+	mock.Approve("r_alias1", "karthi")
+
+	const wantAlias = "prod-db"
+	req := `{"kind":"sign","request_id":"r_alias1","commands":[{"server":"` + wantAlias + `","cmd":"systemctl restart nginx","ttl_seconds":60}]}`
+	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest: %v", err)
+	}
+	audit.Close()
+	got := readAudit(t, auditPath)
+	if len(got) != 1 {
+		t.Fatalf("audit rows = %d; want 1", len(got))
+	}
+	if len(got[0].Servers) != 1 || got[0].Servers[0] != wantAlias {
+		t.Errorf("audit Servers = %v; want [%q] (the wire 'server' field, which the MCP-side spec defines as the alias)", got[0].Servers, wantAlias)
+	}
+}
+
 // failingWriter accepts a write of any size for the request line on
 // the read side, but returns an io.ErrClosedPipe from Write so the
 // daemon's response write fails. Used to exercise the audit-on-

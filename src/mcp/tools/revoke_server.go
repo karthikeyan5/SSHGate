@@ -78,8 +78,10 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 	if err != nil {
 		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: request id: %w", err)
 	}
+	// Spec defines CmdReq.Server as the registered alias (recorded
+	// in the velsigner audit log), not the underlying hostname.
 	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{
-		Server: entry.Host,
+		Server: in.Alias,
 		Cmd:    "VELGATE_REVOKE",
 		TTLSec: RevokeTTLSec,
 	}})
