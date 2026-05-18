@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -84,9 +85,21 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.Path, err)
 	}
-	// Mode 0660 so a peer in the velsigner group can dial. We chmod
-	// explicitly because net.Listen honours umask and may produce 0755
-	// on systems with a permissive umask.
+	// Tighten mode to 0660 via Fchmod on the listener's underlying FD
+	// rather than os.Chmod on the path. net.Listen creates the socket
+	// inode honouring umask (typically 0o022 → mode 0755), which is
+	// briefly more permissive than we want before a path-based
+	// os.Chmod runs (bind-then-chmod TOCTOU, daemon.md §4.5). Fchmod
+	// is atomic relative to the inode and avoids the path-resolution
+	// race; we don't go through syscall.Umask because that mutates
+	// process-global state and would race with concurrent tests / any
+	// other goroutine creating files. The path-based os.Chmod stays
+	// as belt-and-braces in case a Linux variant (or future Go
+	// runtime) ignores Fchmod on AF_UNIX inodes.
+	if err := chmodListenerFD(ln, 0o660); err != nil {
+		ln.Close()
+		return fmt.Errorf("fchmod socket: %w", err)
+	}
 	if err := os.Chmod(s.Path, 0o660); err != nil {
 		ln.Close()
 		return fmt.Errorf("chmod socket: %w", err)
@@ -159,4 +172,36 @@ func (s *Server) serveOne(ctx context.Context, conn net.Conn, timeout time.Durat
 		// response (if any) was the handler's responsibility.
 		fmt.Fprintf(os.Stderr, "velsigner: handler: %v\n", err)
 	}
+}
+
+// chmodListenerFD applies mode to the inode behind ln by reaching
+// the listener's underlying FD via SyscallConn and calling
+// syscall.Fchmod. The FD path is atomic relative to the path lookup
+// os.Chmod would do, closing the bind-then-chmod TOCTOU window.
+//
+// We deliberately use SyscallConn rather than UnixListener.File()
+// here: File() returns a duplicated os.File whose Fd() forces the
+// underlying socket into blocking mode, which breaks the
+// ctx-cancel-driven accept-loop shutdown. SyscallConn.Control gives
+// us the raw int FD without that side effect.
+func chmodListenerFD(ln net.Listener, mode os.FileMode) error {
+	ul, ok := ln.(*net.UnixListener)
+	if !ok {
+		return fmt.Errorf("not a *net.UnixListener: %T", ln)
+	}
+	rc, err := ul.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("syscall conn: %w", err)
+	}
+	var fchmodErr error
+	ctrlErr := rc.Control(func(fd uintptr) {
+		fchmodErr = syscall.Fchmod(int(fd), uint32(mode))
+	})
+	if ctrlErr != nil {
+		return fmt.Errorf("control: %w", ctrlErr)
+	}
+	if fchmodErr != nil {
+		return fmt.Errorf("fchmod: %w", fchmodErr)
+	}
+	return nil
 }

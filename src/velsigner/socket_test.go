@@ -105,6 +105,14 @@ func TestSocketServer_FileModeIs0660(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o660 {
 		t.Errorf("socket mode = %#o; want 0660", got)
 	}
+	// Defence-in-depth: under no circumstances should the socket be
+	// world-readable or world-writable, even briefly. Server.Listen
+	// fchmods the listener's FD before any goroutine can dial; this
+	// assertion catches a future regression that drops the Fchmod
+	// step and leaves only the (umask-permissive) path-based chmod.
+	if mode := info.Mode().Perm(); mode&0o007 != 0 {
+		t.Errorf("socket mode = %#o has world bits set; want world bits cleared", mode)
+	}
 }
 
 func TestSocketServer_ConcurrentClients(t *testing.T) {
