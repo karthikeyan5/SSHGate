@@ -54,6 +54,10 @@ const ServerName = "sshgate"
 // Claude Code's surface name is "mcp__sshgate__run".
 const ToolName = "run"
 
+// ToolNameRunBatch is the un-namespaced batch tool name. Claude Code's
+// surface name is "mcp__sshgate__run_batch".
+const ToolNameRunBatch = "run_batch"
+
 // Server is the MCP front-end. It owns a single tool implementation
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
@@ -85,6 +89,13 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolName,
 		Description: "Run a shell command on a registered server. Read commands run directly; write commands request human approval (a Telegram tap) before running.",
 	}, s.runHandler)
+
+	// run_batch — same approval engine, but one Telegram tap covers
+	// the whole batch of writes (reads stay direct).
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameRunBatch,
+		Description: "Run a sequence of shell commands on a registered server. Reads run directly; all writes are bundled into a single approval (one Telegram tap). stop_on_error defaults to true.",
+	}, s.runBatchHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -119,6 +130,22 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 	}, out, nil
 }
 
+// runBatchHandler is the typed tool handler for run_batch. The Runner
+// returns a structured RunBatchOutput either way (approved, denied,
+// timed-out, or unreachable) — only a true infrastructure error (nil
+// runner, unknown alias, etc.) is surfaced as a Go error.
+func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RunBatchInput) (*mcpsdk.CallToolResult, tools.RunBatchOutput, error) {
+	out, err := s.Runner.RunBatch(ctx, in)
+	if err != nil {
+		s.Logger.Printf("run_batch alias=%s err=%v", in.Alias, err)
+		return nil, tools.RunBatchOutput{}, err
+	}
+	s.Logger.Printf("run_batch alias=%s n=%d approved=%v denied=%v reason=%s", in.Alias, len(out.Results), out.Approved, out.Denied, out.Reason)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatRunBatchSummary(out)}},
+	}, out, nil
+}
+
 // formatRunSummary returns a short human-readable summary of out for
 // fallback TextContent. Stdout/stderr are truncated to keep the
 // chat-side log compact; structured content carries the full output.
@@ -133,6 +160,25 @@ func formatRunSummary(out tools.RunOutput) string {
 	}
 	if out.Stderr != "" {
 		fmt.Fprintf(&b, "\n--- stderr ---\n%s", truncate(out.Stderr, 2000))
+	}
+	return b.String()
+}
+
+// formatRunBatchSummary renders a short human summary of a batch
+// outcome for the fallback TextContent block. Structured content
+// carries the full per-command stdout/stderr/exit.
+func formatRunBatchSummary(out tools.RunBatchOutput) string {
+	var b strings.Builder
+	if out.Denied {
+		fmt.Fprintf(&b, "batch denied (%s) on %s", out.Reason, out.Server)
+		return b.String()
+	}
+	fmt.Fprintf(&b, "batch on %s: %d command(s), approved=%v", out.Server, len(out.Results), out.Approved)
+	for i, r := range out.Results {
+		fmt.Fprintf(&b, "\n[%d] %s exit=%d", i, r.Kind, r.ExitCode)
+		if r.Skipped {
+			fmt.Fprintf(&b, " (skipped)")
+		}
 	}
 	return b.String()
 }

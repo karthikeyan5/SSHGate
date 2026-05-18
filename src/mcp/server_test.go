@@ -76,6 +76,16 @@ func connectInProcess(t *testing.T, server *mcp.Server) (*mcpsdk.ClientSession, 
 		}
 		return nil, out, nil
 	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameRunBatch,
+		Description: "Run a batch of shell commands on a registered server.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RunBatchInput) (*mcpsdk.CallToolResult, tools.RunBatchOutput, error) {
+		out, err := server.Runner.RunBatch(ctx, in)
+		if err != nil {
+			return nil, tools.RunBatchOutput{}, err
+		}
+		return nil, out, nil
+	})
 	if _, err := sdkServer.Connect(ctx, serverT, nil); err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -124,7 +134,7 @@ func TestServer_InitializeReportsName(t *testing.T) {
 	}
 }
 
-func TestServer_ListToolsReturnsRunTool(t *testing.T) {
+func TestServer_ListToolsReturnsBothTools(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
 	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
@@ -136,18 +146,24 @@ func TestServer_ListToolsReturnsRunTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(res.Tools) != 1 {
-		t.Fatalf("got %d tools; want 1", len(res.Tools))
+	if len(res.Tools) != 2 {
+		t.Fatalf("got %d tools; want 2", len(res.Tools))
 	}
-	tool := res.Tools[0]
-	if tool.Name != mcp.ToolName {
-		t.Errorf("Name = %q; want %q", tool.Name, mcp.ToolName)
+	byName := make(map[string]bool, len(res.Tools))
+	for _, tool := range res.Tools {
+		if tool.Description == "" {
+			t.Errorf("tool %q: Description is empty", tool.Name)
+		}
+		if tool.InputSchema == nil {
+			t.Errorf("tool %q: InputSchema is nil", tool.Name)
+		}
+		byName[tool.Name] = true
 	}
-	if tool.Description == "" {
-		t.Error("Description is empty")
+	if !byName[mcp.ToolName] {
+		t.Errorf("missing tool %q", mcp.ToolName)
 	}
-	if tool.InputSchema == nil {
-		t.Error("InputSchema is nil")
+	if !byName[mcp.ToolNameRunBatch] {
+		t.Errorf("missing tool %q", mcp.ToolNameRunBatch)
 	}
 }
 
