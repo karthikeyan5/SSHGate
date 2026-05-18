@@ -72,6 +72,12 @@ const ToolNameListServers = "list_servers"
 // Claude Code's surface name is "mcp__sshgate__status".
 const ToolNameStatus = "status"
 
+// ToolNameRevokeServer tears down a registered server: signs and ships
+// VELGATE_REVOKE, lets velgate strip itself from authorized_keys and
+// remove ~/.velgate/, then removes the alias from the registry. Claude
+// Code's surface name is "mcp__sshgate__revoke_server".
+const ToolNameRevokeServer = "revoke_server"
+
 // Server is the MCP front-end. It owns a single tool implementation
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
@@ -133,6 +139,13 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolNameStatus,
 		Description: "Report velsigner-socket reachability and per-server SSH reachability (via the VELGATE_OK probe). Server probes run in parallel with a short timeout.",
 	}, s.statusHandler)
+
+	// revoke_server — signs VELGATE_REVOKE, ships it, removes the alias
+	// from the registry once velgate confirms the on-host teardown.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameRevokeServer,
+		Description: "Revoke a registered server. Signs VELGATE_REVOKE (one approval), velgate strips its authorized_keys line and removes ~/.velgate/, MCP removes the alias. Backup kept at ~/.ssh/authorized_keys.sshgate-revoke-backup.",
+	}, s.revokeServerHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -242,6 +255,37 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n[...truncated]"
+}
+
+// revokeServerHandler is the typed handler for sshgate.revoke_server.
+// Sign denials/timeouts and SSH/registry errors surface as MCP tool
+// errors (IsError=true) so Claude can see exactly why the revoke
+// failed; on success the structured RevokeServerOutput carries the
+// confirmation message printed by velgate.
+func (s *Server) revokeServerHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RevokeServerInput) (*mcpsdk.CallToolResult, tools.RevokeServerOutput, error) {
+	out, err := s.Runner.RevokeServer(ctx, in)
+	if err != nil {
+		s.Logger.Printf("revoke_server alias=%s err=%v", in.Alias, err)
+		return nil, out, err
+	}
+	s.Logger.Printf("revoke_server alias=%s remote_cleaned=%v registry_removed=%v",
+		out.Alias, out.RemoteCleaned, out.RegistryRemoved)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatRevokeServerSummary(out)}},
+	}, out, nil
+}
+
+// formatRevokeServerSummary renders a short human summary for the
+// fallback TextContent block. Structured output carries the full
+// RevokeServerOutput.
+func formatRevokeServerSummary(out tools.RevokeServerOutput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "revoked %s: remote_cleaned=%v registry_removed=%v",
+		out.Alias, out.RemoteCleaned, out.RegistryRemoved)
+	if out.Message != "" {
+		fmt.Fprintf(&b, "\nvelgate: %s", out.Message)
+	}
+	return b.String()
 }
 
 // listServersHandler is the typed handler for sshgate.list_servers.

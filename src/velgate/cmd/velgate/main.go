@@ -86,12 +86,10 @@ func run() int {
 		innerCmd = ic
 	}
 
-	// Stubbed administrative commands. Only valid when signed.
+	// Administrative commands. Only valid when signed.
 	if signed {
 		if innerCmd == "VELGATE_REVOKE" {
-			// TODO(task 4.2): delete authorized_keys line + ~/.velgate.
-			logf("VELGATE_REVOKE not yet implemented (task 4.2)")
-			return exitGeneric
+			return doRevoke()
 		}
 		if strings.HasPrefix(innerCmd, "VELGATE_UPDATE ") {
 			// TODO(v1.1): fetch + verify + replace the velgate binary.
@@ -148,6 +146,42 @@ func pubKeyPath() (string, error) {
 	}
 	dir := filepath.Dir(exe)
 	return filepath.Join(dir, "velgate.pub"), nil
+}
+
+// doRevoke performs the on-host teardown half of a revoke. It locates
+// the velgate install directory relative to os.Executable() (so the
+// SSHGate dedicated key, which is the only one routed here, controls
+// exactly its own line in authorized_keys), runs velgate.Revoke, and
+// prints a single VELGATE_REVOKED status line to stdout on success.
+// The MCP side detects that prefix as confirmation.
+//
+// Exit codes:
+//
+//	0  — revoke succeeded (lines may or may not have matched; both are
+//	     legitimate, the dir is gone either way)
+//	1  — could not resolve paths or rewrite authorized_keys
+func doRevoke() int {
+	exe, err := os.Executable()
+	if err != nil {
+		logf("revoke: os.Executable: %v", err)
+		return exitGeneric
+	}
+	velgateDir := filepath.Dir(exe)
+	binaryPath := exe
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		logf("revoke: home dir: %v", err)
+		return exitGeneric
+	}
+
+	res, err := velgate.Revoke(home, velgateDir, binaryPath)
+	if err != nil {
+		logf("revoke: %v", err)
+		return exitGeneric
+	}
+	fmt.Println(velgate.FormatRevokeStdout(res))
+	return exitOK
 }
 
 // logf writes a single line to stderr with the "velgate: " prefix.
