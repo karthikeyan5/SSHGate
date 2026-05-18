@@ -164,10 +164,21 @@ systemctl is-active velsigner
 ### 8. Capture chat_id from `/start`
 
 Open Telegram, find the bot you created in step 5 (search the
-username), and send it `/start`. velsigner's polling loop captures
-the chat_id and writes it to `/var/lib/velsigner/config/peer.json`.
+username you gave to BotFather), and send it `/start`. velsigner's
+polling loop captures the chat_id and writes it to
+`/var/lib/velsigner/config/peer.json`.
 
-Confirm:
+**Expected reply on Telegram:**
+
+> Linked — SSHGate approvals will now reach you here.
+
+If you see that text in the bot DM, the link succeeded. If you sent
+`/start` from a Telegram account whose user_id does not match
+`allowed_user_id`, the bot replies with "this bot only serves
+…" and silently drops the message — velsigner stays in the
+unlinked state.
+
+Confirm on the laptop side:
 
 ```bash
 sudo cat /var/lib/velsigner/config/peer.json
@@ -180,9 +191,14 @@ If nothing appears after ~30 seconds, check the logs:
 journalctl -u velsigner -n 30 --no-pager
 ```
 
-Common causes: wrong bot token (401 from `getMe`), your phone hasn't
-actually sent the message yet, or the daemon never reached the
-polling step (look for `telegram backend ready` in the log).
+What to look for in the log:
+
+- `telegram backend ready` — the daemon reached its polling loop.
+- `/start: linked chat_id=NNN for user_id=NNN` — capture succeeded.
+- `/start from unauthorized user_id=NNN ignored` — wrong Telegram
+  account; check `allowed_user_id` matches your @userinfobot reply.
+- `401 Unauthorized` from `getMe` / `getUpdates` — the bot token is
+  wrong or was revoked in BotFather.
 
 ### 9. Validate
 
