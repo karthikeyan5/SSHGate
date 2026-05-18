@@ -1,13 +1,22 @@
 .PHONY: all build test test-integration vet clean velgate-linux \
-	sshgate-mcp-darwin velsigner-darwin darwin cross
+	sshgate-mcp-darwin velsigner-darwin darwin cross velsigner-server
 
 all: vet test build
 
-build:
+build: velsigner-server
 	mkdir -p bin
 	go build -o bin/sshgate-mcp ./src/mcp/cmd/sshgate-mcp
 	go build -o bin/velsigner   ./src/velsigner/cmd/velsigner
 	go build -o bin/velgate     ./src/velgate/cmd/velgate
+
+# velsigner-server: v2 hosted approval daemon (scaffold). Built into
+# bin/ alongside the v1 binaries so a single `make build` produces
+# every component the operator might deploy. Production VPS installs
+# normally use install/deploy.sh, which re-builds at the deploy path;
+# this target is for laptop-side dev + cross-compile parity.
+velsigner-server:
+	mkdir -p bin
+	go build -o bin/velsigner-server ./src/velsigner-server/cmd/velsigner-server
 
 # Cross-compile velgate for the remote host (linux/amd64). Static, stripped, reproducible-ish.
 velgate-linux:
