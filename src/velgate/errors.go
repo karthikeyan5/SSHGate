@@ -19,7 +19,7 @@ var (
 	ErrExpired = errors.New("signature expired")
 
 	// ErrValidityTooLong means the signed command's validity window
-	// (exp-ts) exceeds common.MaxSigValidity. This caps the blast
+	// (exp-ts) exceeds sigwire.MaxSigValidity. This caps the blast
 	// radius of an approved signature and is enforced even if the
 	// signature itself is valid.
 	ErrValidityTooLong = errors.New("signature validity window too long")

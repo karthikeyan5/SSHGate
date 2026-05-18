@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // VerifySigned parses line as a VELGATE_SIG envelope, verifies its
@@ -14,7 +14,7 @@ import (
 // bounds:
 //
 //   - exp must be strictly greater than now (now >= exp ⇒ ErrExpired)
-//   - exp - ts must not exceed common.MaxSigValidity
+//   - exp - ts must not exceed sigwire.MaxSigValidity
 //   - the inner cmd must be non-empty
 //
 // On success, the inner cmd string is returned for execution. On
@@ -23,10 +23,10 @@ import (
 // ErrEmptyCmd) so callers can match with errors.Is.
 //
 // VerifySigned is the only correct way to unwrap a VELGATE_SIG line —
-// callers MUST NOT execute the inner cmd from common.DecodeSigned
+// callers MUST NOT execute the inner cmd from sigwire.DecodeSigned
 // alone, because DecodeSigned does not verify the signature.
 func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time) (innerCmd string, err error) {
-	sig, payload, err := common.DecodeSigned(line)
+	sig, payload, err := sigwire.DecodeSigned(line)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrBadFormat, err)
 	}
@@ -54,7 +54,7 @@ func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time) (innerCm
 		return "", ErrExpired
 	}
 	validity := time.Duration(payload.Exp-payload.TS) * time.Second
-	if validity > common.MaxSigValidity {
+	if validity > sigwire.MaxSigValidity {
 		return "", ErrValidityTooLong
 	}
 	return payload.Cmd, nil

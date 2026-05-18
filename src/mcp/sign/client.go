@@ -37,7 +37,7 @@ type Client struct {
 // CmdReq is a single command in a sign request. Server is the alias
 // from the MCP registry (recorded in the audit log); Cmd is the
 // literal shell command; TTLSec is the signature validity window in
-// seconds (bounded by common.MaxSigValidity on the daemon side).
+// seconds (bounded by sigwire.MaxSigValidity on the daemon side).
 type CmdReq struct {
 	Server string
 	Cmd    string

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // batchSign is a batch-aware Sign fake. It records every sign call so
@@ -75,8 +75,8 @@ func makeSignedFor(t *testing.T, writeCmds []string) []signpkg.Signed {
 	t.Helper()
 	out := make([]signpkg.Signed, len(writeCmds))
 	for i, c := range writeCmds {
-		payload := common.SigPayload{Cmd: c, TS: 1, Exp: 60, Nonce: "n"}
-		wire, err := common.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+		payload := sigwire.SigPayload{Cmd: c, TS: 1, Exp: 60, Nonce: "n"}
+		wire, err := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
 		if err != nil {
 			t.Fatal(err)
 		}

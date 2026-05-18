@@ -1,4 +1,4 @@
-package common
+package sigwire
 
 import (
 	"encoding/base64"

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/velsigner"
 	"github.com/karthikeyan5/sshgate/src/velsigner/backend"
 )
@@ -90,11 +90,11 @@ func TestDaemon_ApprovePath_SignaturesVerify(t *testing.T) {
 
 	// Each sig must verify with the public key.
 	for i, s := range resp.Signatures {
-		if !common.IsSigned(s.Sig) {
+		if !sigwire.IsSigned(s.Sig) {
 			t.Errorf("sig %d missing prefix: %q", i, s.Sig)
 			continue
 		}
-		sig, payload, err := common.DecodeSigned(s.Sig)
+		sig, payload, err := sigwire.DecodeSigned(s.Sig)
 		if err != nil {
 			t.Errorf("decode sig %d: %v", i, err)
 			continue

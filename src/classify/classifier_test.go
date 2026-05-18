@@ -1,4 +1,4 @@
-package common
+package classify
 
 import (
 	"bufio"

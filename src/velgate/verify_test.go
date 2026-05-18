@@ -9,20 +9,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/velgate"
 )
 
 // signedLine signs a SigPayload with priv and returns the wire string
-// produced by common.EncodeSigned. Test helper — not for production use.
-func signedLine(t *testing.T, priv ed25519.PrivateKey, p common.SigPayload) string {
+// produced by sigwire.EncodeSigned. Test helper — not for production use.
+func signedLine(t *testing.T, priv ed25519.PrivateKey, p sigwire.SigPayload) string {
 	t.Helper()
 	pb, err := json.Marshal(p)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
 	sig := ed25519.Sign(priv, pb)
-	line, err := common.EncodeSigned(sig, p)
+	line, err := sigwire.EncodeSigned(sig, p)
 	if err != nil {
 		t.Fatalf("encode signed: %v", err)
 	}
@@ -46,8 +46,8 @@ func TestVerifySigned(t *testing.T) {
 
 	now := time.Unix(1_700_000_000, 0)
 
-	mkPayload := func(cmd string, ts, exp time.Time) common.SigPayload {
-		return common.SigPayload{
+	mkPayload := func(cmd string, ts, exp time.Time) sigwire.SigPayload {
+		return sigwire.SigPayload{
 			Cmd:   cmd,
 			TS:    ts.Unix(),
 			Exp:   exp.Unix(),
@@ -100,7 +100,7 @@ func TestVerifySigned(t *testing.T) {
 
 	t.Run("validity window too long", func(t *testing.T) {
 		// exp - ts = 10 minutes > MaxSigValidity (5 min)
-		p := mkPayload("df -h", now, now.Add(common.MaxSigValidity+1*time.Second))
+		p := mkPayload("df -h", now, now.Add(sigwire.MaxSigValidity+1*time.Second))
 		line := signedLine(t, priv, p)
 		_, err := velgate.VerifySigned(line, pub, now)
 		if !errors.Is(err, velgate.ErrValidityTooLong) {
@@ -110,7 +110,7 @@ func TestVerifySigned(t *testing.T) {
 
 	t.Run("validity window at the edge is accepted", func(t *testing.T) {
 		// exp - ts == MaxSigValidity exactly is fine
-		p := mkPayload("df -h", now, now.Add(common.MaxSigValidity))
+		p := mkPayload("df -h", now, now.Add(sigwire.MaxSigValidity))
 		line := signedLine(t, priv, p)
 		inner, err := velgate.VerifySigned(line, pub, now)
 		if err != nil {
@@ -130,7 +130,7 @@ func TestVerifySigned(t *testing.T) {
 		// Build a tampered payload object with a different cmd.
 		tampered := p
 		tampered.Cmd = "rm -rf /"
-		line, err := common.EncodeSigned(sig, tampered)
+		line, err := sigwire.EncodeSigned(sig, tampered)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -146,7 +146,7 @@ func TestVerifySigned(t *testing.T) {
 		_, otherPriv := genKey(t)
 		pb, _ := json.Marshal(p)
 		sig := ed25519.Sign(otherPriv, pb)
-		line, err := common.EncodeSigned(sig, p)
+		line, err := sigwire.EncodeSigned(sig, p)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -167,12 +167,12 @@ func TestVerifySigned(t *testing.T) {
 	})
 
 	t.Run("empty cmd in payload", func(t *testing.T) {
-		// common.DecodeSigned rejects empty cmd at the wire layer; we
+		// sigwire.DecodeSigned rejects empty cmd at the wire layer; we
 		// expect VerifySigned to surface that as ErrBadFormat (the wire
 		// envelope is malformed) — payload-level empty-cmd would surface
 		// as ErrEmptyCmd if DecodeSigned didn't catch it. Either is
 		// acceptable so long as the call fails; we accept both.
-		p := common.SigPayload{
+		p := sigwire.SigPayload{
 			Cmd:   "",
 			TS:    now.Add(-1 * time.Second).Unix(),
 			Exp:   now.Add(60 * time.Second).Unix(),
@@ -180,7 +180,7 @@ func TestVerifySigned(t *testing.T) {
 		}
 		pb, _ := json.Marshal(p)
 		sig := ed25519.Sign(priv, pb)
-		line, err := common.EncodeSigned(sig, p)
+		line, err := sigwire.EncodeSigned(sig, p)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}

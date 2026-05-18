@@ -36,7 +36,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/classify"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/velgate"
 )
 
@@ -75,7 +76,7 @@ func run() int {
 	}
 
 	// Decide whether the inbound line is signed.
-	signed := common.IsSigned(raw)
+	signed := sigwire.IsSigned(raw)
 	innerCmd := raw
 	if signed {
 		ic, err := velgate.VerifySigned(raw, pubkey, time.Now())
@@ -98,12 +99,12 @@ func run() int {
 		}
 	}
 
-	kind := common.Classify(innerCmd)
+	kind := classify.Classify(innerCmd)
 	switch kind {
-	case common.KindRead:
+	case classify.KindRead:
 		return execChild(innerCmd)
-	case common.KindWrite, common.KindUnknown:
-		// Fail-safe: unknown is treated as write (common.Classify
+	case classify.KindWrite, classify.KindUnknown:
+		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
 		// empty/whitespace cmd is the only KindUnknown that can reach
 		// here, and we treat that as denied too).

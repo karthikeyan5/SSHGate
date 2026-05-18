@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // fakeSign is a Runner.Sign stub. signCalled records whether Sign was
@@ -112,8 +112,8 @@ func TestRun_WriteCommandSignsThenSSH(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now()})
 	// Build a realistic signed wire string.
-	payload := common.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc"}
-	wire, err := common.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+	payload := sigwire.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc"}
+	wire, err := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
 	if err != nil {
 		t.Fatal(err)
 	}

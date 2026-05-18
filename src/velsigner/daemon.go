@@ -13,7 +13,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/velsigner/backend"
 )
 
@@ -115,8 +115,8 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl <= 0 {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds must be > 0", i))
 		}
-		if time.Duration(ttl)*time.Second > common.MaxSigValidity {
-			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(common.MaxSigValidity/time.Second)))
+		if time.Duration(ttl)*time.Second > sigwire.MaxSigValidity {
+			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
 		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl}
 	}
@@ -191,14 +191,14 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("nonce: %w", err)
 		}
-		payload := common.SigPayload{
+		payload := sigwire.SigPayload{
 			Cmd:   c.Cmd,
 			TS:    now,
 			Exp:   now + c.TTLSec,
 			Nonce: nonce,
 		}
 		// Sign the exact bytes that DecodeSigned will reconstruct on
-		// the verifier side; common.EncodeSigned + verify.go both go
+		// the verifier side; sigwire.EncodeSigned + verify.go both go
 		// through json.Marshal of SigPayload, so the byte sequence is
 		// stable.
 		signedBytes, err := jsonMarshal(payload)
@@ -206,7 +206,7 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 			return nil, fmt.Errorf("marshal payload: %w", err)
 		}
 		sig := ed25519.Sign(d.Key, signedBytes)
-		wire, err := common.EncodeSigned(sig, payload)
+		wire, err := sigwire.EncodeSigned(sig, payload)
 		if err != nil {
 			return nil, fmt.Errorf("encode: %w", err)
 		}

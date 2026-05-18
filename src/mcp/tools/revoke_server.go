@@ -30,7 +30,7 @@ type RevokeServerOutput struct {
 
 // RevokeTTLSec is the validity window we request when signing the
 // VELGATE_REVOKE command. Spec calls for 60s — long enough to cover
-// dial+exec, well under common.MaxSigValidity.
+// dial+exec, well under sigwire.MaxSigValidity.
 const RevokeTTLSec = 60
 
 // revokeStdoutMarker is the prefix velgate prints on successful revoke

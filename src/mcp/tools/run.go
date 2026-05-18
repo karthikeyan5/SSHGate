@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 )
@@ -83,7 +83,7 @@ type Runner struct {
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —
-// long enough to cover dial+exec, well under common.MaxSigValidity.
+// long enough to cover dial+exec, well under sigwire.MaxSigValidity.
 const DefaultWriteTTLSec = 120
 
 // Run resolves the alias from the registry, classifies the command,
@@ -117,15 +117,15 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 		return RunOutput{}, fmt.Errorf("tools: unknown server alias %q (check sshgate.list_servers)", in.Alias)
 	}
 
-	kind := common.Classify(in.Command)
+	kind := classify.Classify(in.Command)
 	switch kind {
-	case common.KindUnknown:
+	case classify.KindUnknown:
 		// The classifier reports KindUnknown only for empty/whitespace
 		// input — already handled above.
 		return RunOutput{}, fmt.Errorf("tools: could not classify command %q", in.Command)
-	case common.KindRead:
+	case classify.KindRead:
 		return r.runRead(ctx, entry, in.Command)
-	case common.KindWrite:
+	case classify.KindWrite:
 		return r.runWrite(ctx, entry, in.Command)
 	default:
 		return RunOutput{}, fmt.Errorf("tools: unexpected classification %v", kind)

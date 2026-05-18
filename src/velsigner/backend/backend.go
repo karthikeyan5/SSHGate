@@ -19,7 +19,7 @@ type ApprovalRequest struct {
 // CommandReq is a single command awaiting approval. Server is the human-
 // readable alias from the MCP's registry (e.g. "prod-db"); Cmd is the
 // literal shell command line; TTLSec is the spec's signature validity
-// window (`exp - ts`), bounded by common.MaxSigValidity (5 minutes).
+// window (`exp - ts`), bounded by sigwire.MaxSigValidity (5 minutes).
 type CommandReq struct {
 	Server string
 	Cmd    string

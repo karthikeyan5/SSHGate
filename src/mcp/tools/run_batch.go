@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/karthikeyan5/sshgate/src/common"
+	"github.com/karthikeyan5/sshgate/src/classify"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 )
 
@@ -49,7 +49,7 @@ type RunBatchOutput struct {
 
 // BatchWriteTTLSec is the per-command TTL used when building a bulk
 // sign request. The spec uses 60s for bulk; the velsigner caps this
-// against common.MaxSigValidity server-side anyway.
+// against sigwire.MaxSigValidity server-side anyway.
 const BatchWriteTTLSec = 60
 
 // RunBatch executes a sequence of commands against the alias's host.
@@ -95,12 +95,12 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 
 	// Classify all commands up front so we can decide whether to
 	// solicit approval.
-	kinds := make([]common.Kind, len(in.Commands))
+	kinds := make([]classify.Kind, len(in.Commands))
 	for i, c := range in.Commands {
 		if strings.TrimSpace(c) == "" {
 			return RunBatchOutput{}, fmt.Errorf("tools: commands[%d] is empty", i)
 		}
-		kinds[i] = common.Classify(c)
+		kinds[i] = classify.Classify(c)
 	}
 
 	// Build the (compact) list of writes plus their positions in the
@@ -108,7 +108,7 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	var writeCmds []signpkg.CmdReq
 	var writeIdx []int
 	for i, cmd := range in.Commands {
-		if kinds[i] == common.KindWrite {
+		if kinds[i] == classify.KindWrite {
 			writeCmds = append(writeCmds, signpkg.CmdReq{
 				Server: entry.Host,
 				Cmd:    cmd,
@@ -199,11 +199,11 @@ func classifySignErr(err error) string {
 // the batch path KindUnknown should never reach here (we rejected
 // blanks upstream), but if it ever did we'd label it "unknown" rather
 // than panic.
-func kindLabel(k common.Kind) string {
+func kindLabel(k classify.Kind) string {
 	switch k {
-	case common.KindRead:
+	case classify.KindRead:
 		return "read"
-	case common.KindWrite:
+	case classify.KindWrite:
 		return "write"
 	default:
 		return "unknown"
