@@ -1,0 +1,218 @@
+package sign
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net"
+	"os"
+	"time"
+)
+
+// ErrDenied is returned by Sign when velsigner replied with
+// status="denied".
+var ErrDenied = errors.New("sign: denied by operator")
+
+// ErrTimeout is returned by Sign when velsigner replied with
+// status="timeout" (or the Client.Timeout elapsed before a reply).
+var ErrTimeout = errors.New("sign: approval timed out")
+
+// ErrUnreachable is returned by Sign when the velsigner socket file
+// is missing, refusing connections, or unreachable for some other
+// transport-layer reason.
+var ErrUnreachable = errors.New("sign: velsigner unreachable")
+
+// Client is the velsigner socket client. SocketPath is the absolute
+// path to the Unix socket; Timeout is the total per-request budget
+// (dial + write + read), and must include velsigner's approval window
+// (60s default for Telegram in v2).
+type Client struct {
+	SocketPath string
+	Timeout    time.Duration
+}
+
+// CmdReq is a single command in a sign request. Server is the alias
+// from the MCP registry (recorded in the audit log); Cmd is the
+// literal shell command; TTLSec is the signature validity window in
+// seconds (bounded by common.MaxSigValidity on the daemon side).
+type CmdReq struct {
+	Server string
+	Cmd    string
+	TTLSec int64
+}
+
+// Signed is one signed result returned from velsigner on approval.
+// Cmd is the original command (echoed back so the caller can match
+// signatures to requests in order); Sig is the wire-encoded
+// "VELGATE_SIG:<sigB64>:<payloadB64>" string ready to prefix on the
+// remote command line.
+type Signed struct {
+	Cmd string
+	Sig string
+}
+
+// signRequestCmd is the JSON shape of a single command on the wire.
+// It must mirror velsigner's signRequestCmd exactly.
+type signRequestCmd struct {
+	Server string `json:"server"`
+	Cmd    string `json:"cmd"`
+	TTLSec int64  `json:"ttl_seconds"`
+}
+
+type signRequest struct {
+	Kind      string           `json:"kind"`
+	RequestID string           `json:"request_id"`
+	Commands  []signRequestCmd `json:"commands"`
+}
+
+type signResponseSig struct {
+	Cmd string `json:"cmd"`
+	Sig string `json:"sig"`
+}
+
+type signResponse struct {
+	RequestID  string            `json:"request_id"`
+	Status     string            `json:"status"`
+	Signatures []signResponseSig `json:"signatures,omitempty"`
+	Error      string            `json:"error,omitempty"`
+}
+
+// Sign sends a sign request for cmds and returns the signed wire
+// strings on approval, or one of {ErrDenied, ErrTimeout,
+// ErrUnreachable, fmt.Errorf("...")} on any other outcome.
+//
+// The request body is constructed locally (so the daemon never has
+// to trust the wire-level shape from the MCP).
+func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]Signed, error) {
+	if c.SocketPath == "" {
+		return nil, fmt.Errorf("sign: SocketPath is empty")
+	}
+	if requestID == "" {
+		return nil, fmt.Errorf("sign: requestID is empty")
+	}
+	if len(cmds) == 0 {
+		return nil, fmt.Errorf("sign: no commands")
+	}
+
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = 75 * time.Second // velsigner default approval window + slack
+	}
+
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, err := dialWithCtx(dialCtx, c.SocketPath)
+	if err != nil {
+		return nil, classifyDialError(err)
+	}
+	defer conn.Close()
+
+	// Apply the overall deadline to the connection.
+	deadline, _ := dialCtx.Deadline()
+	if !deadline.IsZero() {
+		_ = conn.SetDeadline(deadline)
+	}
+
+	// Propagate ctx cancellation: close the conn so any blocked
+	// Read/Write returns immediately. The watcher exits when the
+	// connection closes (the deferred Close above).
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}()
+
+	body := signRequest{
+		Kind:      "sign",
+		RequestID: requestID,
+		Commands:  make([]signRequestCmd, len(cmds)),
+	}
+	for i, cmd := range cmds {
+		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec}
+	}
+	wire, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("sign: marshal: %w", err)
+	}
+	wire = append(wire, '\n')
+	if _, err := conn.Write(wire); err != nil {
+		return nil, fmt.Errorf("sign: write: %w", err)
+	}
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadBytes('\n')
+	if err != nil {
+		// If ctx is the root cause, surface it verbatim so callers
+		// can distinguish cancellation from a malformed reply.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("sign: %w", ctxErr)
+		}
+		return nil, fmt.Errorf("sign: read response: %w", err)
+	}
+
+	var resp signResponse
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return nil, fmt.Errorf("sign: malformed response: %w", err)
+	}
+	if resp.RequestID != requestID {
+		return nil, fmt.Errorf("sign: response request_id %q != %q", resp.RequestID, requestID)
+	}
+
+	switch resp.Status {
+	case "approved":
+		out := make([]Signed, len(resp.Signatures))
+		for i, s := range resp.Signatures {
+			out[i] = Signed{Cmd: s.Cmd, Sig: s.Sig}
+		}
+		return out, nil
+	case "denied":
+		return nil, ErrDenied
+	case "timeout":
+		return nil, ErrTimeout
+	case "error":
+		if resp.Error == "" {
+			return nil, fmt.Errorf("sign: daemon reported error (no detail)")
+		}
+		return nil, fmt.Errorf("sign: daemon error: %s", resp.Error)
+	default:
+		return nil, fmt.Errorf("sign: unknown status %q", resp.Status)
+	}
+}
+
+// dialWithCtx wraps net.Dialer.DialContext with a "unix" network so
+// ctx cancellation aborts the dial.
+func dialWithCtx(ctx context.Context, path string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, "unix", path)
+}
+
+// classifyDialError maps a dial failure to ErrUnreachable when the
+// socket file is missing or the kernel returned "connection refused".
+// Any other error (e.g. ctx cancellation, permission denied) is
+// wrapped without the sentinel.
+func classifyDialError(err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: socket missing: %v", ErrUnreachable, err)
+	}
+	// ENOENT on the socket path comes back as *net.OpError wrapping
+	// *os.PathError on some kernels — check the message as a fallback.
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: socket missing: %v", ErrUnreachable, err)
+	}
+	// ECONNREFUSED indicates the socket file exists but no process
+	// is listening — classify as unreachable.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return fmt.Errorf("%w: dial: %v", ErrUnreachable, err)
+	}
+	return fmt.Errorf("sign: dial: %w", err)
+}
