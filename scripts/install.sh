@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
-# install.sh — copy SSHGate binaries to /usr/local and install the
-# hardened velsigner systemd unit.
+# install.sh — single-entry SSHGate installer (v1.1).
 #
-# Run from the SSHGate source tree root (the directory containing
-# `bin/velsigner` and `bin/velgate-linux-amd64`):
+# One idempotent pass that:
+#   1. Creates the `velsigner` system user (if missing).
+#   2. Creates the /var/lib/velsigner/ skeleton (idempotent).
+#   3. Adds the invoking user ($SUDO_USER) to the `velsigner` group.
+#   4. Copies binaries to /usr/local.
+#   5. Writes the hardened systemd unit (overwrites every run — the unit
+#      is the source of truth).
+#   6. Runs `velsigner --init` if the signing key is missing.
+#   7. Prompts for the Telegram bot token if the config selects the
+#      telegram backend and no token file exists yet (echo off).
+#   8. Enables + starts the unit and asserts it came up.
+#
+# Run from anywhere; the script resolves its repo root from $0. Expects:
+#
+#     <repo>/bin/sshgate-mcp
+#     <repo>/bin/velsigner
+#     <repo>/bin/velgate-linux-amd64
+#
+# Build them first with `make build` (or the three `go build` commands
+# in commands/setup.md).
 #
 #     sudo ./scripts/install.sh
 #
-# Idempotent. Re-running upgrades the binaries in place and restarts
-# the daemon. The systemd unit is overwritten every run so any drift
-# from a hand-edit is reset to the canonical hardened version.
-#
-# Prerequisites:
-#   - scripts/create-velsigner-user.sh has already been run (velsigner
-#     user exists; /var/lib/velsigner skeleton in place)
-#   - bin/velsigner and bin/velgate-linux-amd64 exist (build first)
+# Idempotent: re-running upgrades the binaries in place, restarts the
+# daemon, and repairs permissions on the state dir.
 #
 # Exit codes (per cli.md §2):
 #   0  success
@@ -31,29 +42,90 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     exit 77
 fi
 
-if ! getent passwd velsigner >/dev/null 2>&1; then
-    printf '[install] ERROR: velsigner user does not exist; run scripts/create-velsigner-user.sh first\n' >&2
-    exit 78
-fi
-
 # Resolve repo root from this script's location so the operator can
 # invoke install.sh from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+SSHGATE_MCP_BIN="$REPO_ROOT/bin/sshgate-mcp"
 VELSIGNER_BIN="$REPO_ROOT/bin/velsigner"
 VELGATE_BIN="$REPO_ROOT/bin/velgate-linux-amd64"
 
+# Probe binaries before touching the system (plugin.md §8.5 — external
+# tools probed with a clear error). We check sshgate-mcp too so a fresh
+# install doesn't half-succeed and leave the operator wondering why the
+# MCP server isn't there.
+for bin in "$SSHGATE_MCP_BIN" "$VELSIGNER_BIN" "$VELGATE_BIN"; do
+    if [ ! -f "$bin" ]; then
+        printf '[install] ERROR: %s not found; run `make build` first\n' "$bin" >&2
+        exit 66
+    fi
+done
 if [ ! -x "$VELSIGNER_BIN" ]; then
-    printf '[install] ERROR: %s not found or not executable; run go build first\n' "$VELSIGNER_BIN" >&2
-    exit 66
-fi
-if [ ! -f "$VELGATE_BIN" ]; then
-    printf '[install] ERROR: %s not found; run make velgate-linux first\n' "$VELGATE_BIN" >&2
+    printf '[install] ERROR: %s not executable\n' "$VELSIGNER_BIN" >&2
     exit 66
 fi
 
-# Step 1: install binaries.
+VELSIGNER_HOME="/var/lib/velsigner"
+VELSIGNER_RUN="/run/velsigner"
+
+# Step 1: create the system user (idempotent).
+if getent passwd velsigner >/dev/null 2>&1; then
+    log "user velsigner exists; skipping useradd"
+else
+    log "creating system user velsigner"
+    useradd \
+        --system \
+        --shell /usr/sbin/nologin \
+        --home-dir "$VELSIGNER_HOME" \
+        --create-home \
+        velsigner
+fi
+
+# Step 2: create the state-dir skeleton (idempotent — also repairs
+# perms on a re-run, so a half-broken state can be recovered).
+log "ensuring $VELSIGNER_HOME skeleton exists"
+mkdir -p \
+    "$VELSIGNER_HOME/keys" \
+    "$VELSIGNER_HOME/tokens" \
+    "$VELSIGNER_HOME/config" \
+    "$VELSIGNER_HOME/log" \
+    "$VELSIGNER_HOME/bin"
+
+chown -R velsigner:velsigner "$VELSIGNER_HOME"
+# 0750 (not 0700) so members of the velsigner group can traverse into
+# the home — the design point is that $SUDO_USER (added to the
+# velsigner group below) reads the audit log and peer.json without
+# sudo. 0700 would force every status probe back through sudo.
+chmod 0750 "$VELSIGNER_HOME"
+# Keys and tokens hold the signing material and bot token. Same mode
+# as the parent; the keystore enforces 0600 on the key file itself
+# (src/velsigner/keystore.go rejects looser modes on load), so this
+# directory mode protects against listing rather than reading.
+chmod 0750 "$VELSIGNER_HOME/keys" "$VELSIGNER_HOME/tokens"
+
+# Step 3: runtime dir for the unix socket. Volatile (lost on reboot),
+# but the unit's RuntimeDirectory=velsigner recreates it on every
+# start. We create it now so a CLI run before the unit is enabled
+# still works.
+log "ensuring $VELSIGNER_RUN exists"
+mkdir -p "$VELSIGNER_RUN"
+chown velsigner:velsigner "$VELSIGNER_RUN"
+chmod 0750 "$VELSIGNER_RUN"
+
+# Step 4: add the invoking user to the velsigner group so they can stat
+# the runtime dir, read the audit log, etc., without sudo.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    if id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx velsigner; then
+        log "$SUDO_USER already in velsigner group; skipping"
+    else
+        log "adding $SUDO_USER to velsigner group"
+        usermod -aG velsigner "$SUDO_USER"
+        log "you may need to log out and back in (or run 'newgrp velsigner') for group membership to take effect"
+    fi
+fi
+
+# Step 5: install binaries.
 log "installing velsigner -> /usr/local/bin/velsigner"
 install -m 0755 -o root -g root "$VELSIGNER_BIN" /usr/local/bin/velsigner
 
@@ -61,7 +133,7 @@ log "installing velgate-linux-amd64 -> /usr/local/share/sshgate/velgate-linux-am
 mkdir -p /usr/local/share/sshgate
 install -m 0755 -o root -g root "$VELGATE_BIN" /usr/local/share/sshgate/velgate-linux-amd64
 
-# Step 2: write the systemd unit. Always overwrite — the unit is the
+# Step 6: write the systemd unit. Always overwrite — the unit is the
 # source of truth, not whatever a previous install or hand-edit left.
 UNIT_PATH=/etc/systemd/system/velsigner.service
 log "writing systemd unit -> $UNIT_PATH"
@@ -100,15 +172,71 @@ WantedBy=multi-user.target
 UNIT
 chmod 0644 "$UNIT_PATH"
 
-# Step 3: reload + (re)start.
 log "systemctl daemon-reload"
 systemctl daemon-reload
 
-log "systemctl enable velsigner"
-systemctl enable velsigner
+# Step 7: initialise key material + skeleton config if missing.
+CONFIG_PATH="$VELSIGNER_HOME/config/config.toml"
+KEY_PATH="$VELSIGNER_HOME/keys/velgate.key"
+if [ ! -f "$KEY_PATH" ]; then
+    log "running velsigner --init (no signing key at $KEY_PATH)"
+    sudo -u velsigner /usr/local/bin/velsigner --init --config "$CONFIG_PATH"
+else
+    log "signing key already present; skipping --init"
+fi
 
-log "systemctl restart velsigner"
-systemctl restart velsigner
+# Step 8: prompt for the Telegram bot token if the config selects the
+# telegram backend and no token file exists yet. Echo is disabled
+# (read -rs) so the token never lands in shell history or scrollback.
+TOKEN_PATH="$VELSIGNER_HOME/tokens/telegram.token"
+if [ -f "$CONFIG_PATH" ] && grep -Eq '^[[:space:]]*type[[:space:]]*=[[:space:]]*"telegram"' "$CONFIG_PATH"; then
+    if [ -f "$TOKEN_PATH" ]; then
+        log "telegram bot token already present at $TOKEN_PATH; skipping prompt"
+    else
+        # Need a TTY on stdin to prompt safely; if not interactive, tell
+        # the user how to drop the token in by hand and continue (the
+        # daemon will fail to start, which is the correct loud failure).
+        if [ -t 0 ]; then
+            printf '\n'
+            printf '[install] backend.type = "telegram" but no token at %s.\n' "$TOKEN_PATH" >&2
+            printf '[install] Paste the BotFather token (input hidden), or press Enter to skip: ' >&2
+            IFS= read -rs TOKEN_VALUE || TOKEN_VALUE=""
+            printf '\n' >&2
+            if [ -n "$TOKEN_VALUE" ]; then
+                # Validate shape: <digits>:<base64-ish>. Refuse garbage so
+                # we don't write something useless to disk.
+                if printf '%s' "$TOKEN_VALUE" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$'; then
+                    printf '%s' "$TOKEN_VALUE" | install -m 0600 -o velsigner -g velsigner /dev/stdin "$TOKEN_PATH"
+                    log "wrote $TOKEN_PATH (mode 0600, owner velsigner)"
+                    unset TOKEN_VALUE
+                else
+                    unset TOKEN_VALUE
+                    printf '[install] ERROR: token did not match expected shape <digits>:<chars>; not written\n' >&2
+                    exit 78
+                fi
+            else
+                log "skipped token entry; place it manually before the daemon will start"
+            fi
+        else
+            log "no TTY on stdin; skipping bot-token prompt"
+            log "drop the token at $TOKEN_PATH (mode 0600 velsigner:velsigner) and re-run"
+        fi
+    fi
+fi
+
+# Step 9: enable + (re)start. Use --now so a fresh install starts the
+# daemon in one shot; if it was already running, restart picks up the
+# new binary.
+log "systemctl enable --now velsigner"
+systemctl enable --now velsigner
+
+# If the unit was already active we want the new binary loaded — issue
+# a restart so the installed binary actually replaces the running one.
+# (`enable --now` is a no-op on an already-active unit.)
+if systemctl is-active --quiet velsigner; then
+    log "systemctl restart velsigner (pick up new binary)"
+    systemctl restart velsigner
+fi
 
 # Give the unit a beat to either come up or fail visibly.
 sleep 1

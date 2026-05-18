@@ -50,135 +50,71 @@ cd "${CLAUDE_PLUGIN_ROOT}" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tr
 After each build, run `ls -la ${CLAUDE_PLUGIN_ROOT}/bin/<name>` and
 report the size. Three binaries should now exist in `bin/`.
 
-## Step 3 — Create the velsigner system user
+## Step 3 — Run the installer (first pass)
 
-Check whether the user already exists:
+`install.sh` is the single entry point. One idempotent pass creates the
+`velsigner` system user, the `/var/lib/velsigner/` skeleton, adds your
+account to the `velsigner` group, installs binaries to `/usr/local`,
+writes the hardened systemd unit, runs `--init` to generate the signing
+key + skeleton config (`type = "stub"` initially), and starts the
+daemon.
 
-```bash
-getent passwd velsigner
-```
-
-If the command exits 0, log "velsigner user already exists; skipping"
-and proceed to Step 4.
-
-Otherwise, **PAUSE** and tell the user verbatim:
+**PAUSE** and tell the user verbatim:
 
 > Open a separate terminal and run:
 >
->     sudo ${CLAUDE_PLUGIN_ROOT}/scripts/create-velsigner-user.sh
+>     sudo ${CLAUDE_PLUGIN_ROOT}/scripts/install.sh
 >
 > (replace `${CLAUDE_PLUGIN_ROOT}` with the actual path printed below).
 >
-> The script creates the `velsigner` system user, the
-> `/var/lib/velsigner/` state directory skeleton, and adds your user
-> account to the `velsigner` group. It's idempotent.
->
-> Tell me when it's done.
+> The script is idempotent — safe to re-run if it fails partway. Tell
+> me when it's done.
 
-Print the resolved path with `echo "${CLAUDE_PLUGIN_ROOT}/scripts/create-velsigner-user.sh"`
+Print the resolved path with `echo "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"`
 so the user can copy-paste it.
 
-After the user confirms, re-run `getent passwd velsigner` to verify.
-If it still fails, stop and surface the user's reported error.
-
-## Step 4 — Install binaries + initialise keys and config
-
-Copy the freshly-built binaries into their canonical locations.
-**PAUSE** and tell the user to run, in their sudo terminal:
+After confirmation, verify the daemon is up:
 
 ```bash
-sudo install -m 0755 ${CLAUDE_PLUGIN_ROOT}/bin/velsigner /usr/local/bin/velsigner
-sudo mkdir -p /usr/local/share/sshgate
-sudo install -m 0755 ${CLAUDE_PLUGIN_ROOT}/bin/velgate-linux-amd64 /usr/local/share/sshgate/velgate-linux-amd64
+systemctl is-active velsigner
 ```
 
-Wait for confirmation.
-
-Then check whether keys + config already exist:
+Expect `active`. If `failed` or `activating`, run:
 
 ```bash
-sudo test -f /var/lib/velsigner/keys/velgate.key && sudo test -f /var/lib/velsigner/config/config.toml
+journalctl -u velsigner -n 30 --no-pager
 ```
 
-If both exist (exit 0), log "keys + config already initialised; skipping
---init" and proceed to Step 5.
+…surface the output, and stop. You may also need to run `newgrp velsigner`
+(or log out and back in) before subsequent commands can read
+`/var/lib/velsigner/` without sudo.
 
-Otherwise tell the user to run:
+## Step 4 — Configure the Telegram backend
 
-```bash
-sudo -u velsigner /usr/local/bin/velsigner --init --config /var/lib/velsigner/config/config.toml
-```
-
-This generates `/var/lib/velsigner/keys/velgate.{key,pub}` and writes a
-skeleton TOML config. Wait for confirmation. If it fails because the
-config already exists but the keys don't (or vice versa), surface the
-error and ask the user to clean up by hand — do NOT auto-delete the
-config (it might contain hand edits worth preserving).
-
-## Step 5 — Telegram bot token
-
-Check whether the token file already exists:
-
-```bash
-sudo test -f /var/lib/velsigner/tokens/telegram.token
-```
-
-If yes (exit 0), log "bot token already present; skipping" and proceed
-to Step 6.
-
-Otherwise **PAUSE** and tell the user:
-
-> Create a new Telegram bot via @BotFather (https://t.me/BotFather):
-> send `/newbot`, pick a name, pick a username ending in `bot`. BotFather
-> replies with a token shaped like `7123456789:AAH...`.
->
-> Paste it here.
-
-Receive the token. Sanity-check: it should match `^[0-9]+:[A-Za-z0-9_-]+$`.
-If it doesn't, ask for it again — don't write garbage to the token file.
-
-Tell the user to run, in their sudo terminal (replacing `TOKEN` with
-the actual token they pasted):
-
-```bash
-sudo install -m 0600 -o velsigner -g velsigner /dev/stdin /var/lib/velsigner/tokens/telegram.token <<< 'TOKEN_VALUE_HERE'
-```
-
-Do NOT echo the token back in your own response. Wait for confirmation.
-
-Verify mode and ownership:
-
-```bash
-sudo stat -c '%a %U:%G' /var/lib/velsigner/tokens/telegram.token
-```
-
-Expect `600 velsigner:velsigner`. If wrong, ask the user to fix and
-re-run the stat.
-
-## Step 6 — Allowed Telegram user_id + chatstore path
+The `--init`-generated config has `type = "stub"`. To get phone-tap
+approvals you switch it to `telegram` and add the user_id + chatstore
+pointers.
 
 **PAUSE** and tell the user:
 
-> Find your numeric Telegram user_id (positive integer). Easiest way:
-> message @userinfobot on Telegram and copy the `Id:` line.
+> Find your numeric Telegram user_id. Easiest way: message @userinfobot
+> on Telegram and copy the `Id:` line.
 >
 > Paste it here.
 
 Receive the user_id. Sanity-check: positive integer. If not, ask again.
 
-Now edit `/var/lib/velsigner/config/config.toml` to add the Telegram
-backend stanza. First read it back so you know what's there:
+Read the current config so you know what `--init` produced:
 
 ```bash
 sudo cat /var/lib/velsigner/config/config.toml
 ```
 
-The `--init`-generated skeleton has `[backend]` with `type = "stub"`.
-You need to:
-  1. Change `type = "stub"` to `type = "telegram"`.
-  2. Append a `[backend.telegram]` block with the three required keys.
+If the file already has `type = "telegram"` AND a `[backend.telegram]`
+block with the user's id, log "config already configured for telegram;
+skipping" and proceed to Step 5.
 
-Tell the user to run (substituting their user_id for `NNNN`):
+Otherwise, tell the user to run (substituting their user_id for `NNNN`):
 
 ```bash
 sudo tee -a /var/lib/velsigner/config/config.toml >/dev/null <<'EOF'
@@ -200,34 +136,48 @@ Re-read the file and confirm with the user that it looks right
 (`type = "telegram"`, the three telegram keys, no duplicates from a
 previous re-run). If duplicates exist, ask the user to clean by hand.
 
-## Step 7 — Install systemd unit + start velsigner
+## Step 5 — Run the installer again (token + restart)
 
-**PAUSE** and tell the user to run, in their sudo terminal:
+Now that the config selects the telegram backend, re-running install.sh
+will prompt for the bot token (echoed nothing — `read -rs`) and restart
+the daemon.
+
+**PAUSE** and tell the user:
+
+> First, create a Telegram bot via @BotFather (https://t.me/BotFather):
+> send `/newbot`, pick a name, pick a username ending in `bot`.
+> BotFather replies with a token shaped like `7123456789:AAH...`.
+>
+> Then, in your sudo terminal, run:
+>
+>     sudo ${CLAUDE_PLUGIN_ROOT}/scripts/install.sh
+>
+> The script will detect the new `type = "telegram"` and prompt:
+>
+>     [install] Paste the BotFather token (input hidden), or press Enter to skip:
+>
+> Paste the token. Input is hidden — nothing echoes. Press Enter.
+>
+> The script writes the token to `/var/lib/velsigner/tokens/telegram.token`
+> (mode 0600, owned by `velsigner`) and restarts the daemon. Tell me
+> when it's done.
+
+After confirmation, verify:
 
 ```bash
-sudo ${CLAUDE_PLUGIN_ROOT}/scripts/install.sh
+sudo stat -c '%a %U:%G' /var/lib/velsigner/tokens/telegram.token
 ```
 
-This script copies binaries (idempotent — already done in Step 4 but
-the script re-applies them in case the user skipped that step), writes
-the hardened systemd unit, and runs `systemctl enable --now velsigner`.
-It exits non-zero with a clear message if the daemon fails to come up.
-
-Wait for confirmation. Then verify yourself:
+Expect `600 velsigner:velsigner`.
 
 ```bash
 systemctl is-active velsigner
 ```
 
-Expect `active`. If `failed` or `activating`, run:
+Expect `active`. If not, run `journalctl -u velsigner -n 30 --no-pager`
+and surface the output.
 
-```bash
-journalctl -u velsigner -n 30 --no-pager
-```
-
-…surface the output, and stop.
-
-## Step 8 — Capture chat_id from /start
+## Step 6 — Capture chat_id from /start and validate
 
 **PAUSE** and tell the user:
 
@@ -235,7 +185,7 @@ journalctl -u velsigner -n 30 --no-pager
 > you gave to @BotFather), and send `/start`. velsigner's poller will
 > capture your chat_id and write it to `/var/lib/velsigner/config/peer.json`.
 
-Poll for the file (up to ~30 seconds). Run:
+Poll for the file (up to ~30 seconds):
 
 ```bash
 for i in $(seq 1 30); do
@@ -258,15 +208,10 @@ If still not present after 30s, tell the user to double-check they
 sent `/start` to the right bot, then re-poll once. If still nothing,
 stop and ask the user to share `journalctl -u velsigner -n 30 --no-pager`.
 
-## Step 9 — Validate + summary
-
-Run:
+Finally:
 
 ```bash
 sudo -u velsigner /usr/local/bin/velsigner --version
-```
-
-```bash
 systemctl status velsigner --no-pager
 ```
 

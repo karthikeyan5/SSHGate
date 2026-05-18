@@ -2,7 +2,7 @@
 
 This is the human-readable install guide. The quick path is to let
 Claude Code drive: open a Claude Code session in this repo and run
-`/sshgate:setup`. The slash command walks the same nine steps below
+`/sshgate:setup`. The slash command walks the same six steps below
 and pauses for your input where needed.
 
 If you'd rather do it by hand (or don't have Claude Code installed),
@@ -30,16 +30,17 @@ follow the manual path.
 /sshgate:setup
 ```
 
-That's it. Claude Code will build the binaries, prompt you for the bot
-token, ask for your Telegram user_id, install the systemd unit, and
-capture the chat_id. The command is idempotent; re-running is safe.
+That's it. Claude Code will build the binaries, run the installer,
+walk you through the Telegram config, prompt you for the bot token,
+and capture the chat_id. The command is idempotent; re-running is safe.
 
 ---
 
 ## Manual path
 
-If you're doing this without Claude Code, run each step below in order.
-Every step is idempotent: re-running after a partial failure is safe.
+Six steps. Three sudo touchpoints (two `install.sh` runs and the
+token paste prompt is folded inside the second one). Every step is
+idempotent: re-running after a partial failure is safe.
 
 ### 1. Verify Go is installed
 
@@ -67,58 +68,49 @@ Or use the Makefile:
 make build velgate-linux
 ```
 
-### 3. Create the velsigner system user
+### 3. Run the installer (first pass)
 
 ```bash
-sudo ./scripts/create-velsigner-user.sh
+sudo ./scripts/install.sh
 ```
 
-This creates the `velsigner` user (no shell), `/var/lib/velsigner/`
-with the right ownership and modes, and adds your user to the
-`velsigner` group. You may need to log out and back in (or run
-`newgrp velsigner` in a fresh shell) for group membership to take
-effect.
+One idempotent pass does all of the following:
 
-### 4. Install binaries + initialise keys and config
+- Creates the `velsigner` system user (no shell, no login).
+- Creates `/var/lib/velsigner/{keys,tokens,config,log,bin}` with the
+  right ownership and modes.
+- Adds your account (`$SUDO_USER`) to the `velsigner` group so you
+  can stat the runtime dir and read the audit log without sudo. You
+  may need `newgrp velsigner` (or a fresh shell) for membership to
+  take effect.
+- Copies `bin/velsigner` to `/usr/local/bin/velsigner` and
+  `bin/velgate-linux-amd64` to `/usr/local/share/sshgate/`.
+- Writes `/etc/systemd/system/velsigner.service` with hardened
+  settings (`NoNewPrivileges`, `ProtectSystem=strict`,
+  `MemoryDenyWriteExecute`, etc.).
+- Runs `velsigner --init` (as the `velsigner` user) to generate
+  `keys/velgate.{key,pub}` and the skeleton `config/config.toml`
+  (initial `type = "stub"`).
+- `systemctl enable --now velsigner`.
+
+The script exits non-zero with a clear message if the daemon fails
+to come up. Verify:
 
 ```bash
-sudo install -m 0755 bin/velsigner /usr/local/bin/velsigner
-sudo mkdir -p /usr/local/share/sshgate
-sudo install -m 0755 bin/velgate-linux-amd64 /usr/local/share/sshgate/velgate-linux-amd64
-sudo -u velsigner /usr/local/bin/velsigner --init \
-    --config /var/lib/velsigner/config/config.toml
+systemctl is-active velsigner
+# expect: active
 ```
 
-`--init` generates `/var/lib/velsigner/keys/velgate.{key,pub}` and
-writes a skeleton TOML config. It refuses to overwrite existing keys —
-if you need to start over, remove the state directory first.
+### 4. Configure the Telegram backend
 
-### 5. Register the Telegram bot token
+The `--init`-generated config selects the stub backend. To get
+phone-tap approvals you switch it to telegram and add your numeric
+user_id.
 
-Create a bot via @BotFather: send `/newbot`, choose a name and a
-username ending in `bot`. BotFather replies with a token shaped like
-`7123456789:AAH...`.
+Find your Telegram user_id by messaging @userinfobot — it replies
+with `Id: NNNN`. That number is your `allowed_user_id`.
 
-Save it (replace `TOKEN_VALUE` with the real token):
-
-```bash
-sudo install -m 0600 -o velsigner -g velsigner /dev/stdin \
-    /var/lib/velsigner/tokens/telegram.token <<< 'TOKEN_VALUE'
-```
-
-Verify:
-
-```bash
-sudo stat -c '%a %U:%G' /var/lib/velsigner/tokens/telegram.token
-# expect: 600 velsigner:velsigner
-```
-
-### 6. Configure the Telegram backend
-
-Find your numeric Telegram user_id by messaging @userinfobot — it
-replies with `Id: NNNN`. That number is your `allowed_user_id`.
-
-Append the Telegram block to the config (replace `NNNN`):
+Append the telegram block (replace `NNNN`):
 
 ```bash
 sudo tee -a /var/lib/velsigner/config/config.toml >/dev/null <<'EOF'
@@ -130,42 +122,64 @@ chatstore_path  = "/var/lib/velsigner/config/peer.json"
 EOF
 ```
 
-Switch the backend type from `stub` to `telegram`:
+Flip the backend type:
 
 ```bash
 sudo sed -i 's/^type = "stub"$/type = "telegram"/' \
     /var/lib/velsigner/config/config.toml
 ```
 
-Sanity-check the file with `sudo cat /var/lib/velsigner/config/config.toml`.
+Sanity-check with `sudo cat /var/lib/velsigner/config/config.toml`.
 You should see `type = "telegram"` and the three telegram keys, no
 duplicates.
 
-### 7. Install the systemd unit + start velsigner
+### 5. Run the installer again (token + restart)
+
+Create the Telegram bot first: message @BotFather, send `/newbot`,
+choose a name and a username ending in `bot`. BotFather replies with
+a token shaped like `7123456789:AAH...`. Copy it.
+
+Now re-run the installer:
 
 ```bash
 sudo ./scripts/install.sh
 ```
 
-This (re-)installs the binaries, writes
-`/etc/systemd/system/velsigner.service` with the hardened settings
-(`NoNewPrivileges`, `ProtectSystem=strict`, `MemoryDenyWriteExecute`,
-etc.), reloads systemd, and runs `systemctl enable --now velsigner`.
-The script exits non-zero with a clear message if the daemon fails to
-come up.
+It detects `type = "telegram"` and the missing token file, then
+prompts:
+
+```
+[install] Paste the BotFather token (input hidden), or press Enter to skip:
+```
+
+Paste the token. Input is hidden (terminal echo disabled) — nothing
+appears on screen. Press Enter.
+
+The installer writes the token to
+`/var/lib/velsigner/tokens/telegram.token` (mode `0600`, owned by
+`velsigner:velsigner`), restarts the daemon, and asserts it came up.
 
 Verify:
 
 ```bash
+sudo stat -c '%a %U:%G' /var/lib/velsigner/tokens/telegram.token
+# expect: 600 velsigner:velsigner
+
 systemctl is-active velsigner
 # expect: active
 ```
 
-### 8. Capture chat_id from `/start`
+If the daemon fails after the token write, run
+`journalctl -u velsigner -n 30 --no-pager`. Common causes: token
+copy-paste included a stray newline (the installer's regex catches
+this and refuses to write, but check the file mode if it's there),
+or `allowed_user_id = 0` (you forgot to substitute `NNNN`).
 
-Open Telegram, find the bot you created in step 5 (search the
-username you gave to BotFather), and send it `/start`. velsigner's
-polling loop captures the chat_id and writes it to
+### 6. Capture chat_id from `/start` and validate
+
+Open Telegram, find the bot you created (search the username you
+gave to BotFather), and send it `/start`. velsigner's polling loop
+captures the chat_id and writes it to
 `/var/lib/velsigner/config/peer.json`.
 
 **Expected reply on Telegram:**
@@ -200,7 +214,7 @@ What to look for in the log:
 - `401 Unauthorized` from `getMe` / `getUpdates` — the bot token is
   wrong or was revoked in BotFather.
 
-### 9. Validate
+Final validation:
 
 ```bash
 sudo -u velsigner /usr/local/bin/velsigner --version
@@ -218,11 +232,13 @@ Run `journalctl -u velsigner -n 50 --no-pager`. The most common
 causes are a missing or malformed `config.toml` (the daemon refuses
 to start if `backend.telegram.allowed_user_id` is 0 or the token file
 is unreadable), or a permissions mismatch on `/var/lib/velsigner/`
-(re-run `scripts/create-velsigner-user.sh` to repair).
+(re-run `scripts/install.sh` to repair — it's idempotent and re-applies
+the canonical modes).
 
 **`401 Unauthorized` in the log.**
-The bot token is wrong. Re-paste it from BotFather (`/mybots` →
-select your bot → "API Token").
+The bot token is wrong. Re-run `sudo ./scripts/install.sh` after
+removing the bad token: `sudo rm /var/lib/velsigner/tokens/telegram.token`.
+The installer will prompt again.
 
 **`peer.json` never appears.**
 You sent `/start` to the wrong bot, or your `allowed_user_id` doesn't

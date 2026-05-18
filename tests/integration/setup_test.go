@@ -1,13 +1,13 @@
 //go:build integration
 
-// Setup-script syntax test (task 2.4).
+// Setup-script syntax test (task 2.4; updated in v1.1 Task A — the
+// install/user-provisioning scripts collapsed into a single install.sh).
 //
-// Privileged-container integration smoke (boot Ubuntu, create the
-// velsigner user, run install.sh, assert systemctl active) is deferred
-// to v1.1 when a CI runner with privileged containers is available —
-// running systemd inside docker on a dev box is fiddly and not worth
-// the complexity for an idempotent shell-script chain that's read by
-// humans before it runs.
+// Privileged-container integration smoke (boot Ubuntu, run install.sh,
+// assert systemctl active) is still deferred — running systemd inside
+// docker on a dev box is fiddly and not worth the complexity for an
+// idempotent shell-script chain that's read by humans before it runs.
+// Revisit when a CI runner with privileged containers is available.
 //
 // What this test DOES do: lint every shell script under scripts/ with
 // `bash -n` (syntax check) and `shellcheck` (when installed). It's
@@ -38,7 +38,6 @@ func scriptsDir(t *testing.T) string {
 func TestSetupScripts_Syntax(t *testing.T) {
 	dir := scriptsDir(t)
 	scripts := []string{
-		"create-velsigner-user.sh",
 		"install.sh",
 		"uninstall.sh",
 	}
@@ -62,7 +61,6 @@ func TestSetupScripts_Shellcheck(t *testing.T) {
 	}
 	dir := scriptsDir(t)
 	scripts := []string{
-		"create-velsigner-user.sh",
 		"install.sh",
 		"uninstall.sh",
 	}

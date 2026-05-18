@@ -285,7 +285,7 @@ func defaultConfigPath() string {
 // compromised daemon then has the kernel.
 func assertNonRoot() error {
 	if os.Geteuid() == 0 {
-		return errors.New("velsigner refuses to run as root; create a dedicated user (see scripts/create-velsigner-user.sh)")
+		return errors.New("velsigner refuses to run as root; create a dedicated user (run scripts/install.sh)")
 	}
 	return nil
 }
