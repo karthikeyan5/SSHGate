@@ -180,3 +180,21 @@ What: SSHGate v1 is done per your goal.
 - **MINORs to revisit when you next touch SSHGate (5 from code review + 4 from security, all in the reports):** mostly polish + defense-in-depth.
 
 Moving to v1.1 cascade now.
+
+### 22. ✅ V1.1 CASCADE COMPLETE — all four features shipped — 2026-05-19 06:30
+
+What: all four v1.1 features landed in 4 commits on a clean tree.
+
+- **Task A — Automated velsigner provisioning** (`beac802`): collapsed `install.sh` + `create-velsigner-user.sh` into ONE idempotent script. Setup walk is now 6 steps instead of 9. The standalone provisioning script was deleted (folded in); `install.sh` handles user creation, skeleton dirs, group membership, binary install, systemd unit, optional --init, optional token prompt.
+- **Task B — Pipe/chain classification refinement** (`49879b9`): the v1 "any pipe = WRITE" compromise is gone. Per-segment classification now correctly marks `cat /etc/hosts | grep foo` as READ (was WRITE — spurious prompt). Closes code-review Mi3 (git stash) + Mi4 (wget without -O-) as security wins: those were both false-NEGATIVES (writes-as-reads) — fixed by tightening the rules. 28 new corpus rows added (205 total). Process substitution `$(...)` / `<(...)` / `>(...)` always fail-safe WRITE.
+- **Task C — macOS cross-compile** (`770eb0a`): `make darwin` produces 4 Mach-O binaries (sshgate-mcp + velsigner for amd64 + arm64). Audited laptop-side packages — all syscalls (`Fchmod`, `Flock`, signals) are portable; no build constraints needed. velgate stays Linux-only (it's deployed to Linux remotes). macOS install path still semi-manual (no launchd plist generation yet); full macOS support is v1.2.
+- **Task D — LLM command explainer** (`08f177c`): TelegramBackend now has an optional `Explainer` interface. When configured, hits an OpenAI-compatible Chat Completions endpoint for each pending command and renders a one-line plain-English explanation underneath each command in the approval DM. Bounded by a 5s timeout; LLM errors render a "(no explanations: …)" footer and DO NOT block approval. Config block `[backend.telegram.explainer]` enables it; OpenRouter is the natural choice (your settings.json already has `OPENROUTER_API_KEY`). Defense-in-depth: `sanitiseExplainerErr` strips URLs + Bearer tokens from error messages before they reach Telegram.
+
+**Stats:** 36 commits total, 10 Go packages, 69 Go source files. All tests green (`go test -race ./...`, integration suite ~35s). All 5 cascade features (A-D + the inline S11 security fix) committed cleanly.
+
+**Karthi-attention items for morning (new in v1.1):**
+- **OpenRouter API key setup:** if you want the LLM explainer working from the start, drop your OpenRouter key into `/var/lib/velsigner/tokens/llm-api.key` and enable the `[backend.telegram.explainer]` config block. Step 7 of `docs/install-step-by-step.md` covers this.
+- **Pipe classification UX win:** the next time you ask Claude to do "show me memory usage piped to grep" or similar, you'll skip the approval prompt — it's now classified as a read.
+- **macOS install:** if you decide to run SSHGate on a Mac (not just Linux), `make darwin` produces the binaries but the install script doesn't run on macOS. That's a v1.2 task. Linux is the supported install path for now.
+
+Moving to v2 scaffold.
