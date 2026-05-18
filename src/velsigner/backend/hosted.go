@@ -1,0 +1,352 @@
+package backend
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// HostedServerBackend speaks the v2 wire protocol against a hosted
+// velsigner-server (see docs/specs/2026-05-19-sshgate-design.md
+// §"v2 vision → Wire protocol"). It is the swap-point that lets a
+// velsigner laptop daemon delegate approval to a centralized HTTPS
+// service instead of running a local Telegram bot.
+//
+// Wire dance:
+//
+//   POST /v1/sign           → 202 {request_id, poll_url}
+//   GET  /v1/poll/{request_id} (long-poll)
+//                           → 200 {status, signatures?, approved_by_user?, approved_at?}
+//
+// The handler loops on /v1/poll until status leaves "pending", the
+// per-request Timeout fires, or ctx is cancelled. On approval we
+// hand the signed payloads back via the same Result channel as the
+// TelegramBackend, so the daemon's downstream code path is
+// unchanged.
+//
+// Concurrency: HTTPClient is shared across calls (stdlib http.Client
+// is safe for concurrent use). Request spawns one goroutine per call
+// to drive the long-poll; the goroutine exits as soon as it sends
+// one Result on the channel.
+type HostedServerBackend struct {
+	// BaseURL is the velsigner-server origin (no trailing slash).
+	// Example: https://velsigner-server.example.com. Required.
+	BaseURL string
+
+	// APIKey is the bearer token sent on every request as
+	// "Authorization: Bearer <APIKey>". Required.
+	APIKey string
+
+	// ClientID identifies this laptop in the server's audit log
+	// (e.g. "karthi-laptop"). Required.
+	ClientID string
+
+	// HTTPClient is the transport used for both sign + poll. When
+	// nil, http.DefaultClient is used; production wiring should
+	// inject a client with explicit Timeout < PollWait * 2 so a
+	// dead connection surfaces before the long-poll deadline.
+	HTTPClient *http.Client
+
+	// PollWait is the server-side long-poll window per /v1/poll
+	// request (v2.1 will support ?wait= query param). Defaults to
+	// 30s. The client may issue multiple polls inside one Request
+	// call if Timeout > PollWait.
+	PollWait time.Duration
+
+	// Timeout is the total per-Request budget (across submit +
+	// possibly-multiple polls). Defaults to 60s. ctx cancellation
+	// always wins over Timeout.
+	Timeout time.Duration
+}
+
+// signRequestBody is the POST /v1/sign body. Matches the
+// velsigner-server handlers.signRequest shape exactly — keep them
+// in lockstep with the wire protocol spec.
+type signRequestBody struct {
+	ClientID string             `json:"client_id"`
+	Commands []signRequestCmdV2 `json:"commands"`
+}
+
+type signRequestCmdV2 struct {
+	Server     string `json:"server"`
+	Cmd        string `json:"cmd"`
+	TTLSeconds int64  `json:"ttl_seconds"`
+}
+
+// signAcceptedBody is the 202 response. We only consume RequestID;
+// PollURL is informational (we construct the URL ourselves to keep
+// the client immune to a misbehaving server that returns a relative
+// URL containing a different scheme/host).
+type signAcceptedBody struct {
+	RequestID string `json:"request_id"`
+	PollURL   string `json:"poll_url"`
+}
+
+// pollBody is the GET /v1/poll/{id} response. Mirrors the server
+// handler's pollResponse shape.
+type pollBody struct {
+	RequestID  string      `json:"request_id"`
+	Status     string      `json:"status"`
+	Signatures []signedSig `json:"signatures,omitempty"`
+	ApprovedBy string      `json:"approved_by_user,omitempty"`
+	ApprovedAt *time.Time  `json:"approved_at,omitempty"`
+	Error      string      `json:"error,omitempty"`
+}
+
+type signedSig struct {
+	Cmd string `json:"cmd"`
+	Sig string `json:"sig"`
+}
+
+// Request implements Backend. It POSTs the sign request, kicks off a
+// goroutine that long-polls /v1/poll until resolution, and returns
+// the result channel synchronously.
+//
+// The returned channel is closed after exactly one Result is sent.
+// On submission error (network, 4xx/5xx from POST /v1/sign) Request
+// returns the error and no channel — same contract as
+// TelegramBackend.
+func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) (<-chan Result, error) {
+	if err := h.validate(); err != nil {
+		return nil, err
+	}
+
+	pollWait := h.PollWait
+	if pollWait == 0 {
+		pollWait = 30 * time.Second
+	}
+	totalTimeout := h.Timeout
+	if totalTimeout == 0 {
+		totalTimeout = 60 * time.Second
+	}
+
+	body := signRequestBody{
+		ClientID: h.ClientID,
+		Commands: make([]signRequestCmdV2, len(req.Commands)),
+	}
+	for i, c := range req.Commands {
+		body.Commands[i] = signRequestCmdV2{
+			Server:     c.Server,
+			Cmd:        c.Cmd,
+			TTLSeconds: c.TTLSec,
+		}
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("hosted: marshal sign body: %w", err)
+	}
+
+	// Submit synchronously: the daemon needs to know up-front
+	// whether the server accepted the request. A POST failure is
+	// surfaced as Backend.Request's error (and the daemon answers
+	// the MCP with {status: "error"} rather than waiting on a
+	// channel that will never resolve).
+	submitURL := strings.TrimRight(h.BaseURL, "/") + "/v1/sign"
+	submitCtx, cancel := context.WithTimeout(ctx, totalTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(submitCtx, http.MethodPost, submitURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("hosted: build sign request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+h.APIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	client := h.client()
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("hosted: submit sign: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		return nil, fmt.Errorf("hosted: submit sign returned %d: %s", resp.StatusCode, readSnippet(resp.Body))
+	}
+	var accepted signAcceptedBody
+	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
+		return nil, fmt.Errorf("hosted: decode sign response: %w", err)
+	}
+	if accepted.RequestID == "" {
+		return nil, errors.New("hosted: server returned empty request_id")
+	}
+
+	// Construct the poll URL ourselves rather than trusting the
+	// server-provided PollURL — defence against a misbehaving (or
+	// compromised) server pointing us at a different origin.
+	pollURL := strings.TrimRight(h.BaseURL, "/") + "/v1/poll/" + url.PathEscape(accepted.RequestID)
+
+	ch := make(chan Result, 1)
+	go h.pollLoop(ctx, pollURL, totalTimeout, pollWait, ch)
+	return ch, nil
+}
+
+// pollLoop drives the GET /v1/poll long-poll until resolution or
+// timeout. It owns the result channel: exactly one Result is sent,
+// then the channel is closed.
+//
+// The total budget is bounded by `totalTimeout`. Each individual
+// HTTP request is bounded by pollWait + a small slop so a slow
+// upstream surfaces as a transient error rather than hanging us.
+func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string, totalTimeout, pollWait time.Duration, out chan<- Result) {
+	defer close(out)
+	deadline := time.Now().Add(totalTimeout)
+	client := h.client()
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			out <- Result{Status: StatusTimeout}
+			return
+		}
+		// Bound this iteration's HTTP request to either pollWait
+		// + slop or the remaining budget, whichever is smaller.
+		iterTimeout := pollWait + 5*time.Second
+		if iterTimeout > remaining {
+			iterTimeout = remaining
+		}
+		iterCtx, cancel := context.WithTimeout(parentCtx, iterTimeout)
+		req, err := http.NewRequestWithContext(iterCtx, http.MethodGet, pollURL, nil)
+		if err != nil {
+			cancel()
+			out <- Result{Status: StatusTimeout}
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+h.APIKey)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			// ctx cancelled? terminal.
+			if errors.Is(parentCtx.Err(), context.Canceled) || errors.Is(parentCtx.Err(), context.DeadlineExceeded) {
+				out <- Result{Status: StatusTimeout}
+				return
+			}
+			// Otherwise treat as a poll iteration failure: brief
+			// backoff and retry until deadline. We don't retry
+			// forever — the outer `if remaining <= 0` guards.
+			select {
+			case <-parentCtx.Done():
+				out <- Result{Status: StatusTimeout}
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
+		}
+
+		// Read+close before evaluating to free the connection
+		// promptly. We don't stream; bodies are small JSON.
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+
+		if readErr != nil {
+			// Same backoff as a connect error.
+			select {
+			case <-parentCtx.Done():
+				out <- Result{Status: StatusTimeout}
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			// 404 = unknown request_id (we sent the wrong ID or
+			// the server lost the row). 401 = bad token. Either
+			// way the request is unrecoverable for this loop.
+			out <- Result{Status: StatusTimeout}
+			return
+		}
+
+		var body pollBody
+		if err := json.Unmarshal(bodyBytes, &body); err != nil {
+			out <- Result{Status: StatusTimeout}
+			return
+		}
+
+		switch body.Status {
+		case "approved":
+			out <- Result{Status: StatusApproved, ApprovedBy: body.ApprovedBy}
+			return
+		case "denied":
+			out <- Result{Status: StatusDenied, ApprovedBy: body.ApprovedBy}
+			return
+		case "error":
+			// Server-reported terminal error — treat as timeout
+			// from the daemon's perspective (it will report
+			// "error" via the audit path; the Backend interface
+			// has no distinct "remote error" status in v1).
+			out <- Result{Status: StatusTimeout}
+			return
+		case "timeout":
+			// Server's poll window elapsed but the request
+			// itself is still alive on the server. Loop again
+			// until our totalTimeout.
+			continue
+		case "pending":
+			// Same as "timeout" from our perspective — re-poll.
+			continue
+		default:
+			// Unknown status — defensive timeout.
+			out <- Result{Status: StatusTimeout}
+			return
+		}
+	}
+}
+
+// HostedSignatures is exposed for tests that want to convert the
+// signed payload list back to per-command sig strings. The daemon's
+// existing signing path (daemon.signAll) is bypassed when this
+// backend is in use because the server holds the key; this helper
+// is the bridge between the wire shape and the daemon's response
+// shape.
+//
+// Currently unused by the production daemon (the daemon expects
+// Backend to drive only approval, not signing). Wiring the server's
+// signatures back into the socket response is a follow-up: the
+// Backend interface needs a richer Result type. See v2.1 TODO.
+func HostedSignatures(_ pollBody) []signedSig {
+	// Intentionally unimplemented in scaffold 3/4. See Result
+	// shape limitations described above.
+	return nil
+}
+
+// validate returns the first config error, if any.
+func (h *HostedServerBackend) validate() error {
+	if h.BaseURL == "" {
+		return errors.New("hosted: BaseURL is required")
+	}
+	if h.APIKey == "" {
+		return errors.New("hosted: APIKey is required")
+	}
+	if h.ClientID == "" {
+		return errors.New("hosted: ClientID is required")
+	}
+	return nil
+}
+
+func (h *HostedServerBackend) client() *http.Client {
+	if h.HTTPClient != nil {
+		return h.HTTPClient
+	}
+	return http.DefaultClient
+}
+
+// readSnippet returns up to 256 bytes from r as a string, for
+// inclusion in error messages. We cap the size so a hostile or
+// misconfigured server can't blow up the daemon's error log.
+func readSnippet(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, 256))
+	return strings.TrimSpace(string(b))
+}
+
+// Compile-time interface check.
+var _ Backend = (*HostedServerBackend)(nil)

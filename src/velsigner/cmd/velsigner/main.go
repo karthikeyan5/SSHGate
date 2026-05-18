@@ -62,7 +62,28 @@ type tomlConfig struct {
 	Backend struct {
 		Type     string         `toml:"type"`
 		Telegram telegramConfig `toml:"telegram"`
+		Hosted   hostedConfig   `toml:"hosted"`
 	} `toml:"backend"`
+}
+
+// hostedConfig is the [backend.hosted] block, consulted only when
+// backend.type = "hosted". The v2 swap-point: setting this in
+// /etc/velsigner/config.toml redirects approval traffic from the
+// local Telegram bot to the centralized velsigner-server.
+type hostedConfig struct {
+	// BaseURL is the velsigner-server origin (no trailing slash),
+	// e.g. https://velsigner-server.example.com.
+	BaseURL string `toml:"base_url"`
+	// APIKeyFile is the path to a 0600 file containing the
+	// bearer token. Mirrors backend.telegram.token_path's "file,
+	// not inline" rule (daemon.md §6).
+	APIKeyFile string `toml:"api_key_file"`
+	// ClientID identifies this laptop in the server's audit log.
+	ClientID string `toml:"client_id"`
+	// PollWaitSec bounds each /v1/poll long-poll. Default 30.
+	PollWaitSec int `toml:"poll_wait_sec"`
+	// TimeoutSec bounds the total per-Request budget. Default 60.
+	TimeoutSec int `toml:"timeout_sec"`
 }
 
 // telegramConfig is the [backend.telegram] block. Only consulted when
@@ -237,15 +258,63 @@ func loadConfig(path string) (tomlConfig, error) {
 func buildBackend(ctx context.Context, bcfg struct {
 	Type     string         `toml:"type"`
 	Telegram telegramConfig `toml:"telegram"`
+	Hosted   hostedConfig   `toml:"hosted"`
 }) (backend.Backend, error) {
 	switch bcfg.Type {
 	case "stub":
 		return backend.StubBackend{}, nil
 	case "telegram":
 		return buildTelegramBackend(ctx, bcfg.Telegram)
+	case "hosted":
+		return buildHostedBackend(bcfg.Hosted)
 	default:
 		return nil, fmt.Errorf("unknown backend type %q", bcfg.Type)
 	}
+}
+
+// buildHostedBackend reads the bearer token file and constructs the
+// HostedServerBackend. It does NOT probe the server with a /healthz
+// call: a misconfigured base_url surfaces on the first sign request
+// rather than blocking daemon startup (the daemon still serves
+// "error" responses to the MCP, which surfaces the operator's
+// misconfiguration without preventing other v1 backends from
+// continuing to work after a swap-back).
+func buildHostedBackend(c hostedConfig) (backend.Backend, error) {
+	if c.BaseURL == "" {
+		return nil, errors.New(`config missing backend.hosted.base_url`)
+	}
+	if c.APIKeyFile == "" {
+		return nil, errors.New(`config missing backend.hosted.api_key_file`)
+	}
+	if c.ClientID == "" {
+		return nil, errors.New(`config missing backend.hosted.client_id`)
+	}
+	keyRaw, err := os.ReadFile(c.APIKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read hosted api key %s: %w", c.APIKeyFile, err)
+	}
+	key := string(bytes.TrimSpace(keyRaw))
+	if key == "" {
+		return nil, fmt.Errorf("hosted api key file %s is empty", c.APIKeyFile)
+	}
+	pollWait := time.Duration(c.PollWaitSec) * time.Second
+	if pollWait == 0 {
+		pollWait = 30 * time.Second
+	}
+	timeout := time.Duration(c.TimeoutSec) * time.Second
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	logf("hosted backend ready (base_url=%s client_id=%s poll_wait=%s timeout=%s)",
+		c.BaseURL, c.ClientID, pollWait, timeout)
+	return &backend.HostedServerBackend{
+		BaseURL:    c.BaseURL,
+		APIKey:     key,
+		ClientID:   c.ClientID,
+		HTTPClient: &http.Client{Timeout: timeout + 10*time.Second},
+		PollWait:   pollWait,
+		Timeout:    timeout,
+	}, nil
 }
 
 // buildTelegramBackend reads the bot token, constructs the backend
