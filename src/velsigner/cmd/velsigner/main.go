@@ -1,0 +1,361 @@
+// Command velsigner is the local approval daemon for SSHGate. It runs
+// as a dedicated OS user (`velsigner`) on Karthi's laptop, owns the
+// master Ed25519 signing key, and signs commands only after the
+// configured Backend returns Approved.
+//
+// Flags:
+//
+//	--config <path>   TOML config (default: /etc/velsigner/config.toml or
+//	                  $VELSIGNER_CONFIG)
+//	--init            Generate keypair + skeleton config + state dirs, exit
+//	--dev             Allow running as a non-velsigner user; use
+//	                  $XDG_RUNTIME_DIR for runtime paths in --init
+//	--version         Print version and exit
+//
+// On startup the daemon:
+//
+//  1. Fails fast if running as root (writing-to-a-master-key-file as
+//     root is exactly the install-time mistake we want to catch).
+//  2. Acquires an flock on <sock_dir>/sock.lock (daemon.md §3.1). A
+//     second start refuses immediately.
+//  3. Loads the private key via velsigner.LoadKey (mode 0o077 check).
+//  4. Opens the audit log in append mode.
+//  5. Builds the configured backend (currently only "stub"; "telegram"
+//     is recognised as a config value but returns "not yet implemented
+//     in v1.4 — landing in 2.1").
+//  6. Runs the Unix-socket server until SIGTERM/SIGINT.
+//
+// SIGHUP is logged as "not supported in v1; restart to apply changes"
+// per daemon.md §8.2; partial reloads are explicitly disallowed.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"syscall"
+
+	"github.com/BurntSushi/toml"
+
+	"github.com/karthikeyan5/sshgate/src/velsigner"
+	"github.com/karthikeyan5/sshgate/src/velsigner/backend"
+)
+
+const version = "0.1.4"
+
+type tomlConfig struct {
+	Paths struct {
+		Key      string `toml:"key"`
+		PubKey   string `toml:"pubkey"`
+		AuditLog string `toml:"audit_log"`
+		Socket   string `toml:"socket"`
+	} `toml:"paths"`
+	Backend struct {
+		Type string `toml:"type"`
+	} `toml:"backend"`
+}
+
+func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+func run(args []string) int {
+	fs := flag.NewFlagSet("velsigner", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", defaultConfigPath(), "TOML config file")
+	doInit := fs.Bool("init", false, "Generate keypair + skeleton config + state dirs, then exit")
+	dev := fs.Bool("dev", false, "Dev mode: allow non-velsigner user, use $XDG_RUNTIME_DIR for --init")
+	showVersion := fs.Bool("version", false, "Print version and exit")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if *showVersion {
+		fmt.Fprintf(os.Stdout, "velsigner %s\n", version)
+		return 0
+	}
+
+	if *doInit {
+		if err := doInitFlow(*configPath, *dev); err != nil {
+			logf("init: %v", err)
+			return 1
+		}
+		return 0
+	}
+
+	if err := assertNonRoot(); err != nil {
+		logf("%v", err)
+		return 1
+	}
+	// Note: assertion that we're running as the `velsigner` user
+	// (production) vs any user (--dev) is omitted from v1.4. The
+	// install script creates the velsigner user and the systemd unit
+	// runs under `User=velsigner`; that's the load-bearing layer. If
+	// the operator runs the binary as some other non-root user, the
+	// 0o077 mask check on the key file will catch them.
+	_ = *dev
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		logf("load config: %v", err)
+		return 1
+	}
+
+	// Singleton: flock <sock_dir>/sock.lock. The lockfile lives next
+	// to the socket because that's the directory the operator can
+	// inspect to "see what's holding the daemon."
+	lockPath := cfg.Paths.Socket + ".lock"
+	release, err := flockOrFail(lockPath)
+	if err != nil {
+		logf("%v", err)
+		return 1
+	}
+	defer release()
+
+	priv, err := velsigner.LoadKey(cfg.Paths.Key)
+	if err != nil {
+		logf("load key: %v", err)
+		return 1
+	}
+
+	audit, err := velsigner.OpenAuditLog(cfg.Paths.AuditLog)
+	if err != nil {
+		logf("open audit log: %v", err)
+		return 1
+	}
+	defer audit.Close()
+
+	bk, err := buildBackend(cfg.Backend.Type)
+	if err != nil {
+		logf("build backend: %v", err)
+		return 1
+	}
+
+	daemon := &velsigner.Daemon{
+		Key:     priv,
+		Backend: bk,
+		Audit:   audit,
+	}
+	srv := &velsigner.Server{Path: cfg.Paths.Socket, Handler: daemon}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// SIGHUP: log "restart to apply changes" and continue.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	hupDone := make(chan struct{})
+	go func() {
+		defer close(hupDone)
+		for {
+			select {
+			case <-hupCh:
+				logf("SIGHUP received; config reload not supported in v1 — restart to apply changes")
+			case <-ctx.Done():
+				signal.Stop(hupCh)
+				return
+			}
+		}
+	}()
+
+	logf("ready (socket=%s backend=%s)", cfg.Paths.Socket, cfg.Backend.Type)
+	listenErr := srv.Listen(ctx)
+	logf("shutting down")
+	stop()
+	<-hupDone
+	if listenErr != nil {
+		logf("listen returned: %v", listenErr)
+	}
+	logf("stopped")
+	return 0
+}
+
+// loadConfig reads the TOML file at path and returns its parsed shape.
+// Empty paths in the config are tolerated only when produced by --init;
+// the production daemon refuses to start with empty path fields.
+func loadConfig(path string) (tomlConfig, error) {
+	var cfg tomlConfig
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return cfg, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if cfg.Paths.Key == "" {
+		return cfg, errors.New("config missing paths.key")
+	}
+	if cfg.Paths.AuditLog == "" {
+		return cfg, errors.New("config missing paths.audit_log")
+	}
+	if cfg.Paths.Socket == "" {
+		return cfg, errors.New("config missing paths.socket")
+	}
+	if cfg.Backend.Type == "" {
+		return cfg, errors.New("config missing backend.type")
+	}
+	return cfg, nil
+}
+
+// buildBackend returns the Backend implementation for the configured
+// type. Only "stub" is supported in v1.4; "telegram" returns a clear
+// "not yet implemented" error so a misconfigured production daemon
+// fails on startup rather than silently denying every write.
+func buildBackend(typeName string) (backend.Backend, error) {
+	switch typeName {
+	case "stub":
+		return backend.StubBackend{}, nil
+	case "telegram":
+		return nil, errors.New(`backend "telegram" is not yet implemented in v1.4 — landing in task 2.1`)
+	default:
+		return nil, fmt.Errorf("unknown backend type %q", typeName)
+	}
+}
+
+// defaultConfigPath returns the value of $VELSIGNER_CONFIG if set,
+// otherwise /etc/velsigner/config.toml.
+func defaultConfigPath() string {
+	if p := os.Getenv("VELSIGNER_CONFIG"); p != "" {
+		return p
+	}
+	return "/etc/velsigner/config.toml"
+}
+
+// assertNonRoot returns an error if the process is running as UID 0.
+// Daemons that hold a master signing key should NEVER run as root — a
+// compromised daemon then has the kernel.
+func assertNonRoot() error {
+	if os.Geteuid() == 0 {
+		return errors.New("velsigner refuses to run as root; create a dedicated user (see scripts/create-velsigner-user.sh)")
+	}
+	return nil
+}
+
+// flockOrFail acquires an exclusive non-blocking flock on lockPath and
+// returns a function that releases it. If the lock is held by another
+// live process, flockOrFail returns an error rather than blocking.
+func flockOrFail(lockPath string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir lock dir: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o660)
+	if err != nil {
+		return nil, fmt.Errorf("open lockfile: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another velsigner instance is running (lock held on %s)", lockPath)
+		}
+		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
+	}
+	// Stamp the PID so an operator running `cat sock.lock` sees what
+	// holds the lock.
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+		// We don't remove the lockfile: a stale empty file is fine,
+		// and removal races with the next start trying to open it.
+	}, nil
+}
+
+// doInitFlow generates a fresh keypair, creates the state directories,
+// and writes a skeleton TOML config at configPath. The flow is
+// idempotent only in the sense of "second run fails clearly" — it
+// refuses to overwrite existing keys (so an accidental --init does not
+// silently rotate the master key).
+//
+// In --dev mode, paths are rooted under $XDG_RUNTIME_DIR/velsigner-<pid>
+// so the operator can run the daemon entirely in userspace; --config is
+// resolved relative to that root if it does not look absolute.
+func doInitFlow(configPath string, dev bool) error {
+	var root, keyPath, pubPath, auditPath, sockPath string
+	if dev {
+		runtime := os.Getenv("XDG_RUNTIME_DIR")
+		if runtime == "" {
+			runtime = filepath.Join(os.TempDir(), "velsigner-dev")
+		}
+		// Anchor everything under one dir for easy cleanup. Use the
+		// config path's parent if the operator provided one in a
+		// non-default location.
+		if configPath != "" && filepath.IsAbs(configPath) {
+			root = filepath.Dir(configPath)
+		} else {
+			root = filepath.Join(runtime, "velsigner-"+strconv.Itoa(os.Getpid()))
+		}
+		keyPath = filepath.Join(root, "velgate.key")
+		pubPath = filepath.Join(root, "velgate.pub")
+		auditPath = filepath.Join(root, "approvals.log")
+		sockPath = filepath.Join(root, "sock")
+	} else {
+		root = "/var/lib/velsigner"
+		keyPath = filepath.Join(root, "keys", "velgate.key")
+		pubPath = filepath.Join(root, "keys", "velgate.pub")
+		auditPath = filepath.Join(root, "log", "approvals.log")
+		sockPath = "/run/velsigner/sock"
+	}
+
+	// Make the directories the daemon will need.
+	dirs := []string{
+		filepath.Dir(keyPath),
+		filepath.Dir(auditPath),
+		filepath.Dir(sockPath),
+		filepath.Dir(configPath),
+	}
+	for _, d := range dirs {
+		if d == "" || d == "." {
+			continue
+		}
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			return fmt.Errorf("mkdir %s: %w", d, err)
+		}
+	}
+
+	if err := velsigner.GenerateKeyPair(keyPath, pubPath); err != nil {
+		return fmt.Errorf("generate keypair: %w", err)
+	}
+
+	// Write a skeleton config. Refuse to overwrite — the operator
+	// might have hand-customised an existing config.
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("refusing to overwrite existing config %s", configPath)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("stat config: %w", err)
+	}
+
+	body := fmt.Sprintf(`# velsigner v1.4 configuration
+
+[paths]
+key       = %q
+pubkey    = %q
+audit_log = %q
+socket    = %q
+
+[backend]
+# "stub" denies every request; used by the phase-1 e2e test that proves
+# the cryptographic loop without a human in the loop. Switch to
+# "telegram" once task 2.1 lands.
+type = "stub"
+`, keyPath, pubPath, auditPath, sockPath)
+
+	if err := os.WriteFile(configPath, []byte(body), 0o640); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	logf("init: keys at %s, %s", keyPath, pubPath)
+	logf("init: audit log at %s", auditPath)
+	logf("init: socket at %s", sockPath)
+	logf("init: config at %s", configPath)
+	return nil
+}
+
+// logf writes one line to stderr with the "velsigner: " prefix. Errors
+// from the write are intentionally ignored — there is no recovery for
+// "could not write to stderr."
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "velsigner: "+format+"\n", args...)
+}
