@@ -39,10 +39,13 @@ type AuditEvent struct {
 // fit well under that), but we keep the mutex for clarity and to bound
 // any future record-size growth.
 //
-// The zero value is not usable — call OpenAuditLog.
+// The zero value is not usable — call OpenAuditLog or
+// NewMemAuditLog. nil is never an acceptable value to Daemon.Audit;
+// pass NewMemAuditLog() in tests that want to throw away records.
 type AuditLog struct {
-	mu sync.Mutex
-	f  *os.File
+	mu       sync.Mutex
+	f        *os.File
+	skipSync bool // for in-memory pipes where Sync is a no-op / errors
 }
 
 // OpenAuditLog opens (or creates) path for append-only JSON-Lines
@@ -57,6 +60,35 @@ func OpenAuditLog(path string) (*AuditLog, error) {
 		return nil, fmt.Errorf("open audit log: %w", err)
 	}
 	return &AuditLog{f: f}, nil
+}
+
+// NewMemAuditLog returns a writable AuditLog backed by an os.Pipe.
+// Records written to it are drained by an internal goroutine and
+// discarded; the pipe is closed when Close() is called. Intended for
+// unit tests that want to exercise the daemon's audit code path
+// without persisting to disk. Production callers should use
+// OpenAuditLog.
+//
+// The returned *AuditLog has skipSync=true so Write does not call
+// Sync on the pipe FD (the pipe is non-syncable on Linux and would
+// surface EINVAL).
+func NewMemAuditLog() (*AuditLog, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("pipe: %w", err)
+	}
+	// Drain the read end so the writer never blocks on a full pipe
+	// buffer (kernel default: 64KB on Linux). The goroutine exits
+	// when the write end is closed (i.e. when Close() runs).
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := r.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	return &AuditLog{f: w, skipSync: true}, nil
 }
 
 // Write appends one event to the log as a single JSON line. The line is
@@ -78,8 +110,10 @@ func (a *AuditLog) Write(e AuditEvent) error {
 	if _, err := a.f.Write(b); err != nil {
 		return fmt.Errorf("write audit line: %w", err)
 	}
-	if err := a.f.Sync(); err != nil {
-		return fmt.Errorf("fsync audit line: %w", err)
+	if !a.skipSync {
+		if err := a.f.Sync(); err != nil {
+			return fmt.Errorf("fsync audit line: %w", err)
+		}
 	}
 	return nil
 }

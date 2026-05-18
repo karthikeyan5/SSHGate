@@ -233,13 +233,11 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 }
 
 // audit writes a single AuditEvent for req with status / approvedBy.
-// If Audit is nil (which should never happen in production wire-up)
-// the call is a no-op so unit tests that don't care about audit
-// don't have to construct a log file.
+// d.Audit MUST be non-nil; the daemon contract is "every request
+// produces an audit row." Tests that want a no-op sink should
+// construct one via velsigner.NewMemAuditLog rather than passing
+// nil — that keeps the audit code path on every test.
 func (d *Daemon) audit(req signRequest, status, approvedBy string) error {
-	if d.Audit == nil {
-		return nil
-	}
 	cmds := make([]string, len(req.Commands))
 	servers := make([]string, len(req.Commands))
 	for i, c := range req.Commands {

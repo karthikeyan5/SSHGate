@@ -183,6 +183,36 @@ func TestAuditLog_PersistsAcrossClose(t *testing.T) {
 	}
 }
 
+func TestNewMemAuditLog_AcceptsWritesAndCloses(t *testing.T) {
+	t.Parallel()
+	log, err := velsigner.NewMemAuditLog()
+	if err != nil {
+		t.Fatalf("NewMemAuditLog: %v", err)
+	}
+	// Writes must succeed and not block, even with no reader on the
+	// other side (the internal drain goroutine reads continuously).
+	for i := 0; i < 100; i++ {
+		ev := velsigner.AuditEvent{
+			TS:        time.Now().UTC(),
+			RequestID: "r_" + itoaPad(i),
+			Status:    "approved",
+			Commands:  []string{"x"},
+			Servers:   []string{"s"},
+		}
+		if err := log.Write(ev); err != nil {
+			t.Fatalf("Write[%d]: %v", i, err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Writing after Close should fail rather than panic.
+	err = log.Write(velsigner.AuditEvent{RequestID: "post", Status: "x", Commands: []string{}, Servers: []string{}})
+	if err == nil {
+		t.Error("Write after Close returned nil; expected an error")
+	}
+}
+
 // helpers
 func itoaPad(i int) string {
 	// fixed-width tag so request IDs sort and the test diagnostic is
