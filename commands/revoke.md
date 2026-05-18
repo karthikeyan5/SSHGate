@@ -1,0 +1,55 @@
+---
+description: Revoke a registered server — tear down remote velgate and drop the alias
+argument-hint: <alias>
+allowed-tools: mcp__sshgate__revoke_server
+---
+
+The user invoked `/sshgate:revoke <alias>`. This is destructive: it
+removes the `command="..."` line from the remote's `authorized_keys`,
+deletes `~/.velgate/` on the remote, and drops the alias from the
+local registry.
+
+Parse the first positional argument as `alias`. Validate it matches
+`[a-z][a-z0-9-]{0,30}` — same rule as `/sshgate:add`. If empty or
+malformed, print:
+
+```
+Usage: /sshgate:revoke <alias>
+Alias must match [a-z][a-z0-9-]{0,30}.
+```
+
+…and stop. Do not prompt the user inline; this command is scriptable.
+
+Before calling the tool, tell the user verbatim:
+
+> Revoking `<alias>` issues a signed VELGATE_REVOKE — you'll get a
+> Telegram approval prompt. Approve it to proceed.
+
+Then call `mcp__sshgate__revoke_server` with `{ "alias": "<alias>" }`.
+
+Surface the tool's output:
+
+- `remote_cleaned` (bool) — did velgate confirm `VELGATE_REVOKED` on the remote?
+- `registry_removed` (bool) — was the alias dropped from `~/.config/sshgate/servers.json`?
+- `message` — human-readable summary from the tool.
+
+On success (both bools true), print:
+
+```
+✓ Revoked '<alias>'.
+  Remote cleaned, alias removed from registry.
+  Run /sshgate:status to confirm.
+```
+
+If the tool returns an error, print it verbatim. Common failure
+modes — surface but do not invent fixes:
+
+- Telegram approval denied or timed out → say so; ask the user if
+  they want to retry.
+- Remote unreachable → the registry entry stays; tell the user the
+  alias is still listed locally and they can re-run revoke later or
+  edit `~/.config/sshgate/servers.json` by hand.
+- Alias not registered → surface verbatim; suggest
+  `/sshgate:status` to see what is registered.
+
+Do not loop. One attempt per invocation.
