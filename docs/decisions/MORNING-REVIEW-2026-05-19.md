@@ -69,3 +69,49 @@ Revisit: only if a future task is so genuinely mechanical that Opus is wasteful 
 ---
 
 (Entries below get appended as work proceeds.)
+
+### 9. Phase 1 locked — cryptographic loop end-to-end works — 2026-05-19 02:55
+
+What: Tasks 1.1 → 1.6 complete. Commits: f529eba (classifier), 282dce5 (payload), 9a64582 (velgate), 9c8bbc5 (velsigner), 70bf567 (mcp), bc6321e (e2e). All 7 packages pass `go test -race`. The integration test against a real `linuxserver/openssh-server` Docker container exercises all four scenarios: read works, write denied by StubBackend, **direct unsigned SSH bypass refused by velgate (the security backbone proves out)**, no goroutine leaks.
+Why: this is the lock-criterion you defined for Phase 1. Phase 2 (TelegramBackend) builds on a foundation that's now demonstrably correct end-to-end.
+Revisit: nothing pending for Phase 1.
+
+### 10. Package name `common` despite go.md §2.2 ban — 2026-05-19 01:00
+
+What: `src/common/` holds the classifier and signature payload. `go.md §2.2` bans `common` as a package name (signals missing cohesion).
+Why: the package IS cohesive — it's the wire-protocol surface shared by three binaries (velgate, velsigner, MCP); the spec and plan named it `common`; alternative names (`gate`, `sigwire`, `sshgateproto`) felt less obvious.
+Revisit: if Phase 1's code-review audit flags this as BLOCKER, rename to `sigwire` (one rename + a sed across imports). Flag for your attention.
+
+### 11. SSH client uses TOFU host-key checking, not pre-pinned — 2026-05-19 02:00
+
+What: on first SSH to a new server, MCP captures the host key and appends to `~/.config/sshgate/known_hosts`. Subsequent connections verify. Mismatch refuses with `ErrHostKeyChanged`.
+Why: pre-pinning would require operator action per server (run `ssh-keyscan`, paste fingerprint). TOFU is the de-facto OpenSSH pattern and aligns with the auto-setup flow (Phase 3) which also runs first.
+Revisit: for v1.1/v2 consider a `--pin-host-key <fingerprint>` flag on `/sshgate:add` for paranoid operators.
+
+### 12. Integration tests use real Docker; in-process SSH for unit tests — 2026-05-19 02:30
+
+What: unit tests in `src/mcp/ssh/` spin up a `crypto/ssh` server in-process (no Docker dep). Integration test in `tests/integration/` uses the real `linuxserver/openssh-server` container. Build-tagged `//go:build integration` so excluded from `make test`; `make test-integration` runs it.
+Why: keeps `make test` fast and Docker-independent; integration target is meaningful when Docker IS available; skips gracefully when not.
+Revisit: when SSHGate gets CI, definitely run `make test-integration` on Linux runners.
+
+### 13. velgate accepts both raw-32-byte and PEM public-key formats — 2026-05-19 01:30
+
+What: spec said "raw 32-byte binary or PEM". Implemented both with auto-detection on file shape.
+Why: defensive — operators might generate keys via different tools (ssh-keygen → SSH wire format, openssl → PEM, velsigner → raw).
+Revisit: if it adds attack surface (PEM parser bug), narrow to raw-only.
+
+### 14. velgate process-group kill on ctx-cancel — 2026-05-19 01:30
+
+What: velgate's `Exec` uses `Setpgid` so cancelling the context kills the entire shell pipeline (e.g. `yes x | head ...`), not just `/bin/sh`.
+Why: ergonomics — without this, killed shells leave orphaned descendants on the remote.
+Revisit: none — right default.
+
+### 15. Stub markers for VELGATE_REVOKE (Task 4.2) and VELGATE_UPDATE (v1.1) — 2026-05-19 02:55
+
+What: velgate stubs out `VELGATE_REVOKE` (task 4.2 will implement) and `VELGATE_UPDATE` (v1.1 will implement). Both log clearly and exit non-zero when invoked.
+Why: keeps Phase 1 scope tight; stubs are documented in commits and code comments.
+Revisit: ensure Phase 4 delivers revoke; v1.1 delivers update mechanism.
+
+### 16. Binaries built in `bin/` (gitignored), not committed — 2026-05-19 02:55
+
+`bin/velgate-linux-amd64`, `bin/velsigner`, `bin/sshgate-mcp` build cleanly via `make build`. They're gitignored — `/sshgate:setup` runs `go build ./cmd/...` during install per Decision 2 in this log. Phase 2 task 2.4 wires this into the slash command.
