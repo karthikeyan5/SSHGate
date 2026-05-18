@@ -1,0 +1,162 @@
+# SSHGate classifier corpus.
+# Format: <EXPECTED>\t<cmd>
+# EXPECTED: READ or WRITE. Comment lines (#) and blank lines are ignored.
+# Sourced verbatim from spec §"Command Classification".
+
+# --- Read list (auto-allowed) ---
+READ	cat /etc/hosts
+READ	less /var/log/syslog
+READ	head -n 50 /etc/passwd
+READ	tail -f /var/log/nginx/access.log
+READ	wc -l /etc/services
+READ	file /usr/bin/ls
+READ	stat /etc/hosts
+READ	readlink /usr/bin/python
+READ	ls -la /var/log
+READ	find /var/log -name "*.gz"
+READ	locate nginx.conf
+READ	which docker
+READ	whereis ssh
+READ	grep -r "error" /var/log
+READ	awk '{print $1}' /etc/passwd
+READ	sed -n '1,10p' /etc/hosts
+READ	sort /etc/passwd
+READ	uniq /tmp/list
+READ	diff a.txt b.txt
+READ	df -h
+READ	du -sh /var/log
+READ	free -m
+READ	uptime
+READ	uname -a
+READ	hostname
+READ	whoami
+READ	id
+READ	groups karthi
+READ	ps aux
+READ	top -b -n 1
+READ	pgrep -f nginx
+READ	lsof -i :80
+READ	ss -tulpn
+READ	netstat -an
+READ	ip addr
+READ	ping -c 3 8.8.8.8
+READ	dig example.com
+READ	nslookup example.com
+READ	traceroute google.com
+READ	curl https://example.com
+READ	curl -s https://api.example.com/v1/status
+READ	wget -q -O- https://example.com
+READ	journalctl -u nginx
+READ	dmesg
+READ	last
+READ	w
+READ	who
+READ	systemctl status nginx
+READ	systemctl is-active nginx
+READ	systemctl is-enabled nginx
+READ	systemctl list-units --type=service
+READ	docker ps
+READ	docker logs my-container
+READ	docker inspect my-container
+READ	docker images
+READ	docker stats --no-stream
+READ	git status
+READ	git log --oneline
+READ	git diff HEAD~1
+READ	git show HEAD
+READ	git branch -a
+READ	date
+READ	timedatectl
+READ	env
+READ	printenv PATH
+READ	cat /proc/cpuinfo
+READ	cat /proc/meminfo
+READ	cat /sys/class/net/eth0/address
+
+# --- Write list (signature required) ---
+WRITE	rm /tmp/foo
+WRITE	rm -rf /var/cache/foo
+WRITE	mv /tmp/a /tmp/b
+WRITE	cp /etc/hosts /tmp/hosts.bak
+WRITE	mkdir -p /opt/app
+WRITE	rmdir /tmp/empty
+WRITE	touch /tmp/marker
+WRITE	chmod 0644 /etc/hosts
+WRITE	chown root:root /etc/hosts
+WRITE	chgrp wheel /var/log
+WRITE	sed -i 's/foo/bar/g' /etc/hosts
+WRITE	find /tmp -name "*.log" -delete
+WRITE	find /tmp -name "*.log" -exec rm {} \;
+WRITE	systemctl start nginx
+WRITE	systemctl stop nginx
+WRITE	systemctl restart nginx
+WRITE	systemctl enable nginx
+WRITE	systemctl disable nginx
+WRITE	service nginx restart
+WRITE	apt install -y nginx
+WRITE	apt-get update
+WRITE	yum install -y httpd
+WRITE	dnf upgrade -y
+WRITE	pacman -Syu
+WRITE	pip install requests
+WRITE	npm install express
+WRITE	docker run -d nginx
+WRITE	docker stop my-container
+WRITE	docker rm my-container
+WRITE	docker exec my-container sh
+WRITE	git commit -m "msg"
+WRITE	git push origin main
+WRITE	git checkout main
+WRITE	git merge feature
+WRITE	git reset --hard HEAD
+WRITE	kill 1234
+WRITE	killall nginx
+WRITE	pkill -f python
+WRITE	mount /dev/sda1 /mnt
+WRITE	umount /mnt
+WRITE	iptables -A INPUT -j DROP
+WRITE	ufw enable
+WRITE	firewall-cmd --reload
+WRITE	useradd alice
+WRITE	userdel bob
+WRITE	usermod -aG wheel alice
+WRITE	passwd alice
+WRITE	groupadd devs
+WRITE	crontab -e
+WRITE	at now + 1 minute
+WRITE	reboot
+WRITE	shutdown -h now
+WRITE	halt
+WRITE	vi /etc/hosts
+WRITE	vim /etc/hosts
+WRITE	nano /etc/hosts
+WRITE	emacs /etc/hosts
+
+# --- Tricky / classification-rule cases ---
+# Pipes: if ANY segment is a write, the whole thing is a write.
+WRITE	ps aux | tee /tmp/x
+READ	cat /etc/hosts | grep foo
+READ	ls -la | head -n 5
+WRITE	cat /etc/hosts | tee /tmp/copy
+# Redirects (>, >>) → write.
+WRITE	echo hi > /tmp/x
+WRITE	cat /etc/hosts >> /tmp/dump
+READ	cat </dev/zero | head -c 10
+# Semicolons / && / ||: any write segment → write.
+WRITE	ls; rm -f /tmp/x
+READ	ls && echo done
+WRITE	ls && rm /tmp/x
+WRITE	ls || rm /tmp/x
+# sudo prefix → always write, regardless of what follows.
+WRITE	sudo cat /etc/hosts
+WRITE	sudo ls /root
+# curl with -X POST/PUT/DELETE/PATCH or -d/--data → write; bare curl → read.
+WRITE	curl -X POST https://example.com/api
+WRITE	curl -X PUT https://example.com/api
+WRITE	curl -X DELETE https://example.com/api
+WRITE	curl -X PATCH https://example.com/api
+WRITE	curl -d "k=v" https://example.com
+WRITE	curl --data "k=v" https://example.com
+# Unknown commands default to write.
+WRITE	frobnicate --foo
+WRITE	madeupbinary arg1 arg2
