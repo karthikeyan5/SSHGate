@@ -1,4 +1,4 @@
-.PHONY: all build test vet clean velgate-linux
+.PHONY: all build test test-integration vet clean velgate-linux
 
 all: vet test build
 
@@ -17,6 +17,13 @@ velgate-linux:
 
 test:
 	go test -race ./...
+
+# Phase-1 e2e against a real Docker SSH target. Skipped automatically
+# if `docker compose` is unavailable. Excluded from `make test` so
+# contributor machines without Docker still get a green per-package
+# suite.
+test-integration:
+	go test -race -tags=integration ./tests/integration/... -timeout=180s -v
 
 # `go vet ./...` errors with "matched no packages" while the module is empty
 # (Phase 0). Guard with `go list` so vet is a no-op until source exists.
