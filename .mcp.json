@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sshgate": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/sshgate-mcp",
+      "env": {}
+    }
+  }
+}

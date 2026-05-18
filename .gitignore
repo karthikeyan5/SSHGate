@@ -1,0 +1,8 @@
+bin/
+*.tmp
+/tmp/
+**/.DS_Store
+docs/audits/*-report.md
+audits/*.log
+.idea/
+*.swp
