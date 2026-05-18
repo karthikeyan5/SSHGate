@@ -4,7 +4,7 @@ all: vet test build
 
 build:
 	mkdir -p bin
-	go build -o bin/sshgate-mcp ./src/sshgate-mcp/cmd/sshgate-mcp
+	go build -o bin/sshgate-mcp ./src/mcp/cmd/sshgate-mcp
 	go build -o bin/velsigner   ./src/velsigner/cmd/velsigner
 	go build -o bin/velgate     ./src/velgate/cmd/velgate
 
