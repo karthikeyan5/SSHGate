@@ -12,9 +12,12 @@ import (
 // deliberately flat and string-y so a `grep "request_id"` over the log
 // file is still useful when the operator has no JSON tooling handy.
 //
-// Status is one of "approved", "denied", "timeout", "error" — the same
-// strings backend.ResultStatus.String() emits, plus "error" for
-// protocol-level failures where no approval channel was even consulted.
+// Status is one of "approved", "approved-undelivered", "denied",
+// "timeout", "error" — the same strings backend.ResultStatus.String()
+// emits, plus "error" for protocol-level failures where no approval
+// channel was even consulted, plus "approved-undelivered" when an
+// approved request was signed but the response write to the MCP
+// failed (so the operator-visible decision did not reach the caller).
 //
 // ApprovedBy is the human-readable identifier of the approver when the
 // backend can provide one (Telegram populates it with the user's first

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -159,9 +160,23 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 	}
 
 	if err := writeJSONLine(conn, resp); err != nil {
-		// Even if the write failed, audit the decision: the daemon's
-		// view of "what happened" survives the dropped connection.
-		_ = d.audit(req, result.Status.String(), result.ApprovedBy)
+		// Audit-on-write-failure: the daemon signed and decided
+		// "approved" but the MCP never received the signatures, so
+		// from the operator's perspective the action was not
+		// delivered. Record this asymmetry explicitly rather than
+		// folding it into "approved" — daemon.md §5.1/§6 treat the
+		// audit log as authoritative; a row that says "approved" must
+		// imply "signatures left the daemon."
+		auditStatus := result.Status.String()
+		if result.Status == backend.StatusApproved {
+			auditStatus = "approved-undelivered"
+		}
+		if auditErr := d.audit(req, auditStatus, result.ApprovedBy); auditErr != nil {
+			// Surface the audit error to operators rather than dropping
+			// it on the floor; the write-response error is the more
+			// useful one for the caller, so it stays the return value.
+			fmt.Fprintf(os.Stderr, "velsigner: audit write failed: %v\n", auditErr)
+		}
 		return fmt.Errorf("write response: %w", err)
 	}
 	return d.audit(req, result.Status.String(), result.ApprovedBy)
@@ -174,7 +189,9 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 func (d *Daemon) respondError(conn io.Writer, reqID, reason string) error {
 	resp := signResponse{RequestID: reqID, Status: "error", Error: reason}
 	if err := writeJSONLine(conn, resp); err != nil {
-		_ = d.audit(signRequest{RequestID: reqID}, "error", "")
+		if auditErr := d.audit(signRequest{RequestID: reqID}, "error", ""); auditErr != nil {
+			fmt.Fprintf(os.Stderr, "velsigner: audit write failed: %v\n", auditErr)
+		}
 		return fmt.Errorf("write error response: %w", err)
 	}
 	return d.audit(signRequest{RequestID: reqID}, "error", "")
