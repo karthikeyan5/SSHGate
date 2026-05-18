@@ -30,6 +30,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -57,8 +58,23 @@ type tomlConfig struct {
 		Socket   string `toml:"socket"`
 	} `toml:"paths"`
 	Backend struct {
-		Type string `toml:"type"`
+		Type     string         `toml:"type"`
+		Telegram telegramConfig `toml:"telegram"`
 	} `toml:"backend"`
+}
+
+// telegramConfig is the [backend.telegram] block. Only consulted when
+// backend.type = "telegram"; an empty block is fine for stub.
+type telegramConfig struct {
+	// TokenPath points at a 0600 file whose entire content is the
+	// @BotFather-issued bot token (no quotes, no surrounding whitespace).
+	TokenPath string `toml:"token_path"`
+	// AllowedUserID is the only Telegram user_id whose callbacks the
+	// daemon will honour (spec §"velsigner-bot").
+	AllowedUserID int64 `toml:"allowed_user_id"`
+	// ChatStorePath is the JSON file capturing the DM chat_id learned
+	// from the allowed user's first /start.
+	ChatStorePath string `toml:"chatstore_path"`
 }
 
 func main() {
@@ -131,7 +147,10 @@ func run(args []string) int {
 	}
 	defer audit.Close()
 
-	bk, err := buildBackend(cfg.Backend.Type)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	bk, err := buildBackend(ctx, cfg.Backend)
 	if err != nil {
 		logf("build backend: %v", err)
 		return 1
@@ -143,9 +162,6 @@ func run(args []string) int {
 		Audit:   audit,
 	}
 	srv := &velsigner.Server{Path: cfg.Paths.Socket, Handler: daemon}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	// SIGHUP: log "restart to apply changes" and continue.
 	hupCh := make(chan os.Signal, 1)
@@ -200,18 +216,59 @@ func loadConfig(path string) (tomlConfig, error) {
 }
 
 // buildBackend returns the Backend implementation for the configured
-// type. Only "stub" is supported in v1.4; "telegram" returns a clear
-// "not yet implemented" error so a misconfigured production daemon
-// fails on startup rather than silently denying every write.
-func buildBackend(typeName string) (backend.Backend, error) {
-	switch typeName {
+// type. "telegram" loads the bot token from the configured token file,
+// validates it via getMe, then starts the polling loop. ctx scopes the
+// polling goroutine — when ctx is cancelled (SIGTERM), polling exits.
+func buildBackend(ctx context.Context, bcfg struct {
+	Type     string         `toml:"type"`
+	Telegram telegramConfig `toml:"telegram"`
+}) (backend.Backend, error) {
+	switch bcfg.Type {
 	case "stub":
 		return backend.StubBackend{}, nil
 	case "telegram":
-		return nil, errors.New(`backend "telegram" is not yet implemented in v1.4 — landing in task 2.1`)
+		return buildTelegramBackend(ctx, bcfg.Telegram)
 	default:
-		return nil, fmt.Errorf("unknown backend type %q", typeName)
+		return nil, fmt.Errorf("unknown backend type %q", bcfg.Type)
 	}
+}
+
+// buildTelegramBackend reads the bot token, constructs the backend
+// (which calls getMe internally — daemon.md §11 "fail fast at the
+// boundary"), and starts the polling goroutine before returning.
+func buildTelegramBackend(ctx context.Context, c telegramConfig) (backend.Backend, error) {
+	if c.TokenPath == "" {
+		return nil, errors.New(`config missing backend.telegram.token_path`)
+	}
+	if c.AllowedUserID == 0 {
+		return nil, errors.New(`config missing backend.telegram.allowed_user_id`)
+	}
+	if c.ChatStorePath == "" {
+		return nil, errors.New(`config missing backend.telegram.chatstore_path`)
+	}
+
+	tokenRaw, err := os.ReadFile(c.TokenPath)
+	if err != nil {
+		return nil, fmt.Errorf("read token: %w", err)
+	}
+	token := string(bytes.TrimSpace(tokenRaw))
+	if token == "" {
+		return nil, fmt.Errorf("token file %s is empty", c.TokenPath)
+	}
+
+	tb, err := backend.NewTelegramBackend(backend.TelegramOptions{
+		BotToken:      token,
+		AllowedUserID: c.AllowedUserID,
+		ChatStore:     &backend.FileChatStore{Path: c.ChatStorePath},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new telegram backend: %w", err)
+	}
+	if err := tb.Run(ctx); err != nil {
+		return nil, fmt.Errorf("start telegram polling: %w", err)
+	}
+	logf("telegram backend ready (allowed_user_id=%d chatstore=%s)", c.AllowedUserID, c.ChatStorePath)
+	return tb, nil
 }
 
 // defaultConfigPath returns the value of $VELSIGNER_CONFIG if set,
