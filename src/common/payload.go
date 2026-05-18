@@ -57,8 +57,17 @@ func EncodeSigned(sig []byte, payload SigPayload) (string, error) {
 // decoded payload. It returns an error if the prefix is missing, if the
 // envelope's two-colon shape is broken, if either base64 block is
 // malformed, or if the JSON payload is malformed or missing a required
-// field. DecodeSigned is strict: it does not tolerate surrounding
-// whitespace.
+// field.
+//
+// Per the spec the on-the-wire form is
+// `VELGATE_SIG:<sig>:<payload> <inner_cmd>` — i.e. a trailing space and
+// the inner command line follow the envelope so SSH server logs render
+// the operator's command in cleartext. The trailing content is
+// unauthenticated (the inner_cmd that actually runs is the one inside
+// the signed payload) and DecodeSigned ignores everything from the
+// first ASCII space onwards in the payload base64 field. Leading
+// whitespace is still rejected; trailing space-prefixed content is
+// tolerated.
 //
 // DecodeSigned does not verify the signature — that is the caller's job,
 // so this function can be reused by anything that needs to read the
@@ -74,6 +83,12 @@ func DecodeSigned(s string) (sig []byte, payload SigPayload, err error) {
 	}
 	sigB64 := rest[:sep]
 	payloadB64 := rest[sep+1:]
+	// Strip the optional " <inner_cmd>" trailer that the runner appends
+	// for SSH-log readability. base64 (URL-safe) does not contain spaces
+	// so a space cleanly delimits the envelope from the trailer.
+	if i := strings.IndexByte(payloadB64, ' '); i >= 0 {
+		payloadB64 = payloadB64[:i]
+	}
 	if sigB64 == "" {
 		return nil, SigPayload{}, errors.New("empty signature field")
 	}

@@ -153,6 +153,30 @@ func TestEncodeSigned_LongCmd(t *testing.T) {
 	}
 }
 
+func TestDecodeSigned_TrailingInnerCmd(t *testing.T) {
+	t.Parallel()
+	// Spec wire format: "VELGATE_SIG:<sig>:<payload> <inner_cmd>"
+	// — the trailing space + inner cmd is for SSH-log readability and
+	// MUST be tolerated by DecodeSigned (the inner cmd is unauthenticated;
+	// the authoritative cmd is inside the signed payload).
+	p := SigPayload{Cmd: "systemctl restart nginx", TS: 1, Exp: 60, Nonce: "n"}
+	envelope, err := EncodeSigned(fixedSig, p)
+	if err != nil {
+		t.Fatalf("EncodeSigned: %v", err)
+	}
+	withTrailer := envelope + " systemctl restart nginx"
+	gotSig, gotPayload, err := DecodeSigned(withTrailer)
+	if err != nil {
+		t.Fatalf("DecodeSigned(%q): %v", withTrailer, err)
+	}
+	if gotPayload != p {
+		t.Errorf("payload did not round-trip: got %+v want %+v", gotPayload, p)
+	}
+	if len(gotSig) != len(fixedSig) {
+		t.Errorf("sig length = %d; want %d", len(gotSig), len(fixedSig))
+	}
+}
+
 func TestIsSigned(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -223,8 +247,10 @@ func TestDecodeSigned_Errors(t *testing.T) {
 		{"missing required cmd", "VELGATE_SIG:" + sigB64 + ":" + missingCmdJSONPayloadB64},
 		{"empty cmd field", "VELGATE_SIG:" + sigB64 + ":" + emptyJSONPayloadB64},
 		{"leading whitespace", " " + good},
-		{"trailing whitespace", good + " "},
 		{"leading newline", "\n" + good},
+		// Note: a trailing space + arbitrary content is INTENTIONALLY
+		// tolerated — the on-wire format is "<envelope> <inner_cmd>"
+		// (see DecodeSigned doc). That case lives in the positive tests.
 	}
 	for _, tc := range cases {
 		tc := tc
