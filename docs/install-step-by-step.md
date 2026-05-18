@@ -244,6 +244,76 @@ systemctl status velsigner --no-pager
 
 You should see `Active: active (running)` and the version string.
 
+### 7. (Optional) LLM command explainer
+
+By default the approval message lists the queued commands verbatim.
+With this step enabled, velsigner additionally asks an OpenAI-compatible
+LLM to write a one-sentence plain-English explanation of each command
+and renders them beneath the corresponding command line — handy when
+you're approving from your phone and don't want to mentally parse
+`certbot --nginx -d example.com` at a glance.
+
+Approval is **never blocked** on the LLM: if the call times out or
+errors, velsigner sends the message without explanations and adds a
+small `(no explanations: …)` footer noting why.
+
+**a. Pick a provider + model.** Any OpenAI-compatible Chat Completions
+endpoint works. Two reasonable choices:
+
+- **OpenRouter** — pay-as-you-go, broad model catalogue. Endpoint
+  `https://openrouter.ai/api/v1/chat/completions`; a good cheap+fast
+  model for one-liner explanations is `anthropic/claude-haiku-4.5`.
+- **OpenAI** — endpoint
+  `https://api.openai.com/v1/chat/completions`; `gpt-4o-mini` is the
+  cost-sensible default.
+
+Local options (LM Studio, llama.cpp's `server`) also work — point
+`endpoint` at the local URL and leave any string in the key file.
+
+**b. Write the API key to disk.** Substitute your real key on stdin:
+
+```bash
+sudo install -o velsigner -g velsigner -m 600 /dev/null \
+    /var/lib/velsigner/tokens/llm-api.key
+sudo -u velsigner tee /var/lib/velsigner/tokens/llm-api.key >/dev/null
+# paste key, ctrl-D
+sudo stat -c '%a %U:%G' /var/lib/velsigner/tokens/llm-api.key
+# expect: 600 velsigner:velsigner
+```
+
+**c. Add the `[backend.telegram.explainer]` block to the config.**
+Replace the endpoint and model with your choice:
+
+```bash
+sudo tee -a /var/lib/velsigner/config/config.toml >/dev/null <<'EOF'
+
+[backend.telegram.explainer]
+enabled      = true
+endpoint     = "https://openrouter.ai/api/v1/chat/completions"
+model        = "anthropic/claude-haiku-4.5"
+api_key_path = "/var/lib/velsigner/tokens/llm-api.key"
+timeout_sec  = 5
+EOF
+```
+
+**d. Restart and verify.**
+
+```bash
+sudo systemctl restart velsigner
+journalctl -u velsigner -n 10 --no-pager
+# expect a line like:
+#   telegram explainer enabled (model=… endpoint=… timeout=5s)
+```
+
+On the next approval request you should see, beneath each command,
+an indented `→ <plain-English explanation>` line. If the LLM is
+unreachable or slow, you'll see the verbatim commands plus a
+`(no explanations: …)` footer — the daemon still asks for approval
+exactly as before.
+
+To disable the explainer later, set `enabled = false` (or remove the
+block entirely) and restart the daemon.
+
 ---
 
 ## Troubleshooting
@@ -274,6 +344,14 @@ clears it; if that fails, find the holder with
 **`go build` fails with "cannot find module".**
 You're not in the SSHGate repo root. `cd` to the directory containing
 `go.mod` and re-run.
+
+**Approval messages always show `(no explanations: …)`.**
+The LLM explainer is configured but every call is failing. Check
+`journalctl -u velsigner -n 50 --no-pager` for the underlying error.
+Common causes: wrong/expired API key, unreachable endpoint URL,
+`timeout_sec` set too low for the chosen model. Set
+`enabled = false` in `[backend.telegram.explainer]` and restart to
+disable the explainer entirely while you investigate.
 
 ---
 

@@ -40,6 +40,21 @@ type TelegramBackend struct {
 	reqTimeout    time.Duration
 	pollTimeout   int // seconds, passed to getUpdates
 
+	// Explainer is optional. When non-nil, Request calls it for the
+	// pending command list and renders one-line plain-English
+	// explanations underneath each command in the approval message.
+	// Approval is never blocked on Explainer availability — any error
+	// (including ctx.DeadlineExceeded from ExplainerTimeout) results
+	// in the commands being rendered alone with a small footer noting
+	// the reason. Set at construction; the field is exported so callers
+	// (cmd/velsigner/main) can wire it up post-NewTelegramBackend
+	// without an options-struct churn.
+	Explainer Explainer
+
+	// ExplainerTimeout bounds the wall-clock window of the Explainer
+	// call. Defaults to 5s if zero. Independent of reqTimeout.
+	ExplainerTimeout time.Duration
+
 	// Telegram client. Constructed in NewTelegramBackend (which calls
 	// GetMe to fail fast on a bad token); shared by Run + Request.
 	bot *tgbotapi.BotAPI
@@ -395,7 +410,8 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
 	}
 
-	text := formatApprovalMessage(req, t.reqTimeout)
+	explanations, explainErr := t.runExplainer(ctx, req.Commands)
+	text := formatApprovalMessage(req, t.reqTimeout, explanations, explainErr)
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -548,11 +564,84 @@ func outcomeMark(s ResultStatus) string {
 	}
 }
 
+// runExplainer is a thin wrapper around t.Explainer.Explain that:
+//   - returns (nil, nil) if no explainer is configured
+//   - enforces ExplainerTimeout (default 5s)
+//   - never panics — any panic in the Explainer is caught and logged so
+//     a misbehaving model client cannot kill the request goroutine
+//     (daemon.md §7).
+//
+// Returning a non-nil error tells the caller to fall back to the
+// "commands only + footer" rendering. The error string is fed through
+// sanitiseExplainerErr before rendering so we never leak credentials,
+// upstream URLs, or stack-y wrappers to Karthi's Telegram DM.
+func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []CommandReq) (lines []string, err error) {
+	if t.Explainer == nil || len(cmds) == 0 {
+		return nil, nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.panicsTotal.Add(1)
+			t.logger.Printf("PANIC in explainer: %v\n%s", r, debug.Stack())
+			lines = nil
+			err = fmt.Errorf("explainer panic")
+		}
+	}()
+
+	timeout := t.ExplainerTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ectx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	flat := make([]string, len(cmds))
+	for i, c := range cmds {
+		flat[i] = c.Cmd
+	}
+	return t.Explainer.Explain(ectx, flat)
+}
+
+// sanitiseExplainerErr renders a short, credential-free reason string
+// for the "no explanations" footer. We intentionally lose detail — the
+// daemon log carries the full err for diagnostics; the Telegram DM
+// only needs enough for Karthi to know whether to bother retrying.
+func sanitiseExplainerErr(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	}
+	// Strip anything that looks like a URL or bearer token — defence
+	// in depth in case a future Explainer leaks the endpoint or auth
+	// header into its error string.
+	msg := err.Error()
+	for _, banned := range []string{"http://", "https://", "Bearer "} {
+		if strings.Contains(msg, banned) {
+			return "upstream error"
+		}
+	}
+	if len(msg) > 80 {
+		msg = msg[:80] + "…"
+	}
+	return msg
+}
+
 // formatApprovalMessage renders the message body per spec
 // §"Approval message shape." We pick plain text (no Markdown/HTML
 // parse-mode) because commands can contain '*', '_', '`', etc., that
 // would otherwise need escaping — KISS over rich formatting.
-func formatApprovalMessage(req ApprovalRequest, timeout time.Duration) string {
+//
+// When explanations is non-nil and len matches Commands, each command
+// is followed by an indented "→ <explanation>" line; empty entries
+// render "→ (no explanation)". When explainErr is non-nil we fall
+// back to commands-only and append a single "(no explanations: …)"
+// footer line.
+func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanations []string, explainErr error) string {
 	var b strings.Builder
 	server := ""
 	if len(req.Commands) > 0 {
@@ -569,10 +658,23 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration) string {
 		b.WriteByte('s')
 	}
 	b.WriteString(" queued:\n")
+
+	renderExplanations := explainErr == nil && len(explanations) == len(req.Commands)
 	for i, c := range req.Commands {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, c.Cmd)
+		if renderExplanations {
+			line := explanations[i]
+			if line == "" {
+				b.WriteString("   → (no explanation)\n")
+			} else {
+				fmt.Fprintf(&b, "   → %s\n", line)
+			}
+		}
 	}
 	b.WriteString("\n")
+	if explainErr != nil {
+		fmt.Fprintf(&b, "(no explanations: %s)\n", sanitiseExplainerErr(explainErr))
+	}
 	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
 	fmt.Fprintf(&b, "Expires in %s\n", timeout)
 	return b.String()

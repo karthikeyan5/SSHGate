@@ -3,6 +3,7 @@ package backend_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -287,6 +288,37 @@ func newTestBackend(t *testing.T, fake *fakeTelegram, store backend.ChatStore, r
 		t.Fatalf("NewTelegramBackend: %v", err)
 	}
 	return tb
+}
+
+// stubExplainer is an in-memory Explainer for telegram_test scenarios.
+// Returning err != nil makes the backend take the "no explanations"
+// fallback path; returning lines exercises the rendering path.
+type stubExplainer struct {
+	lines []string
+	err   error
+	delay time.Duration
+}
+
+func (s *stubExplainer) Explain(ctx context.Context, cmds []string) ([]string, error) {
+	if s.delay > 0 {
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	// Pad / truncate to len(cmds) the same way OpenAICompatibleExplainer
+	// does — the backend renders one line per command.
+	out := make([]string, len(cmds))
+	for i := range cmds {
+		if i < len(s.lines) {
+			out[i] = s.lines[i]
+		}
+	}
+	return out, nil
 }
 
 // waitFor polls fn until it returns true or timeout elapses.
@@ -671,6 +703,170 @@ func TestTelegram_RequestRequiresChatID(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Request returned nil err with empty chatstore; want error")
+	}
+}
+
+func TestTelegram_ExplainerHappyPath(t *testing.T) {
+	t.Parallel()
+	fake := newFakeTelegram(t)
+	store := &backend.MemChatStore{}
+	_ = store.Save(allowedChatID)
+	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.Explainer = &stubExplainer{
+		lines: []string{
+			"restart the nginx web server",
+			"install certbot via apt",
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tb.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tb.Request(ctx, backend.ApprovalRequest{
+		RequestID: "r_expl",
+		Commands: []backend.CommandReq{
+			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60},
+			{Server: "prod", Cmd: "apt install -y certbot", TTLSec: 60},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, time.Second, func() bool { return len(fake.sentSnapshot()) == 1 })
+	body := fake.sentSnapshot()[0].Text
+
+	// Commands present.
+	for _, want := range []string{"systemctl restart nginx", "apt install -y certbot"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing command %q\n---\n%s", want, body)
+		}
+	}
+	// Explanations rendered with the arrow prefix beneath each command.
+	for _, want := range []string{
+		"restart the nginx web server",
+		"install certbot via apt",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing explanation %q\n---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "no explanations") {
+		t.Errorf("body unexpectedly contains 'no explanations' footer:\n%s", body)
+	}
+}
+
+func TestTelegram_ExplainerEmptyEntryRendersFallbackText(t *testing.T) {
+	t.Parallel()
+	fake := newFakeTelegram(t)
+	store := &backend.MemChatStore{}
+	_ = store.Save(allowedChatID)
+	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.Explainer = &stubExplainer{
+		lines: []string{"first explained", ""}, // second is empty
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tb.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tb.Request(ctx, backend.ApprovalRequest{
+		RequestID: "r_partial",
+		Commands: []backend.CommandReq{
+			{Server: "x", Cmd: "echo first", TTLSec: 60},
+			{Server: "x", Cmd: "echo second", TTLSec: 60},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, time.Second, func() bool { return len(fake.sentSnapshot()) == 1 })
+	body := fake.sentSnapshot()[0].Text
+	if !strings.Contains(body, "first explained") {
+		t.Errorf("body missing 'first explained':\n%s", body)
+	}
+	if !strings.Contains(body, "(no explanation)") {
+		t.Errorf("body missing '(no explanation)' fallback for empty entry:\n%s", body)
+	}
+}
+
+func TestTelegram_ExplainerErrorFallsBackToFooter(t *testing.T) {
+	t.Parallel()
+	fake := newFakeTelegram(t)
+	store := &backend.MemChatStore{}
+	_ = store.Save(allowedChatID)
+	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.Explainer = &stubExplainer{err: errors.New("upstream-down")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tb.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := tb.Request(ctx, backend.ApprovalRequest{
+		RequestID: "r_err",
+		Commands: []backend.CommandReq{
+			{Server: "x", Cmd: "echo hi", TTLSec: 60},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, time.Second, func() bool { return len(fake.sentSnapshot()) == 1 })
+	body := fake.sentSnapshot()[0].Text
+
+	if !strings.Contains(body, "echo hi") {
+		t.Errorf("body missing command after explainer error:\n%s", body)
+	}
+	if !strings.Contains(body, "no explanations") {
+		t.Errorf("body missing 'no explanations' footer after explainer error:\n%s", body)
+	}
+}
+
+func TestTelegram_ExplainerTimeoutFallsBackToFooter(t *testing.T) {
+	t.Parallel()
+	fake := newFakeTelegram(t)
+	store := &backend.MemChatStore{}
+	_ = store.Save(allowedChatID)
+	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.Explainer = &stubExplainer{delay: 500 * time.Millisecond}
+	tb.ExplainerTimeout = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tb.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err := tb.Request(ctx, backend.ApprovalRequest{
+		RequestID: "r_to",
+		Commands: []backend.CommandReq{
+			{Server: "x", Cmd: "echo timeout-case", TTLSec: 60},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Request blocked %s on explainer; expected ≤ ExplainerTimeout + slack", elapsed)
+	}
+
+	waitFor(t, time.Second, func() bool { return len(fake.sentSnapshot()) == 1 })
+	body := fake.sentSnapshot()[0].Text
+	if !strings.Contains(body, "echo timeout-case") {
+		t.Errorf("body missing command after explainer timeout:\n%s", body)
+	}
+	if !strings.Contains(body, "no explanations") {
+		t.Errorf("body missing 'no explanations' footer after explainer timeout:\n%s", body)
 	}
 }
 

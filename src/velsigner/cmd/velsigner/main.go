@@ -36,11 +36,13 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -75,6 +77,19 @@ type telegramConfig struct {
 	// ChatStorePath is the JSON file capturing the DM chat_id learned
 	// from the allowed user's first /start.
 	ChatStorePath string `toml:"chatstore_path"`
+	// Explainer is the optional LLM-explainer block. When Enabled is
+	// false (or this block is absent in the TOML), no explainer is
+	// wired up and v1 rendering applies.
+	Explainer explainerConfig `toml:"explainer"`
+}
+
+// explainerConfig is the [backend.telegram.explainer] block. v1.1 Task D.
+type explainerConfig struct {
+	Enabled    bool   `toml:"enabled"`
+	Endpoint   string `toml:"endpoint"`
+	Model      string `toml:"model"`
+	APIKeyPath string `toml:"api_key_path"`
+	TimeoutSec int    `toml:"timeout_sec"`
 }
 
 func main() {
@@ -264,11 +279,64 @@ func buildTelegramBackend(ctx context.Context, c telegramConfig) (backend.Backen
 	if err != nil {
 		return nil, fmt.Errorf("new telegram backend: %w", err)
 	}
+
+	// Optional: wire up the LLM command explainer (v1.1 Task D). The
+	// daemon refuses to start if [backend.telegram.explainer] enabled =
+	// true but the configured key file is missing — silent fallback is
+	// worse than fail-fast for a misconfigured operator.
+	if c.Explainer.Enabled {
+		ex, err := buildExplainer(c.Explainer)
+		if err != nil {
+			return nil, fmt.Errorf("build explainer: %w", err)
+		}
+		tb.Explainer = ex
+		if c.Explainer.TimeoutSec > 0 {
+			tb.ExplainerTimeout = time.Duration(c.Explainer.TimeoutSec) * time.Second
+		}
+		logf("telegram explainer enabled (model=%s endpoint=%s timeout=%s)",
+			c.Explainer.Model, c.Explainer.Endpoint, tb.ExplainerTimeout)
+	}
+
 	if err := tb.Run(ctx); err != nil {
 		return nil, fmt.Errorf("start telegram polling: %w", err)
 	}
 	logf("telegram backend ready (allowed_user_id=%d chatstore=%s)", c.AllowedUserID, c.ChatStorePath)
 	return tb, nil
+}
+
+// buildExplainer validates the explainer config block and returns a
+// configured OpenAICompatibleExplainer. Errors are wrapped with
+// per-field context so a misconfiguration message points the operator
+// at the exact TOML key.
+func buildExplainer(c explainerConfig) (backend.Explainer, error) {
+	if c.Endpoint == "" {
+		return nil, errors.New("config missing backend.telegram.explainer.endpoint")
+	}
+	if c.Model == "" {
+		return nil, errors.New("config missing backend.telegram.explainer.model")
+	}
+	if c.APIKeyPath == "" {
+		return nil, errors.New("config missing backend.telegram.explainer.api_key_path")
+	}
+	keyRaw, err := os.ReadFile(c.APIKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read explainer api key %s: %w", c.APIKeyPath, err)
+	}
+	key := string(bytes.TrimSpace(keyRaw))
+	if key == "" {
+		return nil, fmt.Errorf("explainer api key file %s is empty", c.APIKeyPath)
+	}
+	timeout := 5 * time.Second
+	if c.TimeoutSec > 0 {
+		timeout = time.Duration(c.TimeoutSec) * time.Second
+	}
+	return &backend.OpenAICompatibleExplainer{
+		Endpoint:   c.Endpoint,
+		Model:      c.Model,
+		APIKey:     key,
+		HTTPClient: &http.Client{Timeout: timeout},
+		Timeout:    timeout,
+	}, nil
 }
 
 // defaultConfigPath returns the value of $VELSIGNER_CONFIG if set,
