@@ -75,6 +75,22 @@ to read what `/sshgate:setup` does) is in
 Requirements: Linux with systemd, Go 1.22+, `sudo`, a Telegram
 account. Remote servers must be reachable over SSH and run Linux.
 
+### macOS (laptop) support
+
+`sshgate-mcp` and `velsigner` cross-compile to macOS — Mac users
+running Claude Code can build them with `make darwin`, which produces
+`bin/sshgate-mcp-darwin-{amd64,arm64}` and
+`bin/velsigner-darwin-{amd64,arm64}`. `velgate` stays Linux-only
+because it's deployed to remote Linux servers, not your laptop.
+
+v1.1 macOS support is **cross-compile only**: `scripts/install.sh`
+is Linux-specific (it uses `useradd`, `systemctl`, and
+`/etc/systemd/system/`), so on macOS you'll currently install the
+binaries by hand and write a launchd plist instead of the systemd
+unit. File paths also differ — `/usr/local/bin` on Intel Macs,
+`/opt/homebrew/bin` on Apple Silicon. A fully scripted macOS install
+path (launchd plist template + `install-darwin.sh`) lands in v1.2.
+
 ## Usage examples
 
 **Diagnose a full disk.**

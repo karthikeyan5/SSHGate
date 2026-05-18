@@ -22,6 +22,27 @@ follow the manual path.
 - (Phase 3, not Phase 2:) one or more remote Linux servers reachable
   over SSH; you'll add them later with `/sshgate:add`.
 
+### macOS users
+
+The Linux automation below (`scripts/install.sh`, systemd unit) does
+not run on macOS. For v1.1, the macOS install path is **semi-manual**:
+
+1. Run `make darwin` to produce
+   `bin/sshgate-mcp-darwin-{amd64,arm64}` and
+   `bin/velsigner-darwin-{amd64,arm64}`.
+2. Install the binaries by hand (`/usr/local/bin` on Intel,
+   `/opt/homebrew/bin` on Apple Silicon).
+3. Write a launchd plist (the macOS equivalent of the systemd unit
+   `scripts/install.sh` drops at `/etc/systemd/system/velsigner.service`)
+   that runs `velsigner --config …` as a dedicated user.
+4. Skip the `useradd`/`usermod`/`systemctl` steps in this guide —
+   their macOS equivalents (`dscl`, `launchctl`) aren't yet scripted.
+
+A scripted macOS install path (launchd plist template +
+`install-darwin.sh`) lands in v1.2. v1.1's macOS support is
+cross-compile + structural validation only — the rest of this guide
+assumes Linux.
+
 ---
 
 ## Quick path — `/sshgate:setup`

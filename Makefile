@@ -1,4 +1,5 @@
-.PHONY: all build test test-integration vet clean velgate-linux
+.PHONY: all build test test-integration vet clean velgate-linux \
+	sshgate-mcp-darwin velsigner-darwin darwin cross
 
 all: vet test build
 
@@ -14,6 +15,26 @@ velgate-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags='-s -w' \
 		-o bin/velgate-linux-amd64 ./src/velgate/cmd/velgate
+
+# macOS desktop builds (v1.1 Task C — for users running Claude Code on a Mac).
+# velsigner + sshgate-mcp run on the user's laptop; velgate is Linux-only
+# (it's deployed to remote Linux servers, so no darwin target for it).
+# Both archs built: amd64 (Intel Macs) + arm64 (Apple Silicon).
+sshgate-mcp-darwin:
+	mkdir -p bin
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-amd64 ./src/mcp/cmd/sshgate-mcp
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-arm64 ./src/mcp/cmd/sshgate-mcp
+
+velsigner-darwin:
+	mkdir -p bin
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/velsigner-darwin-amd64 ./src/velsigner/cmd/velsigner
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/velsigner-darwin-arm64 ./src/velsigner/cmd/velsigner
+
+darwin: sshgate-mcp-darwin velsigner-darwin
+	@echo "darwin builds done; velgate remains linux-only (deployed to Linux remotes)"
+
+# Full cross-build matrix: linux laptop binaries + linux remote velgate + darwin laptop binaries.
+cross: build velgate-linux darwin
 
 test:
 	go test -race ./...
