@@ -198,3 +198,30 @@ What: all four v1.1 features landed in 4 commits on a clean tree.
 - **macOS install:** if you decide to run SSHGate on a Mac (not just Linux), `make darwin` produces the binaries but the install script doesn't run on macOS. That's a v1.2 task. Linux is the supported install path for now.
 
 Moving to v2 scaffold.
+
+### 23. ✅ V2 SCAFFOLD COMPLETE — hosted velsigner-server architecture in place — 2026-05-19 06:45
+
+What: v2 scaffold landed in 4 commits. The architecture is real: an HTTP-backed `velsigner-server` runs on a VPS, holds the master signing key, exposes /v1/sign + /v1/poll + /v1/audit + /healthz. The velsigner daemon on Karthi's laptop swaps backends from `TelegramBackend` to `HostedServerBackend` via one config change (`backend.type = "hosted"`). The Backend interface abstraction proved out — same shape, different implementation.
+
+**Commits:** 16b3da1 (HTTP + bearer auth), 7a0969a (SQLite state store), 7e55d80 (HostedServerBackend client — the swap-point), 7539552 (deploy.sh + systemd unit + README).
+
+**What's in:**
+- `src/velsigner-server/` — stdlib net/http server, `modernc.org/sqlite` (CGO-free) state store, bearer-token auth, `--api-key-file` provisioning, systemd-unit deploy script, idempotent `deploy.sh` for VPS install
+- `src/velsigner/backend/hosted.go` — HostedServerBackend implements `backend.Backend`; POST /v1/sign → long-poll /v1/poll/{id} → returns Result
+- 28 new tests (11 routes + 10 store + 7 hosted backend)
+- `make velsigner-server` produces `bin/velsigner-server` (15MB statically linked)
+
+**What's NOT in (v2.1 follow-ups, documented in `src/velsigner-server/README.md`):**
+- **WebAuthn + TOTP web login** — auth is currently bearer-token only. The spec's tier 1/2/3 auth (TOTP / WebAuthn / hardware key) is the headline missing piece; everything else hinges on it.
+- **Web UI** — no HTML pages yet. The HTTP API works but you'd have to curl it. v2.1 adds htmx-style minimal UI.
+- **Multi-operator approval rules** ("two reviewers must approve") — schema supports it, logic doesn't yet.
+- **LLM explainer on the server side** — v1.1's explainer is client-side (velsigner), not server-side; v2.1 could move it server-side for centralized cache/rate limit.
+- **Monitoring/metrics** — no Prometheus endpoint yet.
+
+### 24. ⚠️ KNOWN LIMITATION — Backend.Result doesn't yet carry signatures — 2026-05-19 06:45
+
+What: in v1, velsigner does the actual signing locally (it owns the master key); Backend.Request returns only `Result{Status, ApprovedBy}`. In v2, the hosted server signs and returns signatures over HTTP. But `Backend.Result` has no Signatures field, so HostedServerBackend can't pipe the server's signatures back to MCP without modifying the interface.
+**Karthi attention:** this is the only meaningful gap in v2 scaffold. The HTTP wire works (test asserts signatures round-trip in the body); the in-process pass-through doesn't.
+Why: the v1 Backend abstraction was designed for "approval channel" not "remote signer"; the conflation only surfaced in v2.
+**Fix:** extend `Result` with `Signatures [][]byte`, update TelegramBackend/StubBackend to return empty, update velsigner.Daemon to use Result.Signatures if non-empty (skipping local signing) else fall back to local-sign-with-local-key. This is a focused refactor I'm dispatching next.
+Revisit: this commit lands before the session ends.
