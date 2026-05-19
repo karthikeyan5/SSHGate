@@ -76,9 +76,11 @@ func (m *MockBackend) Timeout(reqID string) {
 
 // resolve sends r on the channel for reqID, creating one if necessary
 // (so tests can pre-arrange an outcome before the daemon calls
-// Request). A double-resolve is a test bug but is silently ignored
-// (channel is buffered to 1, so the second send would deadlock — we
-// use a non-blocking send to keep the test from hanging on a bug).
+// Request). A double-resolve is a test bug — earlier versions silently
+// dropped the second send with a non-blocking select; now we panic so
+// the bug fails loudly instead of producing a green test with stale
+// state. Panic is the right vehicle here because MockBackend is a
+// test fixture, not production code.
 func (m *MockBackend) resolve(reqID string, r Result) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -93,8 +95,7 @@ func (m *MockBackend) resolve(reqID string, r Result) {
 	select {
 	case ch <- r:
 	default:
-		// already resolved — silently drop; tests that care should
-		// fail explicitly via their own assertions.
+		panic("MockBackend: double-resolve for request " + reqID)
 	}
 }
 
