@@ -1,0 +1,277 @@
+package redact
+
+import (
+	"bytes"
+	"errors"
+	"io"
+)
+
+// Writer sizing — the safe-prefix invariant.
+//
+// safePrefix is the number of trailing bytes we leave in the ring at
+// the end of each Write so that a secret straddling chunk boundaries
+// can still be matched on the next Write. 4 KiB covers every named
+// rule in the v1.2 ruleset (the longest non-PEM regex still fits
+// inside 4 KiB). PEM keys longer than safePrefix are handled by the
+// PEM accumulator (see pem.go).
+//
+// ringInitial is the initial ring capacity; ringMax is the hard cap
+// past which the writer flushes the head unconditionally. The cap
+// exists so a single Write of 100 MB cannot make us hold all 100 MB
+// in memory; the safe-prefix invariant only requires the *tail* to
+// be retained.
+const (
+	safePrefix  = 4 * 1024
+	ringInitial = 8 * 1024
+	ringMax     = 64 * 1024
+)
+
+// ErrWriterClosed is returned by Write after Close has been called.
+var ErrWriterClosed = errors.New("redact: write to closed writer")
+
+// Writer is an io.WriteCloser that wraps an underlying writer and
+// redacts any bytes matching its ruleset before forwarding them.
+// Pipeline: Write → buffer → scan → emit-safe-prefix → forward.
+//
+// Concurrency: Writer is NOT goroutine-safe. The gate uses one
+// writer per stream (stdout, stderr) and never shares them.
+//
+// Close flushes any remaining buffered bytes; it is safe to call
+// multiple times.
+type Writer struct {
+	dst     io.Writer
+	scanner *scanner
+
+	buf    []byte
+	closed bool
+
+	// pem is non-nil while the writer is inside a PEM block.
+	pem *pemAccumulator
+}
+
+// NewWriter wraps dst. Every byte written through w passes Layer 1
+// scanning using sessionSalt for HMAC marker keys; matched bytes are
+// replaced with `[SSHGATE_REDACTED key=<8hex>]` before being forwarded
+// to dst. rules is the compiled-in ruleset (see src/redact/rules/).
+//
+// The caller is responsible for closing the returned Writer.
+// Close does NOT close dst.
+func NewWriter(dst io.Writer, sessionSalt [32]byte, rules []Rule) *Writer {
+	return &Writer{
+		dst:     dst,
+		scanner: newScanner(sessionSalt, rules),
+		buf:     make([]byte, 0, ringInitial),
+	}
+}
+
+// Write appends p to the internal ring buffer, scans for matches in
+// the prefix that exceeds the safe-tail size, emits the scrubbed
+// prefix to dst, and returns. The contract honours io.Writer: n is
+// always len(p) on success (we always consume all input; the bytes
+// may sit in the buffer until the next Write or Close).
+func (w *Writer) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, ErrWriterClosed
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	// PEM accumulator path: every byte goes into the accumulator
+	// until it completes or aborts. The accumulator is responsible
+	// for spilling unconsumed bytes back into the normal path.
+	if w.pem != nil {
+		if err := w.feedPEM(p); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+
+	// Normal path: append, scan, emit.
+	w.buf = append(w.buf, p...)
+	if err := w.processBuffer(false); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// Close flushes any buffered bytes (running them through one last
+// scan with no safe-prefix held back) and marks the writer closed.
+// Subsequent Writes return ErrWriterClosed. Close does not close
+// the underlying writer.
+func (w *Writer) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if w.pem != nil {
+		// Unterminated PEM at EOF — flush whatever we have through
+		// unchanged. A well-formed key that finished on the same
+		// Write would already have completed via feedPEM.
+		buffered := w.pem.buf
+		w.pem = nil
+		if len(buffered) > 0 {
+			if _, err := w.dst.Write(buffered); err != nil {
+				return err
+			}
+		}
+	}
+	return w.processBuffer(true)
+}
+
+// feedPEM drives the accumulator. On completion the matched PEM
+// span is replaced with a single marker (using HMAC of the secret
+// bytes); on abort the buffered bytes pass through unchanged.
+// Either way the unconsumed Tail is re-fed to the normal path so
+// the next BEGIN inside the tail still triggers accumulator mode.
+func (w *Writer) feedPEM(chunk []byte) error {
+	res := w.pem.feed(chunk)
+	switch {
+	case res.Complete:
+		w.pem = nil
+		marker := FormatMarker(w.scanner.salt, res.Buffered)
+		if _, err := w.dst.Write([]byte(marker)); err != nil {
+			return err
+		}
+		w.scanner.redactCount.Add(1)
+		// Re-feed tail through normal scan.
+		if len(res.Tail) > 0 {
+			w.buf = append(w.buf, res.Tail...)
+			return w.processBuffer(false)
+		}
+		return nil
+	case res.Aborted:
+		w.pem = nil
+		// Buffered bytes pass through verbatim — this was a false
+		// BEGIN. The agent gets to see whatever those bytes were.
+		if _, err := w.dst.Write(res.Buffered); err != nil {
+			return err
+		}
+		return nil
+	default:
+		// Still in progress.
+		return nil
+	}
+}
+
+// processBuffer scans w.buf, splits it into a flushable prefix
+// (everything past the safe-prefix tail) and a held tail, and emits
+// the prefix. When flush=true (Close), the entire buffer is
+// flushable.
+func (w *Writer) processBuffer(flush bool) error {
+	// If a BEGIN marker entered the buffer, transition to accumulate
+	// mode for the BEGIN onward. We do this before length-based
+	// flushing so the BEGIN never gets cut by the safe-prefix split.
+	if idx := findPEMBegin(w.buf); idx >= 0 {
+		// Emit any pre-BEGIN bytes that have already aged past the
+		// safe prefix; the BEGIN-and-after move into the accumulator.
+		head := w.buf[:idx]
+		if len(head) > 0 {
+			if err := w.scanAndEmit(head); err != nil {
+				return err
+			}
+		}
+		// Hand the BEGIN-and-after bytes to a fresh accumulator. The
+		// accumulator might already see the matching END inside the
+		// span we hand it; drive it once to handle that case (and to
+		// uniformly handle the "input completes the PEM in one Write"
+		// path).
+		w.pem = &pemAccumulator{buf: make([]byte, 0, len(w.buf)-idx+512)}
+		tail := append([]byte(nil), w.buf[idx:]...)
+		w.buf = w.buf[:0]
+		return w.feedPEM(tail)
+	}
+
+	// Decide how much of the buffer we can safely emit.
+	var emitUpTo int
+	switch {
+	case flush:
+		emitUpTo = len(w.buf)
+	case len(w.buf) <= safePrefix:
+		// Below safe-prefix: hold everything until the next Write or Close.
+		return nil
+	default:
+		// Both the normal and "ring cap exceeded" paths emit
+		// (len - safePrefix) so a secret straddling the prefix/tail
+		// boundary still has the tail to match against next time.
+		emitUpTo = len(w.buf) - safePrefix
+	}
+
+	if emitUpTo <= 0 {
+		return nil
+	}
+
+	// Scan the entire buffer (prefix + tail) for matches. A match
+	// whose start lies inside the prefix-to-emit is redacted on
+	// emission. A match that straddles the prefix/tail boundary
+	// (start before emitUpTo, end past emitUpTo) makes emitUpTo
+	// retreat to the match's start — we retain the entire match in
+	// the tail so it can complete or be matched again next round.
+	matches := w.scanner.findMatches(w.buf)
+	for _, m := range matches {
+		if m.Start < emitUpTo && m.End > emitUpTo {
+			// Straddler: hold the whole thing in the tail.
+			emitUpTo = m.Start
+			break
+		}
+	}
+
+	if emitUpTo <= 0 {
+		// All matches straddle into the tail; hold the buffer for
+		// next round. (Edge case only triggered by adversarial input
+		// where a near-ring-max secret begins at offset 0.)
+		return nil
+	}
+
+	// Keep only matches that fit fully within the prefix we're about
+	// to emit; the writer's normal scan-on-next-Write picks up any
+	// straddler we deferred above.
+	var emitMatches []match
+	for _, m := range matches {
+		if m.End <= emitUpTo {
+			emitMatches = append(emitMatches, m)
+		}
+	}
+
+	if err := w.emitWithMatches(w.buf[:emitUpTo], emitMatches); err != nil {
+		return err
+	}
+	// Compact: move the held tail to the start of the buffer.
+	w.buf = append(w.buf[:0], w.buf[emitUpTo:]...)
+	return nil
+}
+
+// emitWithMatches writes span to dst with the given pre-computed
+// matches redacted. Counter is updated.
+func (w *Writer) emitWithMatches(span []byte, matches []match) error {
+	out := make([]byte, 0, len(span))
+	out, n := w.scanner.redact(out, span, matches)
+	if n > 0 {
+		w.scanner.redactCount.Add(uint64(n))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	_, err := w.dst.Write(out)
+	return err
+}
+
+// scanAndEmit runs the scanner over span, writes the scrubbed bytes
+// to dst, and updates the per-process counter. Used by the PEM
+// pre-emit path where there's no need for straddler retention.
+func (w *Writer) scanAndEmit(span []byte) error {
+	matches := w.scanner.findMatches(span)
+	return w.emitWithMatches(span, matches)
+}
+
+// Redactions reports the total number of inline markers this writer
+// has emitted. Cheap; safe to call from any goroutine.
+func (w *Writer) Redactions() uint64 {
+	return w.scanner.Stats()
+}
+
+// hasNoMarker is a debugging helper used by tests to assert that a
+// passthrough chunk is verbatim. Not part of the public API.
+func hasNoMarker(b []byte) bool {
+	return !bytes.Contains(b, []byte(MarkerPrefix))
+}

@@ -1,0 +1,139 @@
+package redact
+
+import (
+	"sort"
+	"sync/atomic"
+)
+
+// scanner runs the Layer 1 named-format ruleset against a byte
+// buffer. It is the workhorse of the writer's hot path.
+//
+// Conflict-resolution order (locked spec §"Conflict resolution"):
+//
+//  1. Layer 1 named regex (built-in + sshgate-native + gitleaks).
+//     Matches are sticky in v1.2.
+//  2. Layer 2 file-mode heuristic. (R3 — not in R1.)
+//  3. Layer 1 entropy. (thorough mode only — absent in v1.2.)
+//  4. Recursive decode pass. (R4 — not in R1.)
+//  5. Layer 3 redactlist. (R2 — not in R1.)
+//  6. Emit remaining flagged spans as redactions.
+//
+// R1 implements step 1 only; the writer's chunk path is structured
+// so steps 2-5 hook in at well-defined points without re-plumbing.
+
+type scanner struct {
+	rules []Rule
+	salt  [32]byte
+
+	// redactCount is a per-process counter of inline matches turned
+	// into markers. Exposed via Stats(); a future redact.list /
+	// redact.stats command (R5) reads it.
+	redactCount atomic.Uint64
+}
+
+func newScanner(salt [32]byte, rules []Rule) *scanner {
+	return &scanner{rules: rules, salt: salt}
+}
+
+// match is a single rule hit on a buffer. Start/End are byte offsets
+// into the buffer where the secret group lies; RuleID identifies
+// which rule fired (used for audit logging in R2+).
+type match struct {
+	Start, End int
+	RuleID     string
+	Secret     []byte
+}
+
+// findMatches returns all rule matches inside buf, sorted by start
+// offset and de-overlapped (earlier match wins). The result is a
+// fresh slice — caller owns it.
+func (s *scanner) findMatches(buf []byte) []match {
+	if len(buf) == 0 || len(s.rules) == 0 {
+		return nil
+	}
+	var out []match
+	for _, r := range s.rules {
+		if !r.matchesKeyword(buf) {
+			continue
+		}
+		idxs := r.Regex.FindAllSubmatchIndex(buf, -1)
+		for _, ix := range idxs {
+			start, end := ix[0], ix[1]
+			if r.SecretGroup > 0 {
+				// FindAllSubmatchIndex returns 2*N+2 ints per match:
+				// [matchStart, matchEnd, g1Start, g1End, g2Start, g2End, ...]
+				gi := 2 * r.SecretGroup
+				if gi+1 < len(ix) && ix[gi] >= 0 {
+					start, end = ix[gi], ix[gi+1]
+				}
+			}
+			n := end - start
+			if r.MinLen > 0 && n < r.MinLen {
+				continue
+			}
+			if r.MaxLen > 0 && n > r.MaxLen {
+				continue
+			}
+			out = append(out, match{
+				Start:  start,
+				End:    end,
+				RuleID: r.ID,
+				Secret: append([]byte(nil), buf[start:end]...),
+			})
+		}
+	}
+	return dedupMatches(out)
+}
+
+// dedupMatches sorts matches by start and drops any whose range
+// overlaps an earlier (already-kept) match. Same-start ties resolve
+// to the longer match — there are no consequential cases of two
+// rules matching the same span at the same start in v1.2, but the
+// rule is deterministic.
+func dedupMatches(in []match) []match {
+	if len(in) <= 1 {
+		return in
+	}
+	sort.Slice(in, func(i, j int) bool {
+		if in[i].Start != in[j].Start {
+			return in[i].Start < in[j].Start
+		}
+		// Tie-break: longer match first.
+		return (in[i].End - in[i].Start) > (in[j].End - in[j].Start)
+	})
+	out := in[:0:len(in)]
+	lastEnd := -1
+	for _, m := range in {
+		if m.Start < lastEnd {
+			continue
+		}
+		out = append(out, m)
+		lastEnd = m.End
+	}
+	return out
+}
+
+// redact emits a redacted copy of buf into dst, replacing every
+// matched span with the appropriate inline marker. n is the number
+// of matches applied; the writer reports it to the process-wide
+// counter on Close.
+func (s *scanner) redact(dst, buf []byte, matches []match) ([]byte, int) {
+	if len(matches) == 0 {
+		return append(dst, buf...), 0
+	}
+	prev := 0
+	for _, m := range matches {
+		dst = append(dst, buf[prev:m.Start]...)
+		dst = append(dst, FormatMarker(s.salt, m.Secret)...)
+		prev = m.End
+	}
+	dst = append(dst, buf[prev:]...)
+	return dst, len(matches)
+}
+
+// Stats reports the per-process redaction counter. Exposed so a
+// future signed redact.stats command (R5) can return it; today only
+// tests consume it.
+func (s *scanner) Stats() uint64 {
+	return s.redactCount.Load()
+}
