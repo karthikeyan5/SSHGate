@@ -13,18 +13,60 @@ Be terse. Surface every command verbatim. Stop on the first failure
 and print the literal error. PAUSE markers mean "wait for user input
 before proceeding."
 
+## When to surface to the user
+
+Stop and ask the user for direction (do not silently retry) in any of
+these situations. Surface the literal command, its full error output,
+and one concrete next step.
+
+- **`scripts/install.sh` exits non-zero.** Print the script's last 20
+  lines of output and ask the user to re-run it manually in their
+  sudo terminal so they see the prompts directly. Do not loop.
+- **`systemctl is-active sshgate-signer-telegram` returns anything
+  other than `active` after two install attempts.** Surface
+  `journalctl -u sshgate-signer-telegram -n 50 --no-pager` and ask
+  the user whether to continue debugging or roll back.
+- **The Telegram `/start` capture poll exits with "not yet" after the
+  full 30-second window AND a manual re-poll.** Ask the user to
+  confirm the bot username they sent `/start` to, and to confirm the
+  `allowed_user_id` matches @userinfobot's reply. Do not silently
+  re-poll a third time.
+- **Step 0 classifies the install as `PARTIAL`.** Report each on-disk
+  probe (`ssh/user/key/tg`) verbatim and ask the user whether to run
+  `scripts/uninstall.sh` or to clean state by hand. Never auto-clean.
+- **The user denies any approval-related step (token paste, sudo
+  prompt, Telegram link).** Stop. Do not re-prompt — ask why and
+  offer to skip the tier or roll back.
+- **A required external dependency is missing (Go < 1.22, `jq`
+  missing for the registry-enumeration step, `systemctl` absent
+  because the user is on macOS or a non-systemd distro).** Tell the
+  user which dependency is missing and stop; do not try to install
+  it yourself.
+- **`sshgate-mcp` cannot read `~/.config/sshgate/servers.json`
+  during T2.6.** Surface the file's perms and ask the user to fix
+  them; do not chmod-by-yourself.
+
 ## Tier overview (for your own reference; do not narrate verbatim)
 
 - **Tier 1 — Read-only:** gate is deployed on remotes but NO
   gate.pub is uploaded. Reads work; writes are denied locally at
   the gate. No signer, no Telegram, no master key. Fastest install.
 - **Tier 2 — Local Telegram signer:** master keypair under the
-  `sshgate-signer-telegram` system user, sshgate-signer-telegram systemd unit, Telegram bot for
-  approvals. Writes get a phone-tap approval. gate.pub pushed to
-  every already-registered server (tier-1 → tier-2 upgrade).
+  `sshgatesigner` system user, `sshgate-signer-telegram` systemd
+  unit, Telegram bot for approvals. Writes get a phone-tap
+  approval. gate.pub pushed to every already-registered server
+  (tier-1 → tier-2 upgrade).
 - **Tier 3 — Hosted server signer:** NOT YET AVAILABLE. The hosted
   signer (`src/signer-server`) needs the v2.x web UI + WebAuthn
   flow to ship before this can be wired in.
+
+**Naming bridge (used throughout the rest of this file):** the Unix
+user is `sshgatesigner` (no hyphen). The binary, the `/usr/local/bin`
+filename, and the systemd service unit are all `sshgate-signer-telegram`.
+If you see `sshgatesigner` in a `useradd`/`getent`/`-u`-style context
+it is the Unix user; if you see `sshgate-signer-telegram` in a
+`systemctl`/`journalctl`/`./bin/`-style context it is the binary or
+service unit.
 
 ---
 
@@ -432,10 +474,10 @@ For each registered alias, tell the user to run (from a Claude
 session attached to this MCP server, since the upgrade routes through
 the bootstrap leg which needs the operator's normal SSH access):
 
-> For each alias listed above, re-run `/sshgate:add <alias> <user@host> --read-only=false`
-> using the SAME bootstrap credentials you used originally. The
-> `add_server` tool will detect the existing restricted entry and
-> push the new gate.pub idempotently.
+> For each alias listed above, re-run `/sshgate:add <alias> <user@host>`
+> (without `--read-only`) using the SAME bootstrap credentials you
+> used originally. The `add_server` tool will detect the existing
+> restricted entry and push the new gate.pub idempotently.
 
 (If a real automation hook lands later — e.g. an `upgrade_server`
 MCP tool — surface that here instead.)

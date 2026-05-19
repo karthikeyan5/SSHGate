@@ -62,8 +62,12 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 ## Install
 
+Marketplace publishing is on the v1.x roadmap. For now, clone the repo and invoke the setup command from a Claude Code session opened inside the clone:
+
 ```
-/plugin install sshgate
+git clone <repo-url> SSHGate
+cd SSHGate
+# then, inside Claude Code:
 /sshgate:setup
 ```
 
