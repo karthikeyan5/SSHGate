@@ -148,14 +148,21 @@ stat -c '%a' ~/.config/sshgate/ssh/sshgate_ed25519
 
 ### 4. Add a server (read-only deploy)
 
-From a Claude session, ask the model to call `sshgate.add_server`
-with `read_only=true`. The tool uploads gate but skips
-gate.pub — the remote runs in read-only mode. Reads succeed,
-writes return exit 77 with the "no signing key configured" message.
+From a Claude session, run:
+
+```
+/sshgate:add <alias> <user@host> --read-only
+```
+
+The `--read-only` flag tells `sshgate.add_server` to upload gate
+but skip gate.pub — the remote runs in read-only mode. Reads
+succeed, writes return exit 77 with the "no signing key configured"
+message.
 
 To upgrade a tier-1 server to tier-2 later (after you've added a
-signer), re-run add_server with `read_only=false` and the same
-bootstrap credentials. The new gate.pub is pushed idempotently.
+signer), re-run `/sshgate:add <alias> <user@host>` **without**
+`--read-only` and using the same bootstrap credentials. The new
+gate.pub is pushed idempotently.
 
 ---
 
@@ -348,7 +355,14 @@ credentials you used originally. The tool detects the existing
 restricted entry in `authorized_keys` and pushes the new
 `gate.pub` idempotently — no rewrites, no rollback risk.
 
-### 6. (Optional) LLM command explainer
+### 5b. (Optional) LLM command explainer
+
+> **You can skip this step.** Tier 2 is fully functional after step 5
+> — the approval messages list every command verbatim. This step
+> only adds a one-line plain-English gloss beneath each command in
+> the Telegram approval message, drawn from an OpenAI-compatible LLM.
+> It's a quality-of-life add-on; if you don't want a third-party LLM
+> in the loop or want to defer this decision, jump to **Troubleshooting**.
 
 By default the approval message lists the queued commands verbatim.
 With this step enabled, signer additionally asks an OpenAI-compatible
@@ -377,7 +391,7 @@ Local options (LM Studio, llama.cpp's `server`) also work — point
 **b. Write the API key to disk.** Substitute your real key on stdin:
 
 ```bash
-sudo install -o signer -g signer -m 600 /dev/null \
+sudo install -o sshgatesigner -g sshgatesigner -m 600 /dev/null \
     /var/lib/sshgatesigner/tokens/llm-api.key
 sudo -u sshgatesigner tee /var/lib/sshgatesigner/tokens/llm-api.key >/dev/null
 # paste key, ctrl-D

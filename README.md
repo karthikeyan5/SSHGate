@@ -73,6 +73,8 @@ Full step-by-step (for users without Claude Code, or anyone who wants to read wh
 
 Requirements: Linux with systemd, Go 1.22+, sudo (for Tier 2 only), a Telegram account (for Tier 2 only). Remote servers must be reachable over SSH and run Linux.
 
+macOS: cross-compile only in v1.x; native install path is v1.2. See [the install guide](docs/install-step-by-step.md#macos-users) for status.
+
 ---
 
 ## Usage examples
