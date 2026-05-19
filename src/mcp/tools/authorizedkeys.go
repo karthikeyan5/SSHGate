@@ -11,10 +11,10 @@ import (
 
 // commandForcing is the option list prepended to the SSHGate dedicated
 // key in authorized_keys. The command field is templated with the
-// remote path to the velgate binary; the other restrictions are static.
+// remote path to the gate binary; the other restrictions are static.
 // Spec §"SSH key management":
 //
-//	command="~/.velgate/velgate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding <key>
+//	command="~/.sshgate-gate/gate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding <key>
 const commandForcingFmt = `command="%s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding `
 
 // rewriteAuthorizedKeys returns the new contents of authorized_keys
@@ -29,8 +29,8 @@ const commandForcingFmt = `command="%s",no-port-forwarding,no-X11-forwarding,no-
 // verbatim and in order. The returned buffer always ends with a
 // trailing newline so concatenation is well-defined.
 //
-// commandPath is the remote path to the velgate binary (e.g.
-// "~/.velgate/velgate"). It is embedded verbatim into the
+// commandPath is the remote path to the gate binary (e.g.
+// "~/.sshgate-gate/gate"). It is embedded verbatim into the
 // command="..." field; callers MUST keep it free of shell
 // metacharacters and double-quotes.
 func rewriteAuthorizedKeys(existing []byte, pubkey ssh.PublicKey, commandPath string) ([]byte, error) {

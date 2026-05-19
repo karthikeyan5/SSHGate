@@ -1,6 +1,6 @@
 // Package classify holds the read/write command classifier defined by
-// the spec's "Command Classification" section. It is shared by velgate
-// (the remote gate), velsigner (the signing daemon), and the SSHGate
+// the spec's "Command Classification" section. It is shared by gate
+// (the remote gate), signer (the signing daemon), and the SSHGate
 // MCP so all three components share one source of truth about which
 // shell commands need an approval flow.
 //

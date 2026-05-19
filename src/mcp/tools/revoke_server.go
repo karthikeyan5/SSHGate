@@ -10,7 +10,7 @@ import (
 )
 
 // RevokeServerInput is the JSON input to sshgate.revoke_server. The
-// tool tears down the remote velgate install behind alias and removes
+// tool tears down the remote gate install behind alias and removes
 // the alias from the local registry. Spec §"Revocation → From our end
 // (remote)".
 type RevokeServerInput struct {
@@ -29,27 +29,27 @@ type RevokeServerOutput struct {
 }
 
 // RevokeTTLSec is the validity window we request when signing the
-// VELGATE_REVOKE command. Spec calls for 60s — long enough to cover
+// SSHGATE_REVOKE command. Spec calls for 60s — long enough to cover
 // dial+exec, well under sigwire.MaxSigValidity.
 const RevokeTTLSec = 60
 
-// revokeStdoutMarker is the prefix velgate prints on successful revoke
-// (see velgate.FormatRevokeStdout). The MCP side requires the marker
+// revokeStdoutMarker is the prefix gate prints on successful revoke
+// (see gate.FormatRevokeStdout). The MCP side requires the marker
 // before removing the alias from the registry.
-const revokeStdoutMarker = "VELGATE_REVOKED"
+const revokeStdoutMarker = "SSHGATE_REVOKED"
 
-// RevokeServer signs VELGATE_REVOKE, runs it on the remote, and on
+// RevokeServer signs SSHGATE_REVOKE, runs it on the remote, and on
 // confirmation removes the alias from the registry.
 //
 // Flow:
 //
 //  1. Look up alias → unknown → return error.
-//  2. Sign VELGATE_REVOKE through the velsigner backend (one-cmd
+//  2. Sign SSHGATE_REVOKE through the signer backend (one-cmd
 //     sign request, TTL = RevokeTTLSec).
-//  3. SSH the signed line. velgate's main.go routes it to doRevoke,
+//  3. SSH the signed line. gate's main.go routes it to doRevoke,
 //     which strips the SSHGate-restricted authorized_keys line and
-//     removes ~/.velgate/.
-//  4. Verify stdout contains VELGATE_REVOKED; remove alias from the
+//     removes ~/.sshgate-gate/.
+//  4. Verify stdout contains SSHGATE_REVOKED; remove alias from the
 //     registry. Registry write failures keep RemoteCleaned=true so the
 //     operator can re-run revoke or hand-clean the registry.
 //
@@ -79,10 +79,10 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: request id: %w", err)
 	}
 	// Spec defines CmdReq.Server as the registered alias (recorded
-	// in the velsigner audit log), not the underlying hostname.
+	// in the signer audit log), not the underlying hostname.
 	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{
 		Server: in.Alias,
-		Cmd:    "VELGATE_REVOKE",
+		Cmd:    "SSHGATE_REVOKE",
 		TTLSec: RevokeTTLSec,
 	}})
 	if err != nil {
@@ -91,7 +91,7 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 	if len(signed) != 1 {
 		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: expected 1 signature; got %d", len(signed))
 	}
-	wireCmd := signed[0].Sig + " VELGATE_REVOKE"
+	wireCmd := signed[0].Sig + " SSHGATE_REVOKE"
 
 	stdout, stderr, exit, err := r.SSH.Run(ctx, entry.Host, entry.User, entry.Port, wireCmd)
 	if err != nil {
@@ -100,7 +100,7 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 	}
 	if !strings.Contains(string(stdout), revokeStdoutMarker) {
 		return RevokeServerOutput{Alias: in.Alias},
-			fmt.Errorf("tools: velgate did not confirm revoke (stdout=%q stderr=%q exit=%d)",
+			fmt.Errorf("tools: gate did not confirm revoke (stdout=%q stderr=%q exit=%d)",
 				strings.TrimSpace(string(stdout)), strings.TrimSpace(string(stderr)), exit)
 	}
 

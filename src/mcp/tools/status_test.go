@@ -52,7 +52,7 @@ func (t *trackingSSH) Run(_ context.Context, host, _ string, _ int, cmd string) 
 	}
 	body, ok := t.stdouts[host]
 	if !ok {
-		body = []byte("VELGATE_OK\n")
+		body = []byte("SSHGATE_OK\n")
 	}
 	return body, nil, 0, nil
 }
@@ -82,10 +82,10 @@ func startUnixListener(t *testing.T, path string) func() {
 	}
 }
 
-func TestStatus_VelsignerReachable(t *testing.T) {
+func TestStatus_SignerReachable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "velsigner.sock")
+	sockPath := filepath.Join(dir, "signer.sock")
 	cleanup := startUnixListener(t, sockPath)
 	t.Cleanup(cleanup)
 
@@ -97,28 +97,28 @@ func TestStatus_VelsignerReachable(t *testing.T) {
 		Servers:           r,
 		Sign:              &fakeSign{},
 		SSH:               newTrackingSSH(),
-		VelsignerSockPath: sockPath,
+		SignerSockPath: sockPath,
 	}
 
 	out, err := runner.Status(context.Background(), tools.StatusInput{})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if !out.VelsignerSocket.Reachable {
-		t.Errorf("VelsignerSocket.Reachable = false; want true (err=%q)", out.VelsignerSocket.Error)
+	if !out.SignerSocket.Reachable {
+		t.Errorf("SignerSocket.Reachable = false; want true (err=%q)", out.SignerSocket.Error)
 	}
-	if out.VelsignerSocket.Path != sockPath {
-		t.Errorf("VelsignerSocket.Path = %q; want %q", out.VelsignerSocket.Path, sockPath)
+	if out.SignerSocket.Path != sockPath {
+		t.Errorf("SignerSocket.Path = %q; want %q", out.SignerSocket.Path, sockPath)
 	}
-	if out.VelsignerSocket.Error != "" {
-		t.Errorf("VelsignerSocket.Error = %q; want empty", out.VelsignerSocket.Error)
+	if out.SignerSocket.Error != "" {
+		t.Errorf("SignerSocket.Error = %q; want empty", out.SignerSocket.Error)
 	}
 	if len(out.Servers) != 0 {
 		t.Errorf("Servers len = %d; want 0", len(out.Servers))
 	}
 }
 
-func TestStatus_VelsignerMissing(t *testing.T) {
+func TestStatus_SignerMissing(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	r, err := registry.New(filepath.Join(dir, "servers.json"))
@@ -129,25 +129,25 @@ func TestStatus_VelsignerMissing(t *testing.T) {
 		Servers:           r,
 		Sign:              &fakeSign{},
 		SSH:               newTrackingSSH(),
-		VelsignerSockPath: filepath.Join(dir, "missing.sock"),
+		SignerSockPath: filepath.Join(dir, "missing.sock"),
 	}
 
 	out, err := runner.Status(context.Background(), tools.StatusInput{})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if out.VelsignerSocket.Reachable {
-		t.Error("VelsignerSocket.Reachable = true; want false")
+	if out.SignerSocket.Reachable {
+		t.Error("SignerSocket.Reachable = true; want false")
 	}
-	if out.VelsignerSocket.Error == "" {
-		t.Error("VelsignerSocket.Error is empty; want a dial-failure message")
+	if out.SignerSocket.Error == "" {
+		t.Error("SignerSocket.Error is empty; want a dial-failure message")
 	}
 }
 
 func TestStatus_MixedServerReachability(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "velsigner.sock")
+	sockPath := filepath.Join(dir, "signer.sock")
 	cleanup := startUnixListener(t, sockPath)
 	t.Cleanup(cleanup)
 
@@ -164,14 +164,14 @@ func TestStatus_MixedServerReachability(t *testing.T) {
 	}
 
 	ssh := newTrackingSSH()
-	ssh.setOK("alive.example.com", "VELGATE_OK\n")
+	ssh.setOK("alive.example.com", "SSHGATE_OK\n")
 	ssh.setErr("dead.example.com", fmt.Errorf("dial: connection refused"))
 
 	runner := &tools.Runner{
 		Servers:           r,
 		Sign:              &fakeSign{},
 		SSH:               ssh,
-		VelsignerSockPath: sockPath,
+		SignerSockPath: sockPath,
 	}
 
 	out, err := runner.Status(context.Background(), tools.StatusInput{})
@@ -196,14 +196,14 @@ func TestStatus_MixedServerReachability(t *testing.T) {
 	}
 	// Each server's probe is the empty SSH_ORIGINAL_COMMAND.
 	if ssh.gotProbe["alive.example.com"] != "" {
-		t.Errorf("alive probe cmd = %q; want empty (VELGATE_OK probe)", ssh.gotProbe["alive.example.com"])
+		t.Errorf("alive probe cmd = %q; want empty (SSHGATE_OK probe)", ssh.gotProbe["alive.example.com"])
 	}
 }
 
-func TestStatus_ProbeWithoutVelgateOKMarkedUnreachable(t *testing.T) {
+func TestStatus_ProbeWithoutGateOKMarkedUnreachable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "velsigner.sock")
+	sockPath := filepath.Join(dir, "signer.sock")
 	cleanup := startUnixListener(t, sockPath)
 	t.Cleanup(cleanup)
 
@@ -216,20 +216,20 @@ func TestStatus_ProbeWithoutVelgateOKMarkedUnreachable(t *testing.T) {
 	}
 
 	ssh := newTrackingSSH()
-	// Probe returns success but body is not VELGATE_OK — treat as unreachable.
+	// Probe returns success but body is not SSHGATE_OK — treat as unreachable.
 	ssh.setOK("h1.example.com", "hello world\n")
 	runner := &tools.Runner{
 		Servers:           r,
 		Sign:              &fakeSign{},
 		SSH:               ssh,
-		VelsignerSockPath: sockPath,
+		SignerSockPath: sockPath,
 	}
 	out, err := runner.Status(context.Background(), tools.StatusInput{})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if out.Servers[0].Reachable {
-		t.Errorf("Reachable = true; want false (non-VELGATE_OK probe body)")
+		t.Errorf("Reachable = true; want false (non-SSHGATE_OK probe body)")
 	}
 }
 

@@ -86,7 +86,7 @@ func TestEncodeDecodeSigned_Roundtrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("EncodeSigned: %v", err)
 			}
-			if !strings.HasPrefix(s, "VELGATE_SIG:") {
+			if !strings.HasPrefix(s, "SSHGATE_SIG:") {
 				t.Errorf("encoded output missing prefix: %q", s)
 			}
 			gotSig, gotPayload, err := DecodeSigned(s)
@@ -155,7 +155,7 @@ func TestEncodeSigned_LongCmd(t *testing.T) {
 
 func TestDecodeSigned_TrailingInnerCmd(t *testing.T) {
 	t.Parallel()
-	// Spec wire format: "VELGATE_SIG:<sig>:<payload> <inner_cmd>"
+	// Spec wire format: "SSHGATE_SIG:<sig>:<payload> <inner_cmd>"
 	// — the trailing space + inner cmd is for SSH-log readability and
 	// MUST be tolerated by DecodeSigned (the inner cmd is unauthenticated;
 	// the authoritative cmd is inside the signed payload).
@@ -186,12 +186,12 @@ func TestIsSigned(t *testing.T) {
 	}{
 		{"empty", "", false},
 		{"plain command", "ls -la", false},
-		{"prefix only", "VELGATE_SIG:", true},
-		{"full envelope", "VELGATE_SIG:abc:def", true},
-		{"prefix typo", "VELGATE_SI:abc:def", false},
-		{"lowercase prefix", "velgate_sig:abc:def", false},
-		{"prefix with leading space", " VELGATE_SIG:abc:def", false},
-		{"prefix mid-string", "echo VELGATE_SIG:abc:def", false},
+		{"prefix only", "SSHGATE_SIG:", true},
+		{"full envelope", "SSHGATE_SIG:abc:def", true},
+		{"prefix typo", "SSHGATE_SI:abc:def", false},
+		{"lowercase prefix", "gate_sig:abc:def", false},
+		{"prefix with leading space", " SSHGATE_SIG:abc:def", false},
+		{"prefix mid-string", "echo SSHGATE_SIG:abc:def", false},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -217,7 +217,7 @@ func TestDecodeSigned_Errors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeSigned (setup): %v", err)
 	}
-	// good = "VELGATE_SIG:<sigB64>:<payloadB64>"
+	// good = "SSHGATE_SIG:<sigB64>:<payloadB64>"
 	parts := strings.SplitN(good, ":", 3)
 	if len(parts) != 3 {
 		t.Fatalf("setup envelope has wrong shape: %q", good)
@@ -235,17 +235,17 @@ func TestDecodeSigned_Errors(t *testing.T) {
 	}{
 		{"empty string", ""},
 		{"missing prefix", "ls -la"},
-		{"prefix typo", "VELGATE_SI:" + sigB64 + ":" + payloadB64},
-		{"only prefix", "VELGATE_SIG:"},
-		{"no second colon", "VELGATE_SIG:" + sigB64 + payloadB64},
-		{"empty sig field", "VELGATE_SIG::" + payloadB64},
-		{"empty payload field", "VELGATE_SIG:" + sigB64 + ":"},
-		{"bad sig base64", "VELGATE_SIG:!!!notb64!!!:" + payloadB64},
-		{"bad payload base64", "VELGATE_SIG:" + sigB64 + ":!!!notb64!!!"},
-		{"malformed json (truncated)", "VELGATE_SIG:" + sigB64 + ":" + truncatedJSONPayloadB64},
-		{"malformed json (wrong type)", "VELGATE_SIG:" + sigB64 + ":" + wrongTypeJSONPayloadB64},
-		{"missing required cmd", "VELGATE_SIG:" + sigB64 + ":" + missingCmdJSONPayloadB64},
-		{"empty cmd field", "VELGATE_SIG:" + sigB64 + ":" + emptyJSONPayloadB64},
+		{"prefix typo", "SSHGATE_SI:" + sigB64 + ":" + payloadB64},
+		{"only prefix", "SSHGATE_SIG:"},
+		{"no second colon", "SSHGATE_SIG:" + sigB64 + payloadB64},
+		{"empty sig field", "SSHGATE_SIG::" + payloadB64},
+		{"empty payload field", "SSHGATE_SIG:" + sigB64 + ":"},
+		{"bad sig base64", "SSHGATE_SIG:!!!notb64!!!:" + payloadB64},
+		{"bad payload base64", "SSHGATE_SIG:" + sigB64 + ":!!!notb64!!!"},
+		{"malformed json (truncated)", "SSHGATE_SIG:" + sigB64 + ":" + truncatedJSONPayloadB64},
+		{"malformed json (wrong type)", "SSHGATE_SIG:" + sigB64 + ":" + wrongTypeJSONPayloadB64},
+		{"missing required cmd", "SSHGATE_SIG:" + sigB64 + ":" + missingCmdJSONPayloadB64},
+		{"empty cmd field", "SSHGATE_SIG:" + sigB64 + ":" + emptyJSONPayloadB64},
 		{"leading whitespace", " " + good},
 		{"leading newline", "\n" + good},
 		// Note: a trailing space + arbitrary content is INTENTIONALLY

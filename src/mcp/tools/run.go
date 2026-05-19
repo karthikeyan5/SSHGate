@@ -44,7 +44,7 @@ type RunOutput struct {
 
 // SignClient is the subset of sign.Client that Runner needs. It
 // exists so tests can inject a fake without standing up the
-// velsigner socket.
+// signer socket.
 type SignClient interface {
 	Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error)
 }
@@ -70,16 +70,16 @@ type Runner struct {
 	WriteTTLSec int64
 
 	// AddServerCfg overrides the defaults used by AddServer (paths to
-	// the velgate binary, signing pubkey, and SSHGate dedicated
+	// the gate binary, signing pubkey, and SSHGate dedicated
 	// pubkey). Tests inject this; production leaves it zero and the
 	// resolver populates each field from $XDG_CONFIG_HOME / env.
 	AddServerCfg AddServerConfig
 
-	// VelsignerSockPath is the absolute path to the velsigner Unix
-	// socket. Status() dials this path to report velsigner reachability;
+	// SignerSockPath is the absolute path to the signer Unix
+	// socket. Status() dials this path to report signer reachability;
 	// other tools route through Sign (which carries its own SocketPath).
 	// Production wires the same path into both.
-	VelsignerSockPath string
+	SignerSockPath string
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —
@@ -157,7 +157,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		return RunOutput{Kind: "write"}, fmt.Errorf("tools: request id: %w", err)
 	}
 	// Spec defines CmdReq.Server as the registered alias (recorded in
-	// the velsigner audit log), not the underlying hostname. Passing
+	// the signer audit log), not the underlying hostname. Passing
 	// the alias keeps audit-log archaeology stable across hostname
 	// changes and matches the format the audit-log examples use.
 	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl}})

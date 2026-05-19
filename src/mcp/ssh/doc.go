@@ -4,7 +4,7 @@
 // Responsibilities:
 //
 //   - Load the SSHGate-dedicated Ed25519 key from disk (the same key
-//     whose authorized_keys line on the remote forces command=velgate).
+//     whose authorized_keys line on the remote forces command=gate).
 //   - Verify host keys against a TOFU (trust-on-first-use) known_hosts
 //     file: first contact appends, mismatch refuses.
 //   - Run a single command per connection. Stdout, stderr, and the

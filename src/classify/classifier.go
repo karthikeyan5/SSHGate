@@ -18,7 +18,7 @@ const (
 	KindRead
 
 	// KindWrite means the command may mutate state and therefore requires
-	// a valid VELGATE_SIG signature from velsigner.
+	// a valid SSHGATE_SIG signature from signer.
 	KindWrite
 )
 

@@ -70,7 +70,7 @@ func (f *batchSSH) Run(_ context.Context, _, _ string, _ int, cmd string) ([]byt
 }
 
 // makeSignedFor returns a []signpkg.Signed list parallel to writeCmds —
-// each entry is a realistic VELGATE_SIG wire prefix for that command.
+// each entry is a realistic SSHGATE_SIG wire prefix for that command.
 func makeSignedFor(t *testing.T, writeCmds []string) []signpkg.Signed {
 	t.Helper()
 	out := make([]signpkg.Signed, len(writeCmds))
@@ -169,8 +169,8 @@ func TestRunBatch_AllWrites_OneSignCall(t *testing.T) {
 		t.Fatalf("ssh.calls=%d; want 3", len(ssh.calls))
 	}
 	for i, c := range ssh.calls {
-		if !strings.HasPrefix(c, "VELGATE_SIG:") {
-			t.Errorf("ssh.calls[%d]=%q; want VELGATE_SIG: prefix", i, c)
+		if !strings.HasPrefix(c, "SSHGATE_SIG:") {
+			t.Errorf("ssh.calls[%d]=%q; want SSHGATE_SIG: prefix", i, c)
 		}
 		if !strings.HasSuffix(c, " "+writes[i]) {
 			t.Errorf("ssh.calls[%d]=%q; want suffix %q", i, c, " "+writes[i])
@@ -223,7 +223,7 @@ func TestRunBatch_MixedReadWriteRead_SignsOnlyTheWrite(t *testing.T) {
 	if ssh.calls[0] != "df -h" {
 		t.Errorf("ssh.calls[0]=%q; want raw read 'df -h'", ssh.calls[0])
 	}
-	if !strings.HasPrefix(ssh.calls[1], "VELGATE_SIG:") || !strings.HasSuffix(ssh.calls[1], " rm /tmp/x") {
+	if !strings.HasPrefix(ssh.calls[1], "SSHGATE_SIG:") || !strings.HasSuffix(ssh.calls[1], " rm /tmp/x") {
 		t.Errorf("ssh.calls[1]=%q; want signed write", ssh.calls[1])
 	}
 	if ssh.calls[2] != "uptime" {

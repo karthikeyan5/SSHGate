@@ -33,7 +33,7 @@ func authLine(pub ssh.PublicKey) string {
 
 func TestRewriteAuthorizedKeys_EmptyFile(t *testing.T) {
 	pub := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 
 	out, err := rewriteAuthorizedKeys(nil, pub, cmd)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestRewriteAuthorizedKeys_EmptyFile(t *testing.T) {
 
 func TestRewriteAuthorizedKeys_RestrictedReAddIdempotent(t *testing.T) {
 	pub := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 	first, err := rewriteAuthorizedKeys(nil, pub, cmd)
 	if err != nil {
 		t.Fatalf("first rewrite: %v", err)
@@ -65,7 +65,7 @@ func TestRewriteAuthorizedKeys_RestrictedReAddIdempotent(t *testing.T) {
 
 func TestRewriteAuthorizedKeys_UnrestrictedSameKeyReplaced(t *testing.T) {
 	pub := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 
 	// Pre-existing unrestricted entry for the same key — this is the
 	// "plain authorized_keys" case (e.g. linuxserver/openssh-server
@@ -92,7 +92,7 @@ func TestRewriteAuthorizedKeys_UnrestrictedSameKeyReplaced(t *testing.T) {
 func TestRewriteAuthorizedKeys_UnrelatedKeysPreserved(t *testing.T) {
 	pub := newTestKey(t)
 	other := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 
 	existing := []byte(
 		authLine(other) + " other-user@host\n" +
@@ -119,7 +119,7 @@ func TestRewriteAuthorizedKeys_UnrelatedKeysPreserved(t *testing.T) {
 func TestRewriteAuthorizedKeys_CommentsPreserved(t *testing.T) {
 	pub := newTestKey(t)
 	other := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 
 	existing := []byte(
 		"# managed by sshgate\n" +
@@ -145,7 +145,7 @@ func TestRewriteAuthorizedKeys_CommentsPreserved(t *testing.T) {
 
 func TestRewriteAuthorizedKeys_ExistingRestrictedEntryReplaced(t *testing.T) {
 	pub := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 
 	// Existing restricted entry with EXTRA options we don't reproduce
 	// (e.g. an old "from=" clause). Must still be detected as a
@@ -169,8 +169,8 @@ func TestRewriteAuthorizedKeys_ExistingRestrictedEntryReplaced(t *testing.T) {
 func TestRewriteAuthorizedKeys_RejectsForbiddenCmdChars(t *testing.T) {
 	pub := newTestKey(t)
 	cases := []string{
-		`~/.velgate/velgate"; rm -rf /`,
-		"~/.velgate/velgate\nfoo",
+		`~/.sshgate-gate/gate"; rm -rf /`,
+		"~/.sshgate-gate/gate\nfoo",
 	}
 	for _, bad := range cases {
 		if _, err := rewriteAuthorizedKeys(nil, pub, bad); err == nil {
@@ -182,7 +182,7 @@ func TestRewriteAuthorizedKeys_RejectsForbiddenCmdChars(t *testing.T) {
 func TestHasRestrictedEntryForKey(t *testing.T) {
 	pub := newTestKey(t)
 	other := newTestKey(t)
-	cmd := "~/.velgate/velgate"
+	cmd := "~/.sshgate-gate/gate"
 
 	rewritten, err := rewriteAuthorizedKeys(nil, pub, cmd)
 	if err != nil {

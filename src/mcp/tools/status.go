@@ -15,11 +15,11 @@ import (
 // object schema.
 type StatusInput struct{}
 
-// VelsignerStatus captures the velsigner-socket health probe. Path is
+// SignerStatus captures the signer-socket health probe. Path is
 // the configured socket path so operators can see what the MCP is
 // pointed at. Reachable is true iff a TCP-style dial succeeded;
 // Error is set on failure and carries the dial error string.
-type VelsignerStatus struct {
+type SignerStatus struct {
 	Path      string `json:"path"`
 	Reachable bool   `json:"reachable"`
 	Error     string `json:"error,omitempty"`
@@ -37,20 +37,20 @@ type ServerStatus struct {
 }
 
 // StatusOutput is the structured result of sshgate.status. The
-// velsigner block stands on its own (always present); Servers is the
+// signer block stands on its own (always present); Servers is the
 // alphabetically-sorted per-registered-server health view.
 type StatusOutput struct {
-	VelsignerSocket VelsignerStatus `json:"velsigner_socket"`
+	SignerSocket SignerStatus `json:"signer_socket"`
 	Servers         []ServerStatus  `json:"servers"`
 }
 
 const (
-	// statusVelsignerDialTimeout bounds the velsigner-socket probe. It
+	// statusSignerDialTimeout bounds the signer-socket probe. It
 	// is intentionally short: we are checking that the socket file is
 	// connectable, not initiating an approval round-trip.
-	statusVelsignerDialTimeout = 2 * time.Second
+	statusSignerDialTimeout = 2 * time.Second
 	// statusServerDialTimeout bounds a single server's SSH dial + the
-	// VELGATE_OK probe. 5s matches the spec's "short timeout" budget.
+	// SSHGATE_OK probe. 5s matches the spec's "short timeout" budget.
 	statusServerDialTimeout = 5 * time.Second
 	// statusServerProbeWorkers caps the parallel SSH probe pool so
 	// status against many servers does not fan out unboundedly
@@ -58,10 +58,10 @@ const (
 	statusServerProbeWorkers = 4
 )
 
-// Status concurrently probes the velsigner socket and every registered
+// Status concurrently probes the signer socket and every registered
 // server. Servers are dialled in parallel, capped at
 // statusServerProbeWorkers. Each per-server probe sends the empty
-// SSH_ORIGINAL_COMMAND (velgate replies VELGATE_OK) and records the
+// SSH_ORIGINAL_COMMAND (gate replies SSHGATE_OK) and records the
 // round-trip duration.
 //
 // Status returns an error only on a configuration problem (nil
@@ -76,17 +76,17 @@ func (r *Runner) Status(ctx context.Context, _ StatusInput) (StatusOutput, error
 	}
 
 	out := StatusOutput{
-		VelsignerSocket: VelsignerStatus{Path: r.VelsignerSockPath},
+		SignerSocket: SignerStatus{Path: r.SignerSockPath},
 	}
 
-	// Velsigner socket probe and server probes run concurrently. The
-	// velsigner side is one dial; the server side is N probes through
+	// Signer socket probe and server probes run concurrently. The
+	// signer side is one dial; the server side is N probes through
 	// a bounded worker pool.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		out.VelsignerSocket = probeVelsignerSocket(ctx, r.VelsignerSockPath)
+		out.SignerSocket = probeSignerSocket(ctx, r.SignerSockPath)
 	}()
 
 	servers := r.snapshotRegistry()
@@ -139,8 +139,8 @@ func (r *Runner) snapshotRegistry() []registryRow {
 	return rows
 }
 
-// probeServer runs the VELGATE_OK probe against row's host and returns
-// a populated ServerStatus. Errors and non-VELGATE_OK bodies both
+// probeServer runs the SSHGATE_OK probe against row's host and returns
+// a populated ServerStatus. Errors and non-SSHGATE_OK bodies both
 // surface as Reachable=false with a descriptive Error string.
 func (r *Runner) probeServer(ctx context.Context, row registryRow) ServerStatus {
 	probeCtx, cancel := context.WithTimeout(ctx, statusServerDialTimeout)
@@ -155,8 +155,8 @@ func (r *Runner) probeServer(ctx context.Context, row registryRow) ServerStatus 
 		s.Error = err.Error()
 		return s
 	}
-	if !strings.Contains(string(stdout), "VELGATE_OK") {
-		s.Error = "probe response did not contain VELGATE_OK"
+	if !strings.Contains(string(stdout), "SSHGATE_OK") {
+		s.Error = "probe response did not contain SSHGATE_OK"
 		return s
 	}
 	s.Reachable = true
@@ -164,16 +164,16 @@ func (r *Runner) probeServer(ctx context.Context, row registryRow) ServerStatus 
 	return s
 }
 
-// probeVelsignerSocket dials path with a short timeout and immediately
+// probeSignerSocket dials path with a short timeout and immediately
 // closes the connection. Reachable is true iff the dial succeeded.
 // An empty path produces a clear "not configured" Error.
-func probeVelsignerSocket(ctx context.Context, path string) VelsignerStatus {
-	s := VelsignerStatus{Path: path}
+func probeSignerSocket(ctx context.Context, path string) SignerStatus {
+	s := SignerStatus{Path: path}
 	if path == "" {
-		s.Error = "velsigner socket path not configured"
+		s.Error = "signer socket path not configured"
 		return s
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, statusVelsignerDialTimeout)
+	dialCtx, cancel := context.WithTimeout(ctx, statusSignerDialTimeout)
 	defer cancel()
 	var d net.Dialer
 	conn, err := d.DialContext(dialCtx, "unix", path)

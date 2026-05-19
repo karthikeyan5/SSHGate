@@ -48,7 +48,7 @@ type RunBatchOutput struct {
 }
 
 // BatchWriteTTLSec is the per-command TTL used when building a bulk
-// sign request. The spec uses 60s for bulk; the velsigner caps this
+// sign request. The spec uses 60s for bulk; the signer caps this
 // against sigwire.MaxSigValidity server-side anyway.
 const BatchWriteTTLSec = 60
 
@@ -110,7 +110,7 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	for i, cmd := range in.Commands {
 		if kinds[i] == classify.KindWrite {
 			// Spec defines CmdReq.Server as the registered alias
-			// (recorded in the velsigner audit log), not the
+			// (recorded in the signer audit log), not the
 			// underlying hostname. Passing the alias keeps audit-log
 			// archaeology stable across hostname changes.
 			writeCmds = append(writeCmds, signpkg.CmdReq{

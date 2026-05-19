@@ -59,7 +59,7 @@ const ToolName = "run"
 const ToolNameRunBatch = "run_batch"
 
 // ToolNameAddServer registers a new server alias with auto-setup
-// (uploads velgate, rewrites authorized_keys, verifies). Claude Code's
+// (uploads gate, rewrites authorized_keys, verifies). Claude Code's
 // surface name is "mcp__sshgate__add_server".
 const ToolNameAddServer = "add_server"
 
@@ -68,13 +68,13 @@ const ToolNameAddServer = "add_server"
 // "mcp__sshgate__list_servers".
 const ToolNameListServers = "list_servers"
 
-// ToolNameStatus reports velsigner-socket and per-server reachability.
+// ToolNameStatus reports signer-socket and per-server reachability.
 // Claude Code's surface name is "mcp__sshgate__status".
 const ToolNameStatus = "status"
 
 // ToolNameRevokeServer tears down a registered server: signs and ships
-// VELGATE_REVOKE, lets velgate strip itself from authorized_keys and
-// remove ~/.velgate/, then removes the alias from the registry. Claude
+// SSHGATE_REVOKE, lets gate strip itself from authorized_keys and
+// remove ~/.sshgate-gate/, then removes the alias from the registry. Claude
 // Code's surface name is "mcp__sshgate__revoke_server".
 const ToolNameRevokeServer = "revoke_server"
 
@@ -118,14 +118,14 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	}, s.runBatchHandler)
 
 	// add_server — auto-setup. Bootstraps via the operator's existing
-	// SSH access (key file path or ssh-agent), uploads velgate, rewrites
+	// SSH access (key file path or ssh-agent), uploads gate, rewrites
 	// authorized_keys with command="..." forcing for the SSHGate
-	// dedicated key, verifies via the VELGATE_OK probe, and registers
+	// dedicated key, verifies via the SSHGATE_OK probe, and registers
 	// the alias. Idempotent — re-add on a server with the canonical
 	// restricted entry already in place skips the rewrite.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        ToolNameAddServer,
-		Description: "Register a new server alias and install velgate on it. Bootstrap leg uses your existing SSH access (bootstrap_key_path or bootstrap_agent=true). Auto-setup uploads velgate + signing key, rewrites authorized_keys, verifies via the VELGATE_OK probe, then atomically registers the alias.",
+		Description: "Register a new server alias and install gate on it. Bootstrap leg uses your existing SSH access (bootstrap_key_path or bootstrap_agent=true). Auto-setup uploads gate + signing key, rewrites authorized_keys, verifies via the SSHGATE_OK probe, then atomically registers the alias.",
 	}, s.addServerHandler)
 
 	// list_servers — returns every registered alias with its host/port/user.
@@ -134,17 +134,17 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Description: "List every registered SSHGate server (alias, host, port, user, added_at). Output is sorted alphabetically by alias.",
 	}, s.listServersHandler)
 
-	// status — health probe of velsigner and every registered server.
+	// status — health probe of signer and every registered server.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        ToolNameStatus,
-		Description: "Report velsigner-socket reachability and per-server SSH reachability (via the VELGATE_OK probe). Server probes run in parallel with a short timeout.",
+		Description: "Report signer-socket reachability and per-server SSH reachability (via the SSHGATE_OK probe). Server probes run in parallel with a short timeout.",
 	}, s.statusHandler)
 
-	// revoke_server — signs VELGATE_REVOKE, ships it, removes the alias
-	// from the registry once velgate confirms the on-host teardown.
+	// revoke_server — signs SSHGATE_REVOKE, ships it, removes the alias
+	// from the registry once gate confirms the on-host teardown.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        ToolNameRevokeServer,
-		Description: "Revoke a registered server. Signs VELGATE_REVOKE (one approval), velgate strips its authorized_keys line and removes ~/.velgate/, MCP removes the alias. Backup kept at ~/.ssh/authorized_keys.sshgate-revoke-backup.",
+		Description: "Revoke a registered server. Signs SSHGATE_REVOKE (one approval), gate strips its authorized_keys line and removes ~/.sshgate-gate/, MCP removes the alias. Backup kept at ~/.ssh/authorized_keys.sshgate-revoke-backup.",
 	}, s.revokeServerHandler)
 
 	t := &mcpsdk.IOTransport{
@@ -261,7 +261,7 @@ func truncate(s string, max int) string {
 // Sign denials/timeouts and SSH/registry errors surface as MCP tool
 // errors (IsError=true) so Claude can see exactly why the revoke
 // failed; on success the structured RevokeServerOutput carries the
-// confirmation message printed by velgate.
+// confirmation message printed by gate.
 func (s *Server) revokeServerHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RevokeServerInput) (*mcpsdk.CallToolResult, tools.RevokeServerOutput, error) {
 	out, err := s.Runner.RevokeServer(ctx, in)
 	if err != nil {
@@ -283,7 +283,7 @@ func formatRevokeServerSummary(out tools.RevokeServerOutput) string {
 	fmt.Fprintf(&b, "revoked %s: remote_cleaned=%v registry_removed=%v",
 		out.Alias, out.RemoteCleaned, out.RegistryRemoved)
 	if out.Message != "" {
-		fmt.Fprintf(&b, "\nvelgate: %s", out.Message)
+		fmt.Fprintf(&b, "\ngate: %s", out.Message)
 	}
 	return b.String()
 }
@@ -312,7 +312,7 @@ func (s *Server) statusHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, i
 		s.Logger.Printf("status err=%v", err)
 		return nil, tools.StatusOutput{}, err
 	}
-	s.Logger.Printf("status velsigner_reachable=%v servers=%d", out.VelsignerSocket.Reachable, len(out.Servers))
+	s.Logger.Printf("status signer_reachable=%v servers=%d", out.SignerSocket.Reachable, len(out.Servers))
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatStatusSummary(out)}},
 	}, out, nil
@@ -337,10 +337,10 @@ func formatListServersSummary(out tools.ListServersOutput) string {
 // TextContent block. Structured content carries the full StatusOutput.
 func formatStatusSummary(out tools.StatusOutput) string {
 	var b strings.Builder
-	if out.VelsignerSocket.Reachable {
-		fmt.Fprintf(&b, "velsigner: reachable (%s)", out.VelsignerSocket.Path)
+	if out.SignerSocket.Reachable {
+		fmt.Fprintf(&b, "signer: reachable (%s)", out.SignerSocket.Path)
 	} else {
-		fmt.Fprintf(&b, "velsigner: UNREACHABLE (%s): %s", out.VelsignerSocket.Path, out.VelsignerSocket.Error)
+		fmt.Fprintf(&b, "signer: UNREACHABLE (%s): %s", out.SignerSocket.Path, out.SignerSocket.Error)
 	}
 	for _, sv := range out.Servers {
 		if sv.Reachable {
@@ -365,7 +365,7 @@ func formatAddServerSummary(out tools.AddServerOutput) string {
 		fmt.Fprintf(&b, "\nhost fingerprint: %s", out.Fingerprint)
 	}
 	if out.BinaryPath != "" {
-		fmt.Fprintf(&b, "\nvelgate: %s", out.BinaryPath)
+		fmt.Fprintf(&b, "\ngate: %s", out.BinaryPath)
 	}
 	fmt.Fprintf(&b, "\nverified_ok=%v", out.VerifiedOK)
 	return b.String()

@@ -11,17 +11,17 @@ import (
 
 // sigPrefix is the literal ASCII prefix that marks a signed command on the
 // wire. Keeping it unexported (and a constant) means it cannot drift between
-// velgate, velsigner, and the MCP.
-const sigPrefix = "VELGATE_SIG:"
+// gate, signer, and the MCP.
+const sigPrefix = "SSHGATE_SIG:"
 
 // MaxSigValidity is the spec's "exp - ts < 300 seconds" upper bound on
-// signature validity windows. velgate enforces this on verification so that
+// signature validity windows. gate enforces this on verification so that
 // approved commands cannot be replayed long after the human tapped approve.
 const MaxSigValidity time.Duration = 5 * time.Minute
 
 // SigPayload is the signed-command payload defined in the spec. It is the
-// JSON object that velsigner signs and velgate verifies, carried on the wire
-// inside a VELGATE_SIG envelope.
+// JSON object that signer signs and gate verifies, carried on the wire
+// inside a SSHGATE_SIG envelope.
 type SigPayload struct {
 	Cmd   string `json:"cmd"`
 	TS    int64  `json:"ts"`
@@ -34,10 +34,10 @@ type SigPayload struct {
 // string is safe to drop directly onto an SSH command line without quoting.
 var sigEncoding = base64.URLEncoding.WithPadding(base64.NoPadding)
 
-// EncodeSigned produces the wire format "VELGATE_SIG:<sigB64>:<payloadB64>"
+// EncodeSigned produces the wire format "SSHGATE_SIG:<sigB64>:<payloadB64>"
 // using URL-safe base64 without padding (SSH-command-line safe). sig is the
 // 64-byte Ed25519 signature over the JSON-marshalled payload; EncodeSigned
-// does not compute the signature — that is the caller's job (velsigner
+// does not compute the signature — that is the caller's job (signer
 // owns the key, this package owns the wire shape).
 func EncodeSigned(sig []byte, payload SigPayload) (string, error) {
 	pb, err := json.Marshal(payload)
@@ -60,7 +60,7 @@ func EncodeSigned(sig []byte, payload SigPayload) (string, error) {
 // field.
 //
 // Per the spec the on-the-wire form is
-// `VELGATE_SIG:<sig>:<payload> <inner_cmd>` — i.e. a trailing space and
+// `SSHGATE_SIG:<sig>:<payload> <inner_cmd>` — i.e. a trailing space and
 // the inner command line follow the envelope so SSH server logs render
 // the operator's command in cleartext. The trailing content is
 // unauthenticated (the inner_cmd that actually runs is the one inside
@@ -71,10 +71,10 @@ func EncodeSigned(sig []byte, payload SigPayload) (string, error) {
 //
 // DecodeSigned does not verify the signature — that is the caller's job,
 // so this function can be reused by anything that needs to read the
-// envelope (velgate, audit tooling, tests).
+// envelope (gate, audit tooling, tests).
 func DecodeSigned(s string) (sig []byte, payload SigPayload, err error) {
 	if !strings.HasPrefix(s, sigPrefix) {
-		return nil, SigPayload{}, errors.New("missing VELGATE_SIG: prefix")
+		return nil, SigPayload{}, errors.New("missing SSHGATE_SIG: prefix")
 	}
 	rest := s[len(sigPrefix):]
 	sep := strings.IndexByte(rest, ':')
@@ -115,7 +115,7 @@ func DecodeSigned(s string) (sig []byte, payload SigPayload, err error) {
 	return sig, p, nil
 }
 
-// IsSigned reports whether s starts with the literal "VELGATE_SIG:" prefix.
+// IsSigned reports whether s starts with the literal "SSHGATE_SIG:" prefix.
 // It is a cheap pre-check intended for callers that route signed vs.
 // unsigned commands down different paths before incurring the cost of a
 // full DecodeSigned call.

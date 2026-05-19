@@ -3,20 +3,20 @@
 // Phase-3 end-to-end test for SSHGate (task 3.4 / lock criterion for
 // task 3.1).
 //
-// Boots a FRESH linuxserver/openssh-server container with NO velgate
+// Boots a FRESH linuxserver/openssh-server container with NO gate
 // pre-installed, then exercises the real sshgate.add_server tool:
 //
 //   1. Success path. AddServer dials with the operator's bootstrap key
 //      (the one the linuxserver image baked into authorized_keys),
-//      uploads velgate + signing pubkey, rewrites authorized_keys to
+//      uploads gate + signing pubkey, rewrites authorized_keys to
 //      gate the SSHGate dedicated key behind command="..." forcing,
-//      verifies via the VELGATE_OK probe, registers the alias. Then
+//      verifies via the SSHGATE_OK probe, registers the alias. Then
 //      a plain `df -h` Runner.Run goes through and works.
 //   2. Verify failure → rollback. We re-use the same fresh container
 //      after tearing down between subtests, point AddServer at a
 //      pubkey that won't actually let the sshgate key in, and assert
 //      that authorized_keys is restored from the backup (the bootstrap
-//      key still works) AND ~/.velgate/ no longer exists.
+//      key still works) AND ~/.sshgate-gate/ no longer exists.
 //   3. Idempotent re-add (different alias, already-restricted state) →
 //      skip rewrite, return Idempotent=true, register the new alias.
 //   4. Re-adding the same alias → "already registered" error.
@@ -55,9 +55,9 @@ func TestPhase3AddServer_Success(t *testing.T) {
 	// rewrites authorized_keys for THIS pubkey.
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
 
-	// Cross-compile velgate + generate signing keypair.
-	velgateBin := buildVelgateLinux(t)
-	_, velgatePub := generateVelgateKeyPair(t)
+	// Cross-compile gate + generate signing keypair.
+	gateBin := buildGateLinux(t)
+	_, gatePub := generateGateKeyPair(t)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
 	servers, err := registry.New(regPath)
@@ -76,8 +76,8 @@ func TestPhase3AddServer_Success(t *testing.T) {
 		Sign:    &noopSign{}, // not used by AddServer or by reads
 		SSH:     sshClient,
 		AddServerCfg: tools.AddServerConfig{
-			VelgateBinaryPath: velgateBin,
-			VelgatePubPath:    velgatePub,
+			GateBinaryPath: gateBin,
+			GatePubPath:    gatePub,
 			SSHGatePubPath:    dedicatedPub,
 		},
 	}
@@ -103,8 +103,8 @@ func TestPhase3AddServer_Success(t *testing.T) {
 	if !strings.HasPrefix(out.Fingerprint, "SHA256:") {
 		t.Errorf("Fingerprint=%q; want SHA256: prefix", out.Fingerprint)
 	}
-	if out.BinaryPath != "~/.velgate/velgate" {
-		t.Errorf("BinaryPath=%q; want ~/.velgate/velgate", out.BinaryPath)
+	if out.BinaryPath != "~/.sshgate-gate/gate" {
+		t.Errorf("BinaryPath=%q; want ~/.sshgate-gate/gate", out.BinaryPath)
 	}
 	if out.Idempotent {
 		t.Errorf("Idempotent=true on first add; want false")
@@ -114,7 +114,7 @@ func TestPhase3AddServer_Success(t *testing.T) {
 		t.Errorf("registry does not have 'test' after AddServer")
 	}
 
-	// Now run a read via the dedicated key — confirm velgate is in the
+	// Now run a read via the dedicated key — confirm gate is in the
 	// loop and routes the read through to /bin/sh -c successfully.
 	rdOut, err := runner.Run(ctx, tools.RunInput{Alias: "test", Command: "df -h"})
 	if err != nil {
@@ -145,8 +145,8 @@ func TestPhase3AddServer_VerifyFailureRollsBack(t *testing.T) {
 	dedicatedPriv, _ := generateStandaloneSSHKey(t)
 	_, wrongPub := generateStandaloneSSHKey(t)
 
-	velgateBin := buildVelgateLinux(t)
-	_, velgatePub := generateVelgateKeyPair(t)
+	gateBin := buildGateLinux(t)
+	_, gatePub := generateGateKeyPair(t)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
 	servers, err := registry.New(regPath)
@@ -164,8 +164,8 @@ func TestPhase3AddServer_VerifyFailureRollsBack(t *testing.T) {
 		Sign:    &noopSign{},
 		SSH:     sshClient,
 		AddServerCfg: tools.AddServerConfig{
-			VelgateBinaryPath: velgateBin,
-			VelgatePubPath:    velgatePub,
+			GateBinaryPath: gateBin,
+			GatePubPath:    gatePub,
 			// authorized_keys will be rewritten for THIS key — but the
 			// SSH client above uses the OTHER key, so verify fails.
 			SSHGatePubPath: wrongPub,
@@ -206,14 +206,14 @@ func TestPhase3AddServer_VerifyFailureRollsBack(t *testing.T) {
 			exit, stdout)
 	}
 
-	// ~/.velgate/ must have been removed.
+	// ~/.sshgate-gate/ must have been removed.
 	dirCheck, _, exit, err := directUnsignedSSH(t, bootstrapPriv,
-		"127.0.0.1", sshContainerPort, remoteUser, "test -d ~/.velgate && echo PRESENT || echo ABSENT")
+		"127.0.0.1", sshContainerPort, remoteUser, "test -d ~/.sshgate-gate && echo PRESENT || echo ABSENT")
 	if err != nil {
 		t.Fatalf("post-rollback dir probe: %v", err)
 	}
 	if !strings.Contains(string(dirCheck), "ABSENT") {
-		t.Errorf("~/.velgate still present after rollback (exit=%d, stdout=%q)", exit, dirCheck)
+		t.Errorf("~/.sshgate-gate still present after rollback (exit=%d, stdout=%q)", exit, dirCheck)
 	}
 }
 
@@ -253,8 +253,8 @@ func TestPhase3AddServer_IdempotentReAdd(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
-	velgateBin := buildVelgateLinux(t)
-	_, velgatePub := generateVelgateKeyPair(t)
+	gateBin := buildGateLinux(t)
+	_, gatePub := generateGateKeyPair(t)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
 	servers, err := registry.New(regPath)
@@ -271,8 +271,8 @@ func TestPhase3AddServer_IdempotentReAdd(t *testing.T) {
 		Sign:    &noopSign{},
 		SSH:     sshClient,
 		AddServerCfg: tools.AddServerConfig{
-			VelgateBinaryPath: velgateBin,
-			VelgatePubPath:    velgatePub,
+			GateBinaryPath: gateBin,
+			GatePubPath:    gatePub,
 			SSHGatePubPath:    dedicatedPub,
 		},
 	}
@@ -315,8 +315,8 @@ func TestPhase3AddServer_IdempotentReAdd(t *testing.T) {
 }
 
 // TestPhase3AddServer_ReadOnly covers the tier-1 install path: deploy
-// velgate WITHOUT uploading velgate.pub. Reads should still execute
-// through the gate (velgate's keystore returns (nil, nil) for the
+// gate WITHOUT uploading gate.pub. Reads should still execute
+// through the gate (gate's keystore returns (nil, nil) for the
 // missing pubkey and treats reads as allowed); writes must be denied
 // with the read-only-mode error message and exit code 77.
 func TestPhase3AddServer_ReadOnly(t *testing.T) {
@@ -325,11 +325,11 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
-	velgateBin := buildVelgateLinux(t)
-	// VelgatePubPath points at a non-existent file — AddServer in
+	gateBin := buildGateLinux(t)
+	// GatePubPath points at a non-existent file — AddServer in
 	// ReadOnly mode must not read it. The slash command flow doesn't
 	// have it on disk yet in tier-1.
-	velgatePubPath := filepath.Join(t.TempDir(), "definitely-not-here.pub")
+	gatePubPath := filepath.Join(t.TempDir(), "definitely-not-here.pub")
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
 	servers, err := registry.New(regPath)
@@ -347,8 +347,8 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 		Sign:    &noopSign{},
 		SSH:     sshClient,
 		AddServerCfg: tools.AddServerConfig{
-			VelgateBinaryPath: velgateBin,
-			VelgatePubPath:    velgatePubPath,
+			GateBinaryPath: gateBin,
+			GatePubPath:    gatePubPath,
 			SSHGatePubPath:    dedicatedPub,
 		},
 	}
@@ -373,15 +373,15 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 		t.Errorf("VerifiedOK=false; want true (probe works regardless of pubkey)")
 	}
 
-	// Confirm velgate.pub is NOT on the remote.
+	// Confirm gate.pub is NOT on the remote.
 	probe, _, exit, err := directUnsignedSSH(t, bootstrapPriv,
 		"127.0.0.1", sshContainerPort, remoteUser,
-		"test -f ~/.velgate/velgate.pub && echo PRESENT || echo ABSENT")
+		"test -f ~/.sshgate-gate/gate.pub && echo PRESENT || echo ABSENT")
 	if err != nil {
 		t.Fatalf("pubkey probe: %v", err)
 	}
 	if !strings.Contains(string(probe), "ABSENT") {
-		t.Errorf("velgate.pub present on remote in tier-1 (exit=%d, stdout=%q)", exit, probe)
+		t.Errorf("gate.pub present on remote in tier-1 (exit=%d, stdout=%q)", exit, probe)
 	}
 
 	// Read goes through.
@@ -394,8 +394,8 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 	}
 
 	// Write hits the SSH layer with a SIG prefix from Sign... but
-	// noopSign errors. So we exercise the velgate denial path via a
-	// direct unsigned SSH dial that velgate classifies as a write.
+	// noopSign errors. So we exercise the gate denial path via a
+	// direct unsigned SSH dial that gate classifies as a write.
 	// SSH_ORIGINAL_COMMAND is set to "rm /tmp/x" by the SSH client.
 	_, stderr, exit, err := sshClient.Run(ctx, "127.0.0.1", remoteUser, sshContainerPort, "rm /tmp/x")
 	if err == nil && exit == 0 {
@@ -413,10 +413,10 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 }
 
 // TestPhase3UpgradeServerToSigning covers the tier-1 → tier-2
-// transition: an existing read-only server gets its velgate.pub
+// transition: an existing read-only server gets its gate.pub
 // pushed via the bootstrap leg, after which signed writes can be
 // verified. We don't exercise a real signed write here (that needs
-// velsigner) — we just confirm the upload + probe completes and the
+// signer) — we just confirm the upload + probe completes and the
 // remote file is present afterward.
 func TestPhase3UpgradeServerToSigning(t *testing.T) {
 	bootstrapPriv, _ := generateSSHKey(t)
@@ -424,9 +424,9 @@ func TestPhase3UpgradeServerToSigning(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
-	velgateBin := buildVelgateLinux(t)
-	velgatePubPathMissing := filepath.Join(t.TempDir(), "missing.pub")
-	_, velgatePub := generateVelgateKeyPair(t) // for the upgrade
+	gateBin := buildGateLinux(t)
+	gatePubPathMissing := filepath.Join(t.TempDir(), "missing.pub")
+	_, gatePub := generateGateKeyPair(t) // for the upgrade
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
 	servers, err := registry.New(regPath)
@@ -444,8 +444,8 @@ func TestPhase3UpgradeServerToSigning(t *testing.T) {
 		Sign:    &noopSign{},
 		SSH:     sshClient,
 		AddServerCfg: tools.AddServerConfig{
-			VelgateBinaryPath: velgateBin,
-			VelgatePubPath:    velgatePubPathMissing,
+			GateBinaryPath: gateBin,
+			GatePubPath:    gatePubPathMissing,
 			SSHGatePubPath:    dedicatedPub,
 		},
 	}
@@ -467,22 +467,22 @@ func TestPhase3UpgradeServerToSigning(t *testing.T) {
 
 	// Step 2: signer is set up; swap the config to point at the real
 	// pubkey and run UpgradeServerToSigning.
-	runner.AddServerCfg.VelgatePubPath = velgatePub
+	runner.AddServerCfg.GatePubPath = gatePub
 	if err := runner.UpgradeServerToSigning(ctx, "upgrade-target", tools.AddServerInput{
 		BootstrapKeyPath: bootstrapPriv,
 	}); err != nil {
 		t.Fatalf("UpgradeServerToSigning: %v", err)
 	}
 
-	// Confirm velgate.pub is now on the remote.
+	// Confirm gate.pub is now on the remote.
 	probe, _, _, err := directUnsignedSSH(t, bootstrapPriv,
 		"127.0.0.1", sshContainerPort, remoteUser,
-		"test -f ~/.velgate/velgate.pub && echo PRESENT || echo ABSENT")
+		"test -f ~/.sshgate-gate/gate.pub && echo PRESENT || echo ABSENT")
 	if err != nil {
 		t.Fatalf("post-upgrade pubkey probe: %v", err)
 	}
 	if !strings.Contains(string(probe), "PRESENT") {
-		t.Errorf("velgate.pub still absent after upgrade (stdout=%q)", probe)
+		t.Errorf("gate.pub still absent after upgrade (stdout=%q)", probe)
 	}
 }
 

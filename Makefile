@@ -1,32 +1,32 @@
-.PHONY: all build test test-integration vet clean velgate-linux \
-	sshgate-mcp-darwin velsigner-darwin darwin cross velsigner-server
+.PHONY: all build test test-integration vet clean sshgate-gate-linux \
+	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server
 
 all: vet test build
 
-build: velsigner-server
+build: sshgate-signer-server
 	mkdir -p bin
-	go build -o bin/sshgate-mcp ./src/mcp/cmd/sshgate-mcp
-	go build -o bin/velsigner   ./src/velsigner/cmd/velsigner
-	go build -o bin/velgate     ./src/velgate/cmd/velgate
+	go build -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
+	go build -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
+	go build -o bin/sshgate-gate             ./src/gate/cmd/sshgate-gate
 
-# velsigner-server: v2 hosted approval daemon (scaffold). Built into
+# sshgate-signer-server: v2 hosted approval daemon (scaffold). Built into
 # bin/ alongside the v1 binaries so a single `make build` produces
 # every component the operator might deploy. Production VPS installs
 # normally use install/deploy.sh, which re-builds at the deploy path;
 # this target is for laptop-side dev + cross-compile parity.
-velsigner-server:
+sshgate-signer-server:
 	mkdir -p bin
-	go build -o bin/velsigner-server ./src/velsigner-server/cmd/velsigner-server
+	go build -o bin/sshgate-signer-server ./src/signer-server/cmd/sshgate-signer-server
 
-# Cross-compile velgate for the remote host (linux/amd64). Static, stripped, reproducible-ish.
-velgate-linux:
+# Cross-compile sshgate-gate for the remote host (linux/amd64). Static, stripped, reproducible-ish.
+sshgate-gate-linux:
 	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags='-s -w' \
-		-o bin/velgate-linux-amd64 ./src/velgate/cmd/velgate
+		-o bin/sshgate-gate-linux-amd64 ./src/gate/cmd/sshgate-gate
 
 # macOS desktop builds (v1.1 Task C — for users running Claude Code on a Mac).
-# velsigner + sshgate-mcp run on the user's laptop; velgate is Linux-only
+# sshgate-signer-telegram + sshgate-mcp run on the user's laptop; sshgate-gate is Linux-only
 # (it's deployed to remote Linux servers, so no darwin target for it).
 # Both archs built: amd64 (Intel Macs) + arm64 (Apple Silicon).
 sshgate-mcp-darwin:
@@ -34,16 +34,16 @@ sshgate-mcp-darwin:
 	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-amd64 ./src/mcp/cmd/sshgate-mcp
 	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-arm64 ./src/mcp/cmd/sshgate-mcp
 
-velsigner-darwin:
+sshgate-signer-telegram-darwin:
 	mkdir -p bin
-	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/velsigner-darwin-amd64 ./src/velsigner/cmd/velsigner
-	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/velsigner-darwin-arm64 ./src/velsigner/cmd/velsigner
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-signer-telegram-darwin-amd64 ./src/signer/cmd/sshgate-signer-telegram
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-signer-telegram-darwin-arm64 ./src/signer/cmd/sshgate-signer-telegram
 
-darwin: sshgate-mcp-darwin velsigner-darwin
-	@echo "darwin builds done; velgate remains linux-only (deployed to Linux remotes)"
+darwin: sshgate-mcp-darwin sshgate-signer-telegram-darwin
+	@echo "darwin builds done; sshgate-gate remains linux-only (deployed to Linux remotes)"
 
-# Full cross-build matrix: linux laptop binaries + linux remote velgate + darwin laptop binaries.
-cross: build velgate-linux darwin
+# Full cross-build matrix: linux laptop binaries + linux remote sshgate-gate + darwin laptop binaries.
+cross: build sshgate-gate-linux darwin
 
 test:
 	go test -race ./...

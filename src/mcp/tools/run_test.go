@@ -137,8 +137,8 @@ func TestRun_WriteCommandSignsThenSSH(t *testing.T) {
 		t.Error("sign.gotReqID is empty")
 	}
 	// The SSH side must receive the wire-prefixed command.
-	if !strings.HasPrefix(ssh.gotCmd, "VELGATE_SIG:") {
-		t.Errorf("ssh got cmd %q; expected VELGATE_SIG: prefix", ssh.gotCmd)
+	if !strings.HasPrefix(ssh.gotCmd, "SSHGATE_SIG:") {
+		t.Errorf("ssh got cmd %q; expected SSHGATE_SIG: prefix", ssh.gotCmd)
 	}
 	if !strings.HasSuffix(ssh.gotCmd, " rm /tmp/x") {
 		t.Errorf("ssh got cmd %q; expected suffix ' rm /tmp/x'", ssh.gotCmd)

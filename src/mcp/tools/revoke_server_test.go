@@ -18,8 +18,8 @@ func TestRevokeServer_HappyPath(t *testing.T) {
 	r := newRegistryWith(t, "to-revoke", registry.Entry{
 		Host: "host.example.com", Port: 22, User: "ops", AddedAt: time.Now(),
 	})
-	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "VELGATE_REVOKE", Sig: "VELGATE_SIG:fake-sig:fake-payload"}}}
-	ssh := &fakeSSH{stdout: []byte("VELGATE_REVOKED lines=1 dir=removed\n"), exit: 0}
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "SSHGATE_REVOKE", Sig: "SSHGATE_SIG:fake-sig:fake-payload"}}}
+	ssh := &fakeSSH{stdout: []byte("SSHGATE_REVOKED lines=1 dir=removed\n"), exit: 0}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
 	out, err := runner.RevokeServer(context.Background(), tools.RevokeServerInput{Alias: "to-revoke"})
@@ -38,11 +38,11 @@ func TestRevokeServer_HappyPath(t *testing.T) {
 	if !sign.signCalled {
 		t.Error("Sign was not called")
 	}
-	if len(sign.gotCmds) != 1 || sign.gotCmds[0].Cmd != "VELGATE_REVOKE" {
-		t.Errorf("sign got %+v; want one cmd VELGATE_REVOKE", sign.gotCmds)
+	if len(sign.gotCmds) != 1 || sign.gotCmds[0].Cmd != "SSHGATE_REVOKE" {
+		t.Errorf("sign got %+v; want one cmd SSHGATE_REVOKE", sign.gotCmds)
 	}
-	if !strings.HasPrefix(ssh.gotCmd, "VELGATE_SIG:") || !strings.HasSuffix(ssh.gotCmd, " VELGATE_REVOKE") {
-		t.Errorf("ssh.gotCmd = %q; want VELGATE_SIG:... VELGATE_REVOKE", ssh.gotCmd)
+	if !strings.HasPrefix(ssh.gotCmd, "SSHGATE_SIG:") || !strings.HasSuffix(ssh.gotCmd, " SSHGATE_REVOKE") {
+		t.Errorf("ssh.gotCmd = %q; want SSHGATE_SIG:... SSHGATE_REVOKE", ssh.gotCmd)
 	}
 	// Registry must no longer have the alias.
 	if _, ok := r.Get("to-revoke"); ok {
@@ -112,13 +112,13 @@ func TestRevokeServer_SignUnreachable(t *testing.T) {
 func TestRevokeServer_NoConfirmationMarker(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "a", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
-	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "VELGATE_REVOKE", Sig: "VELGATE_SIG:x:y"}}}
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "SSHGATE_REVOKE", Sig: "SSHGATE_SIG:x:y"}}}
 	ssh := &fakeSSH{stdout: []byte("nothing interesting\n"), exit: 0}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
 	_, err := runner.RevokeServer(context.Background(), tools.RevokeServerInput{Alias: "a"})
 	if err == nil {
-		t.Fatal("expected error when stdout missing VELGATE_REVOKED marker")
+		t.Fatal("expected error when stdout missing SSHGATE_REVOKED marker")
 	}
 	// Registry should remain intact — we cannot prove the remote cleaned itself.
 	if _, ok := r.Get("a"); !ok {
@@ -129,7 +129,7 @@ func TestRevokeServer_NoConfirmationMarker(t *testing.T) {
 func TestRevokeServer_SSHErrorReturnsError(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "a", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
-	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "VELGATE_REVOKE", Sig: "VELGATE_SIG:x:y"}}}
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "SSHGATE_REVOKE", Sig: "SSHGATE_SIG:x:y"}}}
 	ssh := &fakeSSH{err: errors.New("dial: connection refused")}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 

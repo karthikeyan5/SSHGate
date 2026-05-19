@@ -3,8 +3,8 @@
 // Helpers for the Phase-1 end-to-end test (task 1.6).
 //
 // The full integration stack uses a real linuxserver/openssh-server
-// container as the remote target, a freshly cross-compiled velgate
-// binary installed into the container, the real velsigner.Server
+// container as the remote target, a freshly cross-compiled gate
+// binary installed into the container, the real signer.Server
 // listening on a Unix socket under t.TempDir(), and the real MCP
 // tools.Runner directly (we don't stand up the JSON-RPC server — the
 // in-process Runner is the meaningful integration boundary).
@@ -38,8 +38,8 @@ import (
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/velsigner"
-	"github.com/karthikeyan5/sshgate/src/velsigner/backend"
+	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 const (
@@ -235,15 +235,15 @@ func generateSSHKey(t *testing.T) (privPath, pubPath string) {
 	return privPath, pubPath
 }
 
-// generateVelgateKeyPair creates a fresh Ed25519 master signing key
-// pair via velsigner.GenerateKeyPair, in t.TempDir(). Returns the
+// generateGateKeyPair creates a fresh Ed25519 master signing key
+// pair via signer.GenerateKeyPair, in t.TempDir(). Returns the
 // private and public file paths.
-func generateVelgateKeyPair(t *testing.T) (privPath, pubPath string) {
+func generateGateKeyPair(t *testing.T) (privPath, pubPath string) {
 	t.Helper()
 	dir := t.TempDir()
-	privPath = filepath.Join(dir, "velgate.key")
-	pubPath = filepath.Join(dir, "velgate.pub")
-	if err := velsigner.GenerateKeyPair(privPath, pubPath); err != nil {
+	privPath = filepath.Join(dir, "gate.key")
+	pubPath = filepath.Join(dir, "gate.pub")
+	if err := signer.GenerateKeyPair(privPath, pubPath); err != nil {
 		t.Fatalf("GenerateKeyPair: %v", err)
 	}
 	return privPath, pubPath
@@ -280,14 +280,14 @@ func generateStandaloneSSHKey(t *testing.T) (privPath, pubPath string) {
 	return privPath, pubPath
 }
 
-// buildVelgateLinux cross-compiles velgate for linux/amd64 into
-// <repoRoot>/bin/velgate-linux-amd64 and returns its path. We invoke
-// `go build` directly rather than `make velgate-linux` so the test
+// buildGateLinux cross-compiles gate for linux/amd64 into
+// <repoRoot>/bin/gate-linux-amd64 and returns its path. We invoke
+// `go build` directly rather than `make gate-linux` so the test
 // is independent of Makefile changes.
-func buildVelgateLinux(t *testing.T) string {
+func buildGateLinux(t *testing.T) string {
 	t.Helper()
 	root := repoRoot(t)
-	out := filepath.Join(root, "bin", "velgate-linux-amd64")
+	out := filepath.Join(root, "bin", "gate-linux-amd64")
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
@@ -295,13 +295,13 @@ func buildVelgateLinux(t *testing.T) string {
 		"-trimpath",
 		"-ldflags", "-s -w",
 		"-o", out,
-		"./src/velgate/cmd/velgate",
+		"./src/gate/cmd/gate",
 	)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("build velgate-linux: %v\n%s", err, output)
+		t.Fatalf("build gate-linux: %v\n%s", err, output)
 	}
 	return out
 }
@@ -335,24 +335,24 @@ func dockerCp(t *testing.T, hostPath, containerPath string) {
 	}
 }
 
-// deployVelgateBinary installs the cross-compiled velgate binary
+// deployGateBinary installs the cross-compiled gate binary
 // into the running container along with the master signing pubkey,
 // and rewrites authorized_keys so every connection on the SSHGate
-// key is forced through velgate. Idempotent within a test run.
-func deployVelgateBinary(t *testing.T, pubKeyPath string) {
+// key is forced through gate. Idempotent within a test run.
+func deployGateBinary(t *testing.T, pubKeyPath string) {
 	t.Helper()
-	binPath := buildVelgateLinux(t)
+	binPath := buildGateLinux(t)
 
-	// Make ~/.velgate; install the binary and the pubkey.
+	// Make ~/.sshgate-gate; install the binary and the pubkey.
 	if out, err := dockerExec(t, nil, fmt.Sprintf(
-		"mkdir -p %[1]s/.velgate && chown %[2]s:%[2]s %[1]s/.velgate && chmod 700 %[1]s/.velgate",
+		"mkdir -p %[1]s/.gate && chown %[2]s:%[2]s %[1]s/.gate && chmod 700 %[1]s/.gate",
 		containerHome, remoteUser)); err != nil {
-		t.Fatalf("mkdir .velgate: %v\n%s", err, out)
+		t.Fatalf("mkdir .gate: %v\n%s", err, out)
 	}
-	dockerCp(t, binPath, containerHome+"/.velgate/velgate")
-	dockerCp(t, pubKeyPath, containerHome+"/.velgate/velgate.pub")
-	if out, err := dockerExec(t, nil, fmt.Sprintf("chown %s:%s %s/.velgate/velgate %s/.velgate/velgate.pub && chmod 755 %s/.velgate/velgate && chmod 644 %s/.velgate/velgate.pub", remoteUser, remoteUser, containerHome, containerHome, containerHome, containerHome)); err != nil {
-		t.Fatalf("chown/chmod velgate files: %v\n%s", err, out)
+	dockerCp(t, binPath, containerHome+"/.sshgate-gate/gate")
+	dockerCp(t, pubKeyPath, containerHome+"/.sshgate-gate/gate.pub")
+	if out, err := dockerExec(t, nil, fmt.Sprintf("chown %s:%s %s/.sshgate-gate/gate %s/.sshgate-gate/gate.pub && chmod 755 %s/.sshgate-gate/gate && chmod 644 %s/.sshgate-gate/gate.pub", remoteUser, remoteUser, containerHome, containerHome, containerHome, containerHome)); err != nil {
+		t.Fatalf("chown/chmod gate files: %v\n%s", err, out)
 	}
 
 	// Rewrite authorized_keys: prepend the command="..." forcing on
@@ -370,7 +370,7 @@ while IFS= read -r line; do
     ssh-*) key="$line" ;;
     *) key=$(echo "$line" | sed -E 's/^[^ ]+ +(ssh-[a-z0-9-]+ +)/\1/') ;;
   esac
-  echo 'command="%s/.velgate/velgate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding '"$key" >> "$tmp"
+  echo 'command="%s/.sshgate-gate/gate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding '"$key" >> "$tmp"
 done < %s
 mv "$tmp" %s
 chown %s:%s %s
@@ -388,33 +388,33 @@ chmod 600 %s
 	}
 }
 
-// startVelsigner spins up a real velsigner.Server in a goroutine,
+// startSigner spins up a real signer.Server in a goroutine,
 // bound to a socket under t.TempDir() and backed by StubBackend
 // (which denies every request). Returns the socket path and a
 // cleanup func that cancels the server context and waits for the
 // goroutine to exit. Use t.Cleanup to invoke cleanup so a t.Fatal
 // in the test body still tears down the server.
-func startVelsigner(t *testing.T, masterKeyPath string) (socketPath string, cleanup func()) {
+func startSigner(t *testing.T, masterKeyPath string) (socketPath string, cleanup func()) {
 	t.Helper()
 
-	priv, err := velsigner.LoadKey(masterKeyPath)
+	priv, err := signer.LoadKey(masterKeyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
 
 	auditPath := filepath.Join(t.TempDir(), "approvals.log")
-	audit, err := velsigner.OpenAuditLog(auditPath)
+	audit, err := signer.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
 
-	daemon := &velsigner.Daemon{
+	daemon := &signer.Daemon{
 		Key:     priv,
 		Backend: backend.StubBackend{},
 		Audit:   audit,
 	}
-	socketPath = filepath.Join(t.TempDir(), "velsigner.sock")
-	srv := &velsigner.Server{
+	socketPath = filepath.Join(t.TempDir(), "signer.sock")
+	srv := &signer.Server{
 		Path:           socketPath,
 		Handler:        daemon,
 		HandlerTimeout: 10 * time.Second,
@@ -445,7 +445,7 @@ func startVelsigner(t *testing.T, masterKeyPath string) (socketPath string, clea
 			<-done
 			_ = audit.Close()
 			if serveErr != nil {
-				t.Logf("velsigner Listen returned: %v", serveErr)
+				t.Logf("signer Listen returned: %v", serveErr)
 			}
 		})
 	}

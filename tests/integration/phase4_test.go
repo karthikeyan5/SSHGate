@@ -5,19 +5,19 @@
 // Demonstrates the full teardown loop:
 //
 //  1. add_server: real auto-setup against a fresh openssh-server
-//     container. velgate is installed; authorized_keys is rewritten
+//     container. gate is installed; authorized_keys is rewritten
 //     with the command="..." forcing for the SSHGate dedicated key.
-//  2. run (read): proves velgate is in the loop and routes a read
+//  2. run (read): proves gate is in the loop and routes a read
 //     directly.
-//  3. revoke_server: signs VELGATE_REVOKE via an auto-approve velsigner
-//     backend, ships it; velgate strips its own authorized_keys line
-//     and removes ~/.velgate/.
+//  3. revoke_server: signs SSHGATE_REVOKE via an auto-approve signer
+//     backend, ships it; gate strips its own authorized_keys line
+//     and removes ~/.sshgate-gate/.
 //  4. Confirm cleanup: the BOOTSTRAP key still works (proving
-//     authorized_keys was not destroyed); ~/.velgate/ is gone; the MCP
+//     authorized_keys was not destroyed); ~/.sshgate-gate/ is gone; the MCP
 //     registry no longer holds the alias.
 //
-// The test runs end-to-end with the REAL velsigner.Server (auto-approve
-// backend), REAL sign.Client, REAL ssh.Client, REAL velgate binary.
+// The test runs end-to-end with the REAL signer.Server (auto-approve
+// backend), REAL sign.Client, REAL ssh.Client, REAL gate binary.
 // Only the human-tap stage is replaced by an in-process auto-approver,
 // which keeps the focus on the revoke flow rather than re-testing
 // Telegram (Phase-2 covers that).
@@ -36,13 +36,13 @@ import (
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/velsigner"
-	"github.com/karthikeyan5/sshgate/src/velsigner/backend"
+	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // autoApproveBackend is a Backend that approves every request as soon
 // as Request is called. It exists for Phase-4: the revoke flow needs a
-// signed VELGATE_REVOKE but doesn't need to re-test the Telegram tap
+// signed SSHGATE_REVOKE but doesn't need to re-test the Telegram tap
 // (Phase-2 covers that). Goroutine bookkeeping ensures all approvers
 // finish before the test exits so goleak is clean.
 type autoApproveBackend struct {
@@ -94,23 +94,23 @@ func (a *autoApproveBackend) Close() {
 	a.wg.Wait()
 }
 
-// startVelsignerAutoApprove boots a real velsigner.Server backed by the
+// startSignerAutoApprove boots a real signer.Server backed by the
 // auto-approve backend. Returns the socket path and a cleanup func.
-func startVelsignerAutoApprove(t *testing.T, masterKeyPath string) (string, func()) {
+func startSignerAutoApprove(t *testing.T, masterKeyPath string) (string, func()) {
 	t.Helper()
-	priv, err := velsigner.LoadKey(masterKeyPath)
+	priv, err := signer.LoadKey(masterKeyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
 	auditPath := filepath.Join(t.TempDir(), "approvals.log")
-	audit, err := velsigner.OpenAuditLog(auditPath)
+	audit, err := signer.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
 	be := newAutoApproveBackend()
-	daemon := &velsigner.Daemon{Key: priv, Backend: be, Audit: audit}
-	socketPath := filepath.Join(t.TempDir(), "velsigner.sock")
-	srv := &velsigner.Server{Path: socketPath, Handler: daemon, HandlerTimeout: 15 * time.Second}
+	daemon := &signer.Daemon{Key: priv, Backend: be, Audit: audit}
+	socketPath := filepath.Join(t.TempDir(), "signer.sock")
+	srv := &signer.Server{Path: socketPath, Handler: daemon, HandlerTimeout: 15 * time.Second}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -140,10 +140,10 @@ func TestPhase4RevokeServer_FullCycle(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
-	velgateBin := buildVelgateLinux(t)
-	velgateKeyPriv, velgatePub := generateVelgateKeyPair(t)
+	gateBin := buildGateLinux(t)
+	gateKeyPriv, gatePub := generateGateKeyPair(t)
 
-	socketPath, socketCleanup := startVelsignerAutoApprove(t, velgateKeyPriv)
+	socketPath, socketCleanup := startSignerAutoApprove(t, gateKeyPriv)
 	t.Cleanup(socketCleanup)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
@@ -165,10 +165,10 @@ func TestPhase4RevokeServer_FullCycle(t *testing.T) {
 		Sign:              signClient,
 		SSH:               sshClient,
 		WriteTTLSec:       60,
-		VelsignerSockPath: socketPath,
+		SignerSockPath: socketPath,
 		AddServerCfg: tools.AddServerConfig{
-			VelgateBinaryPath: velgateBin,
-			VelgatePubPath:    velgatePub,
+			GateBinaryPath: gateBin,
+			GatePubPath:    gatePub,
 			SSHGatePubPath:    dedicatedPub,
 		},
 	}
@@ -208,8 +208,8 @@ func TestPhase4RevokeServer_FullCycle(t *testing.T) {
 	if !revokeOut.RegistryRemoved {
 		t.Errorf("RegistryRemoved = false; want true")
 	}
-	if !strings.Contains(revokeOut.Message, "VELGATE_REVOKED") {
-		t.Errorf("Message = %q; want VELGATE_REVOKED marker", revokeOut.Message)
+	if !strings.Contains(revokeOut.Message, "SSHGATE_REVOKED") {
+		t.Errorf("Message = %q; want SSHGATE_REVOKED marker", revokeOut.Message)
 	}
 
 	// --- registry no longer has alias ---
@@ -228,25 +228,25 @@ func TestPhase4RevokeServer_FullCycle(t *testing.T) {
 			exit, stdout)
 	}
 
-	// --- ~/.velgate/ gone ---
+	// --- ~/.sshgate-gate/ gone ---
 	dirCheck, _, exit, err := directUnsignedSSH(t, bootstrapPriv,
-		"127.0.0.1", sshContainerPort, remoteUser, "test -d ~/.velgate && echo PRESENT || echo ABSENT")
+		"127.0.0.1", sshContainerPort, remoteUser, "test -d ~/.sshgate-gate && echo PRESENT || echo ABSENT")
 	if err != nil {
 		t.Fatalf("post-revoke dir probe: %v", err)
 	}
 	if !strings.Contains(string(dirCheck), "ABSENT") {
-		t.Errorf("~/.velgate still present after revoke (exit=%d, stdout=%q)", exit, dirCheck)
+		t.Errorf("~/.sshgate-gate still present after revoke (exit=%d, stdout=%q)", exit, dirCheck)
 	}
 
-	// --- velgate-restricted line gone from authorized_keys ---
+	// --- gate-restricted line gone from authorized_keys ---
 	authCheck, _, _, err := directUnsignedSSH(t, bootstrapPriv,
 		"127.0.0.1", sshContainerPort, remoteUser,
-		"grep -c '\\.velgate/velgate' ~/.ssh/authorized_keys || true")
+		"grep -c '\\.sshgate-gate/gate' ~/.ssh/authorized_keys || true")
 	if err != nil {
 		t.Fatalf("authorized_keys probe: %v", err)
 	}
 	if !strings.HasPrefix(strings.TrimSpace(string(authCheck)), "0") {
-		t.Errorf("authorized_keys still references velgate after revoke: %q", authCheck)
+		t.Errorf("authorized_keys still references gate after revoke: %q", authCheck)
 	}
 
 	// --- backup file is present (operator-safety net) ---

@@ -6,12 +6,12 @@
 // only fake being the Telegram API itself (an in-process httptest
 // server we drive from the test):
 //
-//   Runner (real MCP) → sign.Client → velsigner.Daemon (real)
+//   Runner (real MCP) → sign.Client → signer.Daemon (real)
 //                                       → TelegramBackend (real)
 //                                       → httptest fake Telegram
 //                                       → callback injected from test
 //                                       → daemon signs
-//   Runner → ssh.Client → Docker openssh-server → real velgate binary
+//   Runner → ssh.Client → Docker openssh-server → real gate binary
 //                                                 → /tmp/<file> on remote
 //
 // Six scenarios:
@@ -53,8 +53,8 @@ import (
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/velsigner"
-	"github.com/karthikeyan5/sshgate/src/velsigner/backend"
+	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // --- fake Telegram ------------------------------------------------------
@@ -154,7 +154,7 @@ func (f *fakeTG) route(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeTG) replyGetMe(w http.ResponseWriter) {
-	body := json.RawMessage(`{"id":7777,"is_bot":true,"first_name":"sshgate-velsigner-bot","username":"velsigner_bot"}`)
+	body := json.RawMessage(`{"id":7777,"is_bot":true,"first_name":"sshgate-signer-bot","username":"signer_bot"}`)
 	writeTGResult(w, body)
 }
 
@@ -287,23 +287,23 @@ func (f *fakeTG) answersSnapshot() []fakeTGAnswer {
 	return out
 }
 
-// --- velsigner + telegram wiring helpers --------------------------------
+// --- signer + telegram wiring helpers --------------------------------
 
-// startVelsignerTelegram boots a real velsigner.Server in a goroutine,
+// startSignerTelegram boots a real signer.Server in a goroutine,
 // wired to a real TelegramBackend pointed at the supplied fakeTG. The
 // ChatStore is pre-populated with phase2ChatID (simulating a prior
 // /start). Returns the socket path, audit log path, the backend (for
 // callers that need to read PanicsTotal etc.), and a cleanup func.
-func startVelsignerTelegram(t *testing.T, masterKeyPath string, fake *fakeTG, reqTimeout time.Duration) (socketPath, auditPath string, tb *backend.TelegramBackend, cleanup func()) {
+func startSignerTelegram(t *testing.T, masterKeyPath string, fake *fakeTG, reqTimeout time.Duration) (socketPath, auditPath string, tb *backend.TelegramBackend, cleanup func()) {
 	t.Helper()
 
-	priv, err := velsigner.LoadKey(masterKeyPath)
+	priv, err := signer.LoadKey(masterKeyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
 
 	auditPath = filepath.Join(t.TempDir(), "approvals.log")
-	audit, err := velsigner.OpenAuditLog(auditPath)
+	audit, err := signer.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
@@ -325,13 +325,13 @@ func startVelsignerTelegram(t *testing.T, masterKeyPath string, fake *fakeTG, re
 		t.Fatalf("NewTelegramBackend: %v", err)
 	}
 
-	daemon := &velsigner.Daemon{
+	daemon := &signer.Daemon{
 		Key:     priv,
 		Backend: tb,
 		Audit:   audit,
 	}
-	socketPath = filepath.Join(t.TempDir(), "velsigner.sock")
-	srv := &velsigner.Server{
+	socketPath = filepath.Join(t.TempDir(), "signer.sock")
+	srv := &signer.Server{
 		Path:           socketPath,
 		Handler:        daemon,
 		HandlerTimeout: 30 * time.Second,
@@ -380,14 +380,14 @@ func startVelsignerTelegram(t *testing.T, masterKeyPath string, fake *fakeTG, re
 			})
 			_ = audit.Close()
 			if serveErr != nil {
-				t.Logf("velsigner Listen returned: %v", serveErr)
+				t.Logf("signer Listen returned: %v", serveErr)
 			}
 		})
 	}
 	return socketPath, auditPath, tb, cleanup
 }
 
-// buildRunner constructs a real tools.Runner around the live velsigner
+// buildRunner constructs a real tools.Runner around the live signer
 // socket and SSH key, with a registry containing `alias → host:port@user`.
 // Returns the Runner; the caller invokes Run / RunBatch directly.
 func buildRunner(t *testing.T, socketPath, sshKeyPath string, alias, host string, port int, user string) *tools.Runner {
@@ -471,18 +471,18 @@ func extractRequestID(text string) string {
 }
 
 // readAuditLines parses the audit log into a slice of records.
-func readAuditLines(t *testing.T, path string) []velsigner.AuditEvent {
+func readAuditLines(t *testing.T, path string) []signer.AuditEvent {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read audit %s: %v", path, err)
 	}
-	var out []velsigner.AuditEvent
+	var out []signer.AuditEvent
 	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		var ev velsigner.AuditEvent
+		var ev signer.AuditEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("parse audit line %q: %v", line, err)
 		}
@@ -493,7 +493,7 @@ func readAuditLines(t *testing.T, path string) []velsigner.AuditEvent {
 
 // findAuditByRequestID returns the first audit event with matching
 // RequestID, or nil.
-func findAuditByRequestID(events []velsigner.AuditEvent, reqID string) *velsigner.AuditEvent {
+func findAuditByRequestID(events []signer.AuditEvent, reqID string) *signer.AuditEvent {
 	for i := range events {
 		if events[i].RequestID == reqID {
 			return &events[i]
@@ -505,24 +505,24 @@ func findAuditByRequestID(events []velsigner.AuditEvent, reqID string) *velsigne
 // --- the test -----------------------------------------------------------
 
 func TestPhase2EndToEnd(t *testing.T) {
-	// Phase-1-style setup: SSH key + velgate key generated BEFORE
+	// Phase-1-style setup: SSH key + gate key generated BEFORE
 	// container boot (the linuxserver image bakes the pubkey into
 	// authorized_keys at startup).
 	sshKeyPriv, _ := generateSSHKey(t)
-	_, velgatePub := generateVelgateKeyPair(t)
-	masterKey := strings.TrimSuffix(velgatePub, ".pub") + ".key"
+	_, gatePub := generateGateKeyPair(t)
+	masterKey := strings.TrimSuffix(gatePub, ".pub") + ".key"
 
 	containerCleanup := bootContainer(t)
 	t.Cleanup(containerCleanup)
 
-	deployVelgateBinary(t, velgatePub)
+	deployGateBinary(t, gatePub)
 
-	// One fake Telegram + one velsigner stack for scenarios 1–4 with a
+	// One fake Telegram + one signer stack for scenarios 1–4 with a
 	// generous 15s request timeout. Scenario 5 (Timeout) spins up its
 	// own short-timeout stack so the others aren't held hostage by a
 	// fast-expiring backend.
 	fakeMain := newFakeTG(t)
-	socketMain, auditMain, _, cleanupMain := startVelsignerTelegram(t, masterKey, fakeMain, 15*time.Second)
+	socketMain, auditMain, _, cleanupMain := startSignerTelegram(t, masterKey, fakeMain, 15*time.Second)
 	t.Cleanup(cleanupMain)
 	runnerMain := buildRunner(t, socketMain, sshKeyPriv, "test", "127.0.0.1", sshContainerPort, remoteUser)
 
@@ -860,11 +860,11 @@ func TestPhase2EndToEnd(t *testing.T) {
 	})
 
 	t.Run("Timeout", func(t *testing.T) {
-		// Fresh velsigner + telegram pair with a 500ms request timeout.
+		// Fresh signer + telegram pair with a 500ms request timeout.
 		// Reusing the main stack would force every other scenario to
 		// race the same short timeout — cleaner to spin a dedicated one.
 		fakeTO := newFakeTG(t)
-		socketTO, _, _, cleanupTO := startVelsignerTelegram(t, masterKey, fakeTO, 500*time.Millisecond)
+		socketTO, _, _, cleanupTO := startSignerTelegram(t, masterKey, fakeTO, 500*time.Millisecond)
 		t.Cleanup(cleanupTO)
 		runnerTO := buildRunner(t, socketTO, sshKeyPriv, "test-to", "127.0.0.1", sshContainerPort, remoteUser)
 

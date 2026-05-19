@@ -15,17 +15,17 @@ import (
 	"github.com/karthikeyan5/sshgate/src/mcp/sign"
 )
 
-// fakeVelsigner accepts one connection, reads a JSON line, and writes
+// fakeSigner accepts one connection, reads a JSON line, and writes
 // whatever response the test pre-arranged. Tests stop the server via
 // the returned cancel func.
-type fakeVelsigner struct {
+type fakeSigner struct {
 	t        *testing.T
 	respond  func(req map[string]any) string
 	delay    time.Duration
 	gotReqCh chan map[string]any
 }
 
-func startFakeVelsigner(t *testing.T, respond func(req map[string]any) string) (path string, gotReqCh chan map[string]any, stop func()) {
+func startFakeSigner(t *testing.T, respond func(req map[string]any) string) (path string, gotReqCh chan map[string]any, stop func()) {
 	t.Helper()
 	dir := t.TempDir()
 	path = filepath.Join(dir, "sock")
@@ -71,8 +71,8 @@ func startFakeVelsigner(t *testing.T, respond func(req map[string]any) string) (
 
 func TestSign_Approved(t *testing.T) {
 	t.Parallel()
-	path, gotReq, stop := startFakeVelsigner(t, func(req map[string]any) string {
-		return `{"request_id":"r1","status":"approved","signatures":[{"cmd":"rm /tmp/x","sig":"VELGATE_SIG:abc:def"}]}`
+	path, gotReq, stop := startFakeSigner(t, func(req map[string]any) string {
+		return `{"request_id":"r1","status":"approved","signatures":[{"cmd":"rm /tmp/x","sig":"SSHGATE_SIG:abc:def"}]}`
 	})
 	defer stop()
 
@@ -83,7 +83,7 @@ func TestSign_Approved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if len(out) != 1 || out[0].Cmd != "rm /tmp/x" || out[0].Sig != "VELGATE_SIG:abc:def" {
+	if len(out) != 1 || out[0].Cmd != "rm /tmp/x" || out[0].Sig != "SSHGATE_SIG:abc:def" {
 		t.Errorf("got %+v", out)
 	}
 	select {
@@ -101,7 +101,7 @@ func TestSign_Approved(t *testing.T) {
 
 func TestSign_Denied(t *testing.T) {
 	t.Parallel()
-	path, _, stop := startFakeVelsigner(t, func(req map[string]any) string {
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
 		return `{"request_id":"r1","status":"denied"}`
 	})
 	defer stop()
@@ -115,7 +115,7 @@ func TestSign_Denied(t *testing.T) {
 
 func TestSign_Timeout(t *testing.T) {
 	t.Parallel()
-	path, _, stop := startFakeVelsigner(t, func(req map[string]any) string {
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
 		return `{"request_id":"r1","status":"timeout"}`
 	})
 	defer stop()
@@ -140,7 +140,7 @@ func TestSign_UnreachableMissingSocket(t *testing.T) {
 
 func TestSign_ErrorStatus(t *testing.T) {
 	t.Parallel()
-	path, _, stop := startFakeVelsigner(t, func(req map[string]any) string {
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
 		return `{"request_id":"r1","status":"error","error":"bad request"}`
 	})
 	defer stop()
@@ -158,7 +158,7 @@ func TestSign_ErrorStatus(t *testing.T) {
 
 func TestSign_MalformedResponse(t *testing.T) {
 	t.Parallel()
-	path, _, stop := startFakeVelsigner(t, func(req map[string]any) string {
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
 		return `not-json-at-all`
 	})
 	defer stop()
@@ -172,7 +172,7 @@ func TestSign_MalformedResponse(t *testing.T) {
 
 func TestSign_RequestIDMismatch(t *testing.T) {
 	t.Parallel()
-	path, _, stop := startFakeVelsigner(t, func(req map[string]any) string {
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
 		return `{"request_id":"other","status":"approved","signatures":[]}`
 	})
 	defer stop()
@@ -186,7 +186,7 @@ func TestSign_RequestIDMismatch(t *testing.T) {
 
 func TestSign_ContextCancelled(t *testing.T) {
 	t.Parallel()
-	path, _, stop := startFakeVelsigner(t, func(req map[string]any) string {
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
 		// Sleep longer than the test's ctx timeout — we want the
 		// dialed connection's read to be aborted by ctx cancellation.
 		time.Sleep(2 * time.Second)

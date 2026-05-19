@@ -12,22 +12,22 @@ import (
 	"time"
 )
 
-// ErrDenied is returned by Sign when velsigner replied with
+// ErrDenied is returned by Sign when signer replied with
 // status="denied".
 var ErrDenied = errors.New("sign: denied by operator")
 
-// ErrTimeout is returned by Sign when velsigner replied with
+// ErrTimeout is returned by Sign when signer replied with
 // status="timeout" (or the Client.Timeout elapsed before a reply).
 var ErrTimeout = errors.New("sign: approval timed out")
 
-// ErrUnreachable is returned by Sign when the velsigner socket file
+// ErrUnreachable is returned by Sign when the signer socket file
 // is missing, refusing connections, or unreachable for some other
 // transport-layer reason.
-var ErrUnreachable = errors.New("sign: velsigner unreachable")
+var ErrUnreachable = errors.New("sign: signer unreachable")
 
-// Client is the velsigner socket client. SocketPath is the absolute
+// Client is the signer socket client. SocketPath is the absolute
 // path to the Unix socket; Timeout is the total per-request budget
-// (dial + write + read), and must include velsigner's approval window
+// (dial + write + read), and must include signer's approval window
 // (60s default for Telegram in v2).
 type Client struct {
 	SocketPath string
@@ -44,10 +44,10 @@ type CmdReq struct {
 	TTLSec int64
 }
 
-// Signed is one signed result returned from velsigner on approval.
+// Signed is one signed result returned from signer on approval.
 // Cmd is the original command (echoed back so the caller can match
 // signatures to requests in order); Sig is the wire-encoded
-// "VELGATE_SIG:<sigB64>:<payloadB64>" string ready to prefix on the
+// "SSHGATE_SIG:<sigB64>:<payloadB64>" string ready to prefix on the
 // remote command line.
 type Signed struct {
 	Cmd string
@@ -55,7 +55,7 @@ type Signed struct {
 }
 
 // signRequestCmd is the JSON shape of a single command on the wire.
-// It must mirror velsigner's signRequestCmd exactly.
+// It must mirror signer's signRequestCmd exactly.
 type signRequestCmd struct {
 	Server string `json:"server"`
 	Cmd    string `json:"cmd"`
@@ -99,7 +99,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 
 	timeout := c.Timeout
 	if timeout <= 0 {
-		timeout = 75 * time.Second // velsigner default approval window + slack
+		timeout = 75 * time.Second // signer default approval window + slack
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)

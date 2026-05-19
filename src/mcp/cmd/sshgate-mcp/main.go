@@ -12,7 +12,7 @@
 // Environment overrides:
 //
 //	$XDG_CONFIG_HOME         — config root (default ~/.config)
-//	$SSHGATE_VELSIGNER_SOCK  — velsigner socket (default /run/velsigner/sock)
+//	$SSHGATE_SIGNER_SOCK  — signer socket (default /run/signer/sock)
 //
 // Stdio: stdout is the JSON-RPC channel (do not log there). stderr
 // is the operator log. stdin EOF is a clean shutdown signal.
@@ -39,8 +39,8 @@ import (
 )
 
 const (
-	defaultVelsignerSock = "/run/velsigner/sock"
-	// signTimeout covers the velsigner-side approval window (60s for
+	defaultSignerSock = "/run/signer/sock"
+	// signTimeout covers the signer-side approval window (60s for
 	// Telegram in v2) plus a couple of seconds of socket slack.
 	signTimeout = 75 * time.Second
 	// sshTimeout bounds a single SSH dial+exec.
@@ -96,9 +96,9 @@ func run(args []string) int {
 		return 1
 	}
 
-	socketPath := os.Getenv("SSHGATE_VELSIGNER_SOCK")
+	socketPath := os.Getenv("SSHGATE_SIGNER_SOCK")
 	if socketPath == "" {
-		socketPath = defaultVelsignerSock
+		socketPath = defaultSignerSock
 	}
 
 	signer := &signpkg.Client{SocketPath: socketPath, Timeout: signTimeout}
@@ -107,7 +107,7 @@ func run(args []string) int {
 		Servers:           servers,
 		Sign:              signer,
 		SSH:               sshClient,
-		VelsignerSockPath: socketPath,
+		SignerSockPath: socketPath,
 	}
 
 	server := &mcp.Server{Runner: runner, Logger: logger}
@@ -115,7 +115,7 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger.Printf("ready (registry=%s key=%s velsigner=%s)", regPath, keyPath, socketPath)
+	logger.Printf("ready (registry=%s key=%s signer=%s)", regPath, keyPath, socketPath)
 	if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 		logger.Printf("serve: %v", err)
 		return 1
