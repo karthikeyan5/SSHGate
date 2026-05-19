@@ -166,6 +166,12 @@ MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
+# Restrict syscalls to the curated service-class allowlist.
+# Covers ordinary daemon needs (read/write/socket/poll/etc.)
+# while rejecting ptrace, kexec_load, init_module, swapon and
+# other kernel-attack syscalls. @system-service is the standard
+# baseline for hardened units (systemd.exec(5)).
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target
