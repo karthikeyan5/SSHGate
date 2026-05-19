@@ -314,6 +314,178 @@ func TestPhase3AddServer_IdempotentReAdd(t *testing.T) {
 	}
 }
 
+// TestPhase3AddServer_ReadOnly covers the tier-1 install path: deploy
+// velgate WITHOUT uploading velgate.pub. Reads should still execute
+// through the gate (velgate's keystore returns (nil, nil) for the
+// missing pubkey and treats reads as allowed); writes must be denied
+// with the read-only-mode error message and exit code 77.
+func TestPhase3AddServer_ReadOnly(t *testing.T) {
+	bootstrapPriv, _ := generateSSHKey(t)
+	cleanup := bootContainer(t)
+	t.Cleanup(cleanup)
+
+	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
+	velgateBin := buildVelgateLinux(t)
+	// VelgatePubPath points at a non-existent file — AddServer in
+	// ReadOnly mode must not read it. The slash command flow doesn't
+	// have it on disk yet in tier-1.
+	velgatePubPath := filepath.Join(t.TempDir(), "definitely-not-here.pub")
+
+	regPath := filepath.Join(t.TempDir(), "servers.json")
+	servers, err := registry.New(regPath)
+	if err != nil {
+		t.Fatalf("registry.New: %v", err)
+	}
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	sshClient := &sshpkg.Client{
+		KeyPath:        dedicatedPriv,
+		KnownHostsPath: khPath,
+		Timeout:        15 * time.Second,
+	}
+	runner := &tools.Runner{
+		Servers: servers,
+		Sign:    &noopSign{},
+		SSH:     sshClient,
+		AddServerCfg: tools.AddServerConfig{
+			VelgateBinaryPath: velgateBin,
+			VelgatePubPath:    velgatePubPath,
+			SSHGatePubPath:    dedicatedPub,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := runner.AddServer(ctx, tools.AddServerInput{
+		Alias:            "ro",
+		Host:             "127.0.0.1",
+		Port:             sshContainerPort,
+		User:             remoteUser,
+		BootstrapKeyPath: bootstrapPriv,
+		ReadOnly:         true,
+	})
+	if err != nil {
+		t.Fatalf("AddServer (read-only): %v", err)
+	}
+	if !out.ReadOnlyMode {
+		t.Errorf("ReadOnlyMode=false on read-only add; want true")
+	}
+	if !out.VerifiedOK {
+		t.Errorf("VerifiedOK=false; want true (probe works regardless of pubkey)")
+	}
+
+	// Confirm velgate.pub is NOT on the remote.
+	probe, _, exit, err := directUnsignedSSH(t, bootstrapPriv,
+		"127.0.0.1", sshContainerPort, remoteUser,
+		"test -f ~/.velgate/velgate.pub && echo PRESENT || echo ABSENT")
+	if err != nil {
+		t.Fatalf("pubkey probe: %v", err)
+	}
+	if !strings.Contains(string(probe), "ABSENT") {
+		t.Errorf("velgate.pub present on remote in tier-1 (exit=%d, stdout=%q)", exit, probe)
+	}
+
+	// Read goes through.
+	rdOut, err := runner.Run(ctx, tools.RunInput{Alias: "ro", Command: "df -h"})
+	if err != nil {
+		t.Fatalf("Runner.Run(df -h) on tier-1 server: %v", err)
+	}
+	if rdOut.ExitCode != 0 {
+		t.Errorf("df -h exit=%d; want 0 (stderr=%q)", rdOut.ExitCode, rdOut.Stderr)
+	}
+
+	// Write hits the SSH layer with a SIG prefix from Sign... but
+	// noopSign errors. So we exercise the velgate denial path via a
+	// direct unsigned SSH dial that velgate classifies as a write.
+	// SSH_ORIGINAL_COMMAND is set to "rm /tmp/x" by the SSH client.
+	_, stderr, exit, err := sshClient.Run(ctx, "127.0.0.1", remoteUser, sshContainerPort, "rm /tmp/x")
+	if err == nil && exit == 0 {
+		t.Fatalf("write executed on tier-1 server (exit=0, stderr=%q); want denial", stderr)
+	}
+	if exit != 77 {
+		t.Errorf("write exit=%d; want 77 (EX_NOPERM)", exit)
+	}
+	if !strings.Contains(string(stderr), "no signing key configured") {
+		t.Errorf("stderr=%q; want substring %q", stderr, "no signing key configured")
+	}
+	if !strings.Contains(string(stderr), "/sshgate:setup") {
+		t.Errorf("stderr=%q; want substring %q", stderr, "/sshgate:setup")
+	}
+}
+
+// TestPhase3UpgradeServerToSigning covers the tier-1 → tier-2
+// transition: an existing read-only server gets its velgate.pub
+// pushed via the bootstrap leg, after which signed writes can be
+// verified. We don't exercise a real signed write here (that needs
+// velsigner) — we just confirm the upload + probe completes and the
+// remote file is present afterward.
+func TestPhase3UpgradeServerToSigning(t *testing.T) {
+	bootstrapPriv, _ := generateSSHKey(t)
+	cleanup := bootContainer(t)
+	t.Cleanup(cleanup)
+
+	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
+	velgateBin := buildVelgateLinux(t)
+	velgatePubPathMissing := filepath.Join(t.TempDir(), "missing.pub")
+	_, velgatePub := generateVelgateKeyPair(t) // for the upgrade
+
+	regPath := filepath.Join(t.TempDir(), "servers.json")
+	servers, err := registry.New(regPath)
+	if err != nil {
+		t.Fatalf("registry.New: %v", err)
+	}
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	sshClient := &sshpkg.Client{
+		KeyPath:        dedicatedPriv,
+		KnownHostsPath: khPath,
+		Timeout:        15 * time.Second,
+	}
+	runner := &tools.Runner{
+		Servers: servers,
+		Sign:    &noopSign{},
+		SSH:     sshClient,
+		AddServerCfg: tools.AddServerConfig{
+			VelgateBinaryPath: velgateBin,
+			VelgatePubPath:    velgatePubPathMissing,
+			SSHGatePubPath:    dedicatedPub,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Step 1: tier-1 add (no pubkey on disk).
+	if _, err := runner.AddServer(ctx, tools.AddServerInput{
+		Alias:            "upgrade-target",
+		Host:             "127.0.0.1",
+		Port:             sshContainerPort,
+		User:             remoteUser,
+		BootstrapKeyPath: bootstrapPriv,
+		ReadOnly:         true,
+	}); err != nil {
+		t.Fatalf("tier-1 AddServer: %v", err)
+	}
+
+	// Step 2: signer is set up; swap the config to point at the real
+	// pubkey and run UpgradeServerToSigning.
+	runner.AddServerCfg.VelgatePubPath = velgatePub
+	if err := runner.UpgradeServerToSigning(ctx, "upgrade-target", tools.AddServerInput{
+		BootstrapKeyPath: bootstrapPriv,
+	}); err != nil {
+		t.Fatalf("UpgradeServerToSigning: %v", err)
+	}
+
+	// Confirm velgate.pub is now on the remote.
+	probe, _, _, err := directUnsignedSSH(t, bootstrapPriv,
+		"127.0.0.1", sshContainerPort, remoteUser,
+		"test -f ~/.velgate/velgate.pub && echo PRESENT || echo ABSENT")
+	if err != nil {
+		t.Fatalf("post-upgrade pubkey probe: %v", err)
+	}
+	if !strings.Contains(string(probe), "PRESENT") {
+		t.Errorf("velgate.pub still absent after upgrade (stdout=%q)", probe)
+	}
+}
+
 func TestPhase3AddServer_NoGoroutineLeaks(t *testing.T) {
 	// The other Phase-3 subtests own the heavy lifetimes via t.Cleanup;
 	// goleak here is a final sanity check that any docker/SSH goroutines

@@ -39,6 +39,14 @@ type AddServerInput struct {
 	// BootstrapAgent (mutually exclusive with BootstrapKeyPath) routes
 	// the bootstrap dial through ssh-agent via $SSH_AUTH_SOCK.
 	BootstrapAgent bool `json:"bootstrap_agent,omitempty" jsonschema:"use ssh-agent ($SSH_AUTH_SOCK) for the FIRST SSH dial"`
+	// ReadOnly deploys velgate without uploading velgate.pub. The
+	// remote runs in read-only mode (reads exec, writes deny locally
+	// at the gate). This is the tier-1 install path: no velsigner, no
+	// Telegram, no master key — useful when the operator wants to try
+	// the gate before committing to a signer setup. Run
+	// /sshgate:setup later to add a signer + push velgate.pub via
+	// UpgradeServerToSigning.
+	ReadOnly bool `json:"read_only,omitempty" jsonschema:"deploy velgate WITHOUT uploading velgate.pub; remote runs in read-only mode (writes denied at the gate). Tier-1 install path"`
 }
 
 // AddServerOutput summarises a successful add. Fingerprint is the
@@ -56,6 +64,10 @@ type AddServerOutput struct {
 	// Idempotent is true when a pre-existing restricted entry was
 	// detected and the rewrite was skipped (we only verified + registered).
 	Idempotent bool `json:"idempotent,omitempty"`
+	// ReadOnlyMode echoes AddServerInput.ReadOnly. When true, the
+	// remote has velgate deployed but NO velgate.pub — writes will be
+	// denied at the gate until UpgradeServerToSigning is run.
+	ReadOnlyMode bool `json:"read_only_mode,omitempty"`
 }
 
 // addServerCfg gathers the host-side paths/env knobs that the runner
@@ -206,10 +218,16 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	if err != nil {
 		return AddServerOutput{}, err
 	}
-	velgatePubBytes, err := readLocalFile(cfg.VelgatePubPath, "velgate signing public key",
-		"ensure /sshgate:setup has been run")
-	if err != nil {
-		return AddServerOutput{}, err
+	// Tier-1 (read-only) skips the signing pubkey entirely — the
+	// operator hasn't set up velsigner yet, so the file may not even
+	// exist on disk. Tier-2 reads it and pushes it to the remote.
+	var velgatePubBytes []byte
+	if !in.ReadOnly {
+		velgatePubBytes, err = readLocalFile(cfg.VelgatePubPath, "velgate signing public key",
+			"ensure /sshgate:setup tier-2 has been run (or pass read_only=true for tier-1)")
+		if err != nil {
+			return AddServerOutput{}, err
+		}
 	}
 	sshgatePubBytes, err := readLocalFile(cfg.SSHGatePubPath, "SSHGate dedicated SSH public key",
 		"ensure /sshgate:setup has been run")
@@ -280,20 +298,26 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	}
 
 	return AddServerOutput{
-		Alias:       in.Alias,
-		Host:        in.Host,
-		Port:        port,
-		User:        in.User,
-		Fingerprint: hostFingerprint,
-		BinaryPath:  remoteVelgateBin,
-		VerifiedOK:  true,
-		Idempotent:  idempotent,
+		Alias:        in.Alias,
+		Host:         in.Host,
+		Port:         port,
+		User:         in.User,
+		Fingerprint:  hostFingerprint,
+		BinaryPath:   remoteVelgateBin,
+		VerifiedOK:   true,
+		Idempotent:   idempotent,
+		ReadOnlyMode: in.ReadOnly,
 	}, nil
 }
 
 // runAutoSetup executes steps 1–5 of the auto-setup flow (mkdir,
 // upload, backup, rewrite authorized_keys). On any failure, it
 // restores authorized_keys from the backup and removes ~/.velgate/.
+//
+// When velgatePubBytes is nil, the velgate.pub upload step is skipped
+// — the remote runs in tier-1 read-only mode (velgate's keystore
+// treats missing pubkey as "no signer configured"; reads execute,
+// writes are denied at the gate).
 func (r *Runner) runAutoSetup(
 	ctx context.Context, bootClient *ssh.Client,
 	velgateBin, velgatePubBytes []byte,
@@ -312,10 +336,12 @@ func (r *Runner) runAutoSetup(
 		return fmt.Errorf("tools: upload velgate: %w", err)
 	}
 
-	// Step 3: upload velgate.pub.
-	if err := uploadFile(ctx, bootClient, velgatePubBytes, remoteVelgatePub, "644"); err != nil {
-		r.rollbackPartial(ctx, bootClient, existingAuthKeys, false)
-		return fmt.Errorf("tools: upload velgate.pub: %w", err)
+	// Step 3: upload velgate.pub (skipped in tier-1 read-only mode).
+	if velgatePubBytes != nil {
+		if err := uploadFile(ctx, bootClient, velgatePubBytes, remoteVelgatePub, "644"); err != nil {
+			r.rollbackPartial(ctx, bootClient, existingAuthKeys, false)
+			return fmt.Errorf("tools: upload velgate.pub: %w", err)
+		}
 	}
 
 	// Step 4: backup authorized_keys (no-op if already exists).
@@ -359,6 +385,88 @@ func (r *Runner) rollbackPartial(ctx context.Context, c *ssh.Client, original []
 		}
 	}
 	_, _, _ = runSSH(ctx, c, "rm -rf "+remoteVelgateDir)
+}
+
+// UpgradeServerToSigning pushes velgate.pub to an already-registered
+// alias so the remote can verify signed write commands. Used in the
+// tier-1 → tier-2 transition: after the operator runs /sshgate:setup
+// to generate a signer, the slash command iterates registered servers
+// and calls this method to switch each one from "read-only" to
+// "signed-write" mode.
+//
+// The upload reuses the same bootstrap-leg credentials that AddServer
+// used originally (BootstrapKeyPath / BootstrapAgent). We do not
+// route the push through the SSHGate dedicated key because that key
+// is locked to `command="~/.velgate/velgate"` — it cannot place a
+// file. Re-supplying bootstrap creds is the simplest correct design
+// for v1.x; revisit when v2.x ships the hosted signer.
+//
+// Idempotent: calling on a server that already has velgate.pub
+// overwrites it. The probe at the end is the same VELGATE_OK
+// post-install check AddServer uses.
+func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, bootstrap AddServerInput) error {
+	if r.Servers == nil {
+		return errors.New("tools: Servers is nil")
+	}
+	if r.SSH == nil {
+		return errors.New("tools: SSH is nil")
+	}
+	entry, ok := r.Servers.Get(alias)
+	if !ok {
+		return fmt.Errorf("tools: unknown server alias %q (check sshgate.list_servers)", alias)
+	}
+	if bootstrap.BootstrapAgent == (bootstrap.BootstrapKeyPath != "") {
+		return errors.New("tools: must specify exactly one of bootstrap_key_path or bootstrap_agent=true")
+	}
+	// Fill the bootstrap host/user/port from the registry so callers
+	// only have to supply the credentials.
+	bootstrap.Alias = alias
+	bootstrap.Host = entry.Host
+	bootstrap.User = entry.User
+	bootstrap.Port = entry.Port
+
+	cfg, err := r.resolveAddServerCfg()
+	if err != nil {
+		return err
+	}
+	velgatePubBytes, err := readLocalFile(cfg.VelgatePubPath, "velgate signing public key",
+		"run /sshgate:setup tier-2 to generate it")
+	if err != nil {
+		return err
+	}
+
+	bootCfg, err := r.buildBootstrapClientConfig(bootstrap)
+	if err != nil {
+		return err
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
+	defer cancel()
+	bootClient, _, err := dialBootstrap(dialCtx, entry.Host, entry.Port, bootCfg)
+	if err != nil {
+		return fmt.Errorf("tools: bootstrap dial: %w", err)
+	}
+	defer bootClient.Close()
+
+	// Push velgate.pub. The remote directory already exists (velgate
+	// itself is in there), so we skip the mkdir; uploadFile sets the
+	// final mode deterministically.
+	if err := uploadFile(ctx, bootClient, velgatePubBytes, remoteVelgatePub, "644"); err != nil {
+		return fmt.Errorf("tools: upload velgate.pub: %w", err)
+	}
+
+	// Verify via r.SSH (sshgate dedicated key) — empty cmd triggers
+	// the VELGATE_OK probe regardless of pubkey state, so this only
+	// confirms the gate still answers, not that signed writes work.
+	// The actual signed-write path is exercised the first time the
+	// operator runs a write command through sshgate.run.
+	probe, _, _, err := r.SSH.Run(ctx, entry.Host, entry.User, entry.Port, "")
+	if err != nil || !strings.Contains(string(probe), "VELGATE_OK") {
+		if err != nil {
+			return fmt.Errorf("tools: verify probe: %w (stdout=%q)", err, string(probe))
+		}
+		return fmt.Errorf("tools: verify probe did not return VELGATE_OK (got %q)", string(probe))
+	}
+	return nil
 }
 
 // rollback is the post-verify rollback path: the auto-setup completed
