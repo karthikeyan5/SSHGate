@@ -1,12 +1,12 @@
 ---
-description: Revoke a registered server — tear down remote velgate and drop the alias
+description: Revoke a registered server — tear down remote gate and drop the alias
 argument-hint: <alias>
 allowed-tools: mcp__sshgate__revoke_server
 ---
 
 The user invoked `/sshgate:revoke <alias>`. This is destructive: it
 removes the `command="..."` line from the remote's `authorized_keys`,
-deletes `~/.velgate/` on the remote, and drops the alias from the
+deletes `~/.sshgate-gate/` on the remote, and drops the alias from the
 local registry.
 
 Parse the first positional argument as `alias`. Validate it matches
@@ -22,14 +22,14 @@ Alias must match [a-z][a-z0-9-]{0,30}.
 
 Before calling the tool, tell the user verbatim:
 
-> Revoking `<alias>` issues a signed VELGATE_REVOKE — you'll get a
+> Revoking `<alias>` issues a signed SSHGATE_REVOKE — you'll get a
 > Telegram approval prompt. Approve it to proceed.
 
 Then call `mcp__sshgate__revoke_server` with `{ "alias": "<alias>" }`.
 
 Surface the tool's output:
 
-- `remote_cleaned` (bool) — did velgate confirm `VELGATE_REVOKED` on the remote?
+- `remote_cleaned` (bool) — did gate confirm `SSHGATE_REVOKED` on the remote?
 - `registry_removed` (bool) — was the alias dropped from `~/.config/sshgate/servers.json`?
 - `message` — human-readable summary from the tool.
 

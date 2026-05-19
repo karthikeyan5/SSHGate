@@ -28,7 +28,7 @@ Call `mcp__sshgate__run` with `{ "alias": "<alias>", "command": "<command>" }`.
 
 The tool classifies the command:
 - Read → executes immediately, no approval.
-- Write → requests approval via velsigner; the user gets a Telegram
+- Write → requests approval via the signer; the user gets a Telegram
   prompt. Tell the user that's coming if `classification.kind == "write"`
   is observable from the tool output; otherwise just wait.
 
@@ -43,7 +43,7 @@ stderr:
 ```
 
 Omit empty stdout/stderr sections. If `exit_code` is non-zero, lead
-with that. If the tool itself errors (denied, timeout, velsigner
+with that. If the tool itself errors (denied, timeout, sshgate-signer-telegram
 unreachable, unknown alias), surface the error verbatim — do not
 re-interpret it.
 

@@ -1,5 +1,5 @@
 ---
-description: Register a remote server with SSHGate and auto-install the velgate binary on it
+description: Register a remote server with SSHGate and auto-install the gate binary on it
 argument-hint: <alias> <user@host>[:port]
 allowed-tools: Bash, Read
 ---

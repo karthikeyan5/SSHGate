@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# deploy.sh — VPS-side install script for velsigner-server (v2 scaffold).
+# deploy.sh — VPS-side install script for sshgate-signer-server (v2 scaffold).
 #
 # Idempotent. Run as a user with sudo on a fresh-ish Linux box:
 #
 #   git clone <sshgate repo>
-#   cd sshgate/src/velsigner-server
+#   cd sshgate/src/signer-server
 #   sudo ./install/deploy.sh
 #
 # What it does (in order):
 #   1. Verifies Go toolchain is present (the daemon is built from source —
 #      no pre-built binary is committed; this mirrors v1's plugin install).
-#   2. Creates a dedicated `velsigner-server` system user (no shell, no
+#   2. Creates a dedicated `sshgate-signer-server` system user (no shell, no
 #      home directory).
-#   3. Creates /var/lib/velsigner-server (owned by the user) for the
+#   3. Creates /var/lib/sshgate-signer-server (owned by the user) for the
 #      SQLite DB.
-#   4. Creates /etc/velsigner-server with a 0700 keys/ subdir for the
+#   4. Creates /etc/sshgate-signer-server with a 0700 keys/ subdir for the
 #      bearer-token file. If api-key.txt doesn't already exist, generates
 #      one with `openssl rand -base64 32`.
 #   5. Builds the binary with `go build` and installs it at
-#      /usr/local/bin/velsigner-server.
+#      /usr/local/bin/sshgate-signer-server.
 #   6. Renders the systemd unit (with placeholder substitution from the
-#      template) at /etc/systemd/system/velsigner-server.service.
+#      template) at /etc/systemd/system/sshgate-signer-server.service.
 #   7. Enables + starts the service.
 #   8. Prints the API key path + a quick smoke test (curl /healthz).
 #
@@ -36,22 +36,22 @@
 set -euo pipefail
 
 # ----- Configurable knobs (override via env) -----
-SERVICE_USER="${VELSIGNER_SERVER_USER:-velsigner-server}"
-INSTALL_DIR="${VELSIGNER_SERVER_INSTALL_DIR:-/usr/local/bin}"
-STATE_DIR="${VELSIGNER_SERVER_STATE_DIR:-/var/lib/velsigner-server}"
-CONFIG_DIR="${VELSIGNER_SERVER_CONFIG_DIR:-/etc/velsigner-server}"
-KEYS_DIR="${VELSIGNER_SERVER_KEYS_DIR:-${CONFIG_DIR}/keys}"
-API_KEY_FILE="${VELSIGNER_SERVER_API_KEY_FILE:-${KEYS_DIR}/api-key.txt}"
-DB_PATH="${VELSIGNER_SERVER_DB:-${STATE_DIR}/state.db}"
-LISTEN_ADDR="${VELSIGNER_SERVER_ADDR:-127.0.0.1:8443}"
-UNIT_PATH="/etc/systemd/system/velsigner-server.service"
+SERVICE_USER="${SIGNER_SERVER_USER:-sshgate-signer-server}"
+INSTALL_DIR="${SIGNER_SERVER_INSTALL_DIR:-/usr/local/bin}"
+STATE_DIR="${SIGNER_SERVER_STATE_DIR:-/var/lib/sshgate-signer-server}"
+CONFIG_DIR="${SIGNER_SERVER_CONFIG_DIR:-/etc/sshgate-signer-server}"
+KEYS_DIR="${SIGNER_SERVER_KEYS_DIR:-${CONFIG_DIR}/keys}"
+API_KEY_FILE="${SIGNER_SERVER_API_KEY_FILE:-${KEYS_DIR}/api-key.txt}"
+DB_PATH="${SIGNER_SERVER_DB:-${STATE_DIR}/state.db}"
+LISTEN_ADDR="${SIGNER_SERVER_ADDR:-127.0.0.1:8443}"
+UNIT_PATH="/etc/systemd/system/sshgate-signer-server.service"
 
 # ----- Helpers -----
 log() { printf '[deploy] %s\n' "$*" >&2; }
 fail() { log "ERROR: $*"; exit 1; }
 need_sudo() { [[ $EUID -eq 0 ]] || fail "run as root (or via sudo)"; }
 
-# Discover the repo root: this script lives at <repo>/src/velsigner-server/install/.
+# Discover the repo root: this script lives at <repo>/src/signer-server/install/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${PKG_DIR}/../.." && pwd)"
@@ -90,25 +90,25 @@ else
 fi
 
 # ----- 4. build the binary -----
-log "building velsigner-server from ${REPO_ROOT}"
+log "building sshgate-signer-server from ${REPO_ROOT}"
 (
   cd "${REPO_ROOT}"
   CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
-    -o "${INSTALL_DIR}/velsigner-server" \
-    ./src/velsigner-server/cmd/velsigner-server
+    -o "${INSTALL_DIR}/sshgate-signer-server" \
+    ./src/signer-server/cmd/sshgate-signer-server
 )
-chmod 0755 "${INSTALL_DIR}/velsigner-server"
-log "installed binary at ${INSTALL_DIR}/velsigner-server"
+chmod 0755 "${INSTALL_DIR}/sshgate-signer-server"
+log "installed binary at ${INSTALL_DIR}/sshgate-signer-server"
 
 # ----- 5. systemd unit -----
 log "rendering systemd unit at ${UNIT_PATH}"
-TEMPLATE="${SCRIPT_DIR}/velsigner-server.service"
+TEMPLATE="${SCRIPT_DIR}/sshgate-signer-server.service"
 [[ -f "${TEMPLATE}" ]] || fail "systemd unit template missing at ${TEMPLATE}"
 
 # Simple sed substitution; the template uses __FOO__ placeholders that
 # don't appear in any legitimate systemd directive.
 sed \
-  -e "s#__BIN__#${INSTALL_DIR}/velsigner-server#g" \
+  -e "s#__BIN__#${INSTALL_DIR}/sshgate-signer-server#g" \
   -e "s#__USER__#${SERVICE_USER}#g" \
   -e "s#__API_KEY_FILE__#${API_KEY_FILE}#g" \
   -e "s#__DB_PATH__#${DB_PATH}#g" \
@@ -118,8 +118,8 @@ sed \
   "${TEMPLATE}" > "${UNIT_PATH}"
 
 systemctl daemon-reload
-systemctl enable velsigner-server.service >/dev/null
-systemctl restart velsigner-server.service
+systemctl enable sshgate-signer-server.service >/dev/null
+systemctl restart sshgate-signer-server.service
 log "service enabled + (re)started"
 
 # ----- 6. smoke test -----
@@ -129,7 +129,7 @@ if command -v curl >/dev/null 2>&1; then
   if curl -fsS "http://${LISTEN_ADDR}/healthz"; then
     log "smoke test passed"
   else
-    log "smoke test FAILED — check 'journalctl -u velsigner-server -n 50'"
+    log "smoke test FAILED — check 'journalctl -u sshgate-signer-server -n 50'"
     exit 1
   fi
 fi

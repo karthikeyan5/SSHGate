@@ -1,6 +1,6 @@
-# systemd unit for velsigner-server (v2 scaffold).
+# systemd unit for sshgate-signer-server (v2 scaffold).
 #
-# Installed by install/deploy.sh at /etc/systemd/system/velsigner-server.service.
+# Installed by install/deploy.sh at /etc/systemd/system/sshgate-signer-server.service.
 # The deploy script substitutes ${BIN}, ${USER}, ${API_KEY_FILE}, ${DB_PATH},
 # and ${LISTEN_ADDR} before writing this file — see deploy.sh for the
 # values it expects.
@@ -8,7 +8,7 @@
 # Design notes:
 #   - Runs under a dedicated, unprivileged user (User=). Never root.
 #   - Hardening directives (NoNewPrivileges, ProtectSystem, etc.) match the
-#     spirit of the v1 velsigner unit; tighten further once v2.1 lands and
+#     spirit of the v1 sshgate-signer-telegram unit; tighten further once v2.1 lands and
 #     the full filesystem layout settles.
 #   - Restart=on-failure with a 5s back-off gives operators a moment to
 #     spot a crash loop without thrash-restarting on a real bug.
@@ -16,7 +16,7 @@
 #     the server learns to ping sd_notify.
 
 [Unit]
-Description=velsigner-server (SSHGate v2 hosted approval service)
+Description=sshgate-signer-server (SSHGate v2 hosted approval service)
 Documentation=file://__INSTALL_DIR__/README.md
 After=network-online.target
 Wants=network-online.target

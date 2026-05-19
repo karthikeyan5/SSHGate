@@ -1,30 +1,30 @@
 ---
-description: Show SSHGate health — velsigner socket + per-server reachability
+description: Show SSHGate health — signer socket + per-server reachability
 argument-hint:
 allowed-tools: mcp__sshgate__status
 ---
 
 The user invoked `/sshgate:status`. Print a readable health report for
-the local velsigner socket and every registered server.
+the local signer socket and every registered server.
 
 Call the MCP tool `mcp__sshgate__status` with an empty input object.
 The tool returns:
 
-- `velsigner_socket`: `{ path, reachable, error }`
+- `signer_socket`: `{ path, reachable, error }`
 - `servers`: array of `{ alias, reachable, ping_ms, error }`
 
-Format the result as two short sections. Velsigner first — it's the
+Format the result as two short sections. Signer first — it's the
 load-bearing component, and if its socket is unreachable every
 write-bound `sshgate.run` will fail.
 
 ```
-Velsigner
-  socket:    /run/velsigner/sock
+Signer
+  socket:    /run/sshgatesigner/sock
   reachable: yes
 ```
 
 If unreachable, surface the error verbatim and suggest
-`systemctl status velsigner` and `journalctl -u velsigner -n 30 --no-pager`
+`systemctl status sshgate-signer-telegram` and `journalctl -u sshgate-signer-telegram -n 30 --no-pager`
 as next steps. Do not run them yourself unless the user asks.
 
 Then a per-server table (use plain text, not markdown tables — they
