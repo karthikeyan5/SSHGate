@@ -10,6 +10,18 @@ follow the manual path.
 
 ---
 
+## Launch flag — NOT REQUIRED
+
+Launch Claude Code normally with `claude`. SSHGate is a regular MCP
+plugin and does **not** need `--dangerously-load-development-channels`.
+That flag is for plugins (like c3) that push channel notifications INTO
+the Claude conversation. SSHGate only uses standard MCP tool calls; its
+approvals flow OUT to your phone via Telegram, not into the conversation.
+If you've installed c3 and habit-launched with the dev-channels flag,
+that's fine — it's a no-op for SSHGate — but it's not required.
+
+---
+
 ## Tiers
 
 SSHGate ships three install tiers. Pick the one matching how much

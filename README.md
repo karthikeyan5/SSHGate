@@ -62,12 +62,24 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 ## Install
 
-Marketplace publishing is on the v1.x roadmap. For now, clone the repo and invoke the setup command from a Claude Code session opened inside the clone:
+SSHGate is a Claude Code plugin. Anthropic-marketplace publication is on the v1.x roadmap; until then, install from a local clone.
+
+> **Launch Claude Code normally with `claude`.** SSHGate does NOT require `--dangerously-load-development-channels`. That flag is for plugins (like c3) that push notifications INTO Claude's context. SSHGate only uses standard MCP tool calls; its approvals flow OUT to your phone via Telegram, not into the conversation.
+
+**The 30-second install.** In any Claude Code session, paste:
 
 ```
-git clone <repo-url> SSHGate
-cd SSHGate
-# then, inside Claude Code:
+follow https://github.com/karthikeyan5/SSHGate/blob/main/INSTALL.md to install sshgate
+```
+
+The agent clones the repo, registers it as a local marketplace, installs the plugin, and walks you through `/sshgate:setup`. You'll be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only). The whole flow is ~2 minutes for Tier 1, ~10 minutes for Tier 2.
+
+**Manual install.** Clone the repo, then in Claude Code:
+
+```
+/plugin marketplace add ~/src/SSHGate
+/plugin install sshgate@sshgate
+/reload-plugins
 /sshgate:setup
 ```
 

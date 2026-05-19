@@ -70,6 +70,37 @@ service unit.
 
 ---
 
+## Step -1 — Plugin-load preflight
+
+Before probing on-disk state, verify the plugin is loaded from a local
+clone (not a remote-marketplace cache that ships only the plugin subtree
+without the build inputs). `${CLAUDE_PLUGIN_ROOT}` should resolve to a
+directory containing `go.mod` and `scripts/install.sh`.
+
+```bash
+test -f "${CLAUDE_PLUGIN_ROOT}/go.mod" && echo "src:ok" || echo "src:missing"
+```
+
+```bash
+test -x "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh" && echo "scripts:ok" || echo "scripts:missing"
+```
+
+If either is missing, tell the user verbatim:
+
+> "SSHGate's plugin cache is missing the build inputs (`go.mod` or
+> `scripts/install.sh`). This usually means the marketplace was added
+> from a remote GitHub source rather than a local clone, which ships
+> only the plugin subtree. Fix it:
+>
+> 1. Clone the repo: `git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate`
+> 2. Re-add the marketplace from the clone: `/plugin marketplace add ~/src/SSHGate`
+> 3. Reinstall: `/plugin uninstall sshgate@sshgate && /plugin install sshgate@sshgate && /reload-plugins`
+> 4. Re-run `/sshgate:setup`."
+
+Stop on either failure. Do not silently proceed.
+
+---
+
 ## Step 0 — Probe on-disk state
 
 Run these to detect the current tier. Capture each one's result; you
