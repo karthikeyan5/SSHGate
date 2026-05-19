@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/redact"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 // captureStdout runs fn while temporarily redirecting os.Stdout to a
@@ -126,6 +128,62 @@ func TestExec(t *testing.T) {
 		exit, err := gate.Exec(context.Background(), "")
 		if err == nil {
 			t.Errorf("err = nil, want error for empty cmd; exit=%d", exit)
+		}
+	})
+}
+
+func TestExecWithRedaction(t *testing.T) {
+	var salt [32]byte
+	for i := range salt {
+		salt[i] = byte(i + 1)
+	}
+	rules := redactrules.Combined()
+
+	t.Run("AWS access key is redacted on stdout", func(t *testing.T) {
+		out := captureStdout(t, func() {
+			_, err := gate.ExecWithRedaction(context.Background(), "echo AKIA1234567890ABCDEF", gate.ExecOpts{
+				SessionSalt: salt,
+				Rules:       rules,
+			})
+			if err != nil {
+				t.Errorf("err = %v", err)
+			}
+		})
+		if strings.Contains(out, "AKIA1234567890ABCDEF") {
+			t.Errorf("AWS key leaked through executor: %q", out)
+		}
+		if !strings.Contains(out, redact.MarkerPrefix) {
+			t.Errorf("no marker emitted; out=%q", out)
+		}
+	})
+
+	t.Run("benign output passes through unchanged", func(t *testing.T) {
+		out := captureStdout(t, func() {
+			_, err := gate.ExecWithRedaction(context.Background(), "echo hello world", gate.ExecOpts{
+				SessionSalt: salt,
+				Rules:       rules,
+			})
+			if err != nil {
+				t.Errorf("err = %v", err)
+			}
+		})
+		if out != "hello world\n" {
+			t.Errorf("stdout = %q, want %q", out, "hello world\n")
+		}
+	})
+
+	t.Run("empty ruleset is equivalent to plain Exec", func(t *testing.T) {
+		out := captureStdout(t, func() {
+			_, err := gate.ExecWithRedaction(context.Background(), "echo AKIA1234567890ABCDEF", gate.ExecOpts{
+				SessionSalt: salt,
+				// Rules empty: pass-through path.
+			})
+			if err != nil {
+				t.Errorf("err = %v", err)
+			}
+		})
+		if !strings.Contains(out, "AKIA1234567890ABCDEF") {
+			t.Errorf("empty-ruleset path should pass through; got %q", out)
 		}
 	})
 }

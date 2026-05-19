@@ -28,6 +28,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"os/signal"
@@ -37,9 +38,25 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/classify"
-	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/redact"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
+
+// sessionSalt is the per-process 32 random bytes the redactor uses to
+// derive HMAC marker keys. Populated by run() at startup, never
+// persisted, never transmitted. Per-process equals per-session because
+// OpenSSH spawns a fresh gate for every SSH_ORIGINAL_COMMAND
+// invocation. Stored at package scope so execChild can read it without
+// threading it through every call site.
+var sessionSalt [32]byte
+
+// redactRules is the compiled-in v1.2 ruleset (sshgate-native +
+// gitleaks-vendored). Loaded by run() at startup. Daemon guideline 1.6
+// keeps this out of init() so test imports of the package don't pay
+// the cost.
+var redactRules []redact.Rule
 
 // Exit codes (BSD sysexits subset).
 const (
@@ -56,6 +73,17 @@ func main() {
 
 // run is the testable entry point; main exits on its return value.
 func run() int {
+	// Per-process redactor state: fresh 32-byte salt + compiled-in
+	// ruleset. Failures here are fatal — we cannot serve traffic
+	// without a fresh salt for HMAC marker keys.
+	if _, err := rand.Read(sessionSalt[:]); err != nil {
+		logf("crypto/rand: %v", err)
+		return exitSoftware
+	}
+	if redactRules == nil {
+		redactRules = redactrules.Combined()
+	}
+
 	raw := os.Getenv("SSH_ORIGINAL_COMMAND")
 	if raw == "" {
 		// Post-install probe. Stdout only (the installer reads this).
@@ -143,11 +171,16 @@ func run() int {
 
 // execChild runs cmd under a signal-aware context. SIGTERM/SIGINT
 // received by gate are propagated to the child process group via
-// the context cancellation wired through Exec.
+// the context cancellation wired through Exec. The child's
+// stdout/stderr are wrapped in redact.Writer instances so every byte
+// the child emits passes Layer-1 redaction (v1.2 R1).
 func execChild(cmd string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	exit, err := gate.Exec(ctx, cmd)
+	exit, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
+		SessionSalt: sessionSalt,
+		Rules:       redactRules,
+	})
 	if err != nil {
 		logf("%v", err)
 		if exit < 0 {
