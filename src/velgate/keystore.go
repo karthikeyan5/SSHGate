@@ -20,8 +20,19 @@ import (
 // bits do not need to be restricted; what matters is that nothing
 // other than the owner can write to it, because the trust anchor for
 // the entire signature chain is "this file's contents."
+//
+// Missing file is NOT an error: LoadPubKey returns (nil, nil) when
+// path does not exist. This represents the tier-1 read-only install
+// mode — velgate is deployed but no signer is set up, so signatures
+// cannot be verified. Callers distinguish this from the "key exists
+// but is broken" case (which still returns a non-nil error) and
+// implement their own policy (typically: allow reads, deny writes).
 func LoadPubKey(path string) (ed25519.PublicKey, error) {
 	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// Read-only mode: no key configured.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("stat pubkey: %w", err)
 	}

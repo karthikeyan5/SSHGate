@@ -77,6 +77,28 @@ func run() int {
 
 	// Decide whether the inbound line is signed.
 	signed := sigwire.IsSigned(raw)
+
+	// Tier-1 read-only mode: pubkey is nil when velgate.pub is absent.
+	// Reads still execute (no signature check required); writes and
+	// signed commands are denied — there is no anchor to verify them
+	// against, and silently exec'ing them would be a privilege
+	// escalation against the operator's expectation that "no signer
+	// means no writes."
+	if pubkey == nil {
+		if signed {
+			logf("no signing key configured; signed commands cannot be verified")
+			return exitNoPermVal
+		}
+		kind := classify.Classify(raw)
+		if kind == classify.KindRead {
+			return execChild(raw)
+		}
+		// KindWrite or KindUnknown (empty/whitespace already handled
+		// upstream — anything else unknown falls through as write).
+		logf("no signing key configured (read-only install — re-run /sshgate:setup to add a signer)")
+		return exitNoPermVal
+	}
+
 	innerCmd := raw
 	if signed {
 		ic, err := velgate.VerifySigned(raw, pubkey, time.Now())

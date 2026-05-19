@@ -4,8 +4,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,13 +100,13 @@ func TestLoadPubKey(t *testing.T) {
 		}
 	})
 
-	t.Run("missing file errors", func(t *testing.T) {
-		_, err := velgate.LoadPubKey(filepath.Join(dir, "missing.pub"))
-		if err == nil {
-			t.Fatal("LoadPubKey on missing file: want error")
+	t.Run("missing file returns (nil, nil) for read-only mode", func(t *testing.T) {
+		got, err := velgate.LoadPubKey(filepath.Join(dir, "missing.pub"))
+		if err != nil {
+			t.Fatalf("LoadPubKey on missing file: err = %v, want nil", err)
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("err = %v, want wrapping fs.ErrNotExist", err)
+		if got != nil {
+			t.Fatalf("LoadPubKey on missing file: got = %v, want nil", got)
 		}
 	})
 
