@@ -10,14 +10,68 @@
 > a Telegram bot token (Tier 2 only). Tier 1 is read-only and needs no sudo.
 
 > **For Claude Code (or any) agent reading this:** you are installing SSHGate
-> for the user. Execute the numbered steps in order. Surface errors verbatim
-> and stop on first failure. Don't paraphrase commands — run them exactly.
-> Every step is idempotent (safe to re-run).
+> for the user. Before any commands, **surface the Preamble section below
+> verbatim to the user and wait for explicit go-ahead** (default-yes on
+> empty / "y" / "yes" / "sure" / "ok"; only "n" / "no" stops). Then execute
+> the numbered steps in order. Surface errors verbatim and stop on first
+> failure. Don't paraphrase commands — run them exactly. Every step is
+> idempotent (safe to re-run).
 
 > **Launch flag — NOT required.** Unlike c3, SSHGate does NOT need
 > `--dangerously-load-development-channels`. SSHGate is a regular MCP plugin
 > that exposes tool calls; approvals flow OUT to the user's phone via
 > Telegram, never INTO the Claude conversation. Plain `claude` works.
+
+---
+
+## Preamble — what SSHGate is and what you're about to install
+
+> **Agent: this section is for the human. Surface it as written. After the
+> "Proceed with install?" line, wait for their answer.**
+
+### What SSHGate is
+
+SSHGate is a Claude Code plugin that lets the agent SSH into your Linux
+servers to read diagnostics or apply fixes. Read commands (`df -h`,
+`journalctl`, `top`, etc.) execute freely and stream the output back to the
+conversation. Write commands (restart, install, edit, anything that mutates
+state) trigger ONE phone-tap approval via a dedicated Telegram bot before
+they run.
+
+The signing key that authorizes writes is isolated under a separate Unix
+user, so the agent cannot forge approvals even if it tried. The
+cryptographic gate is enforced on each remote server independently.
+
+### What we're about to set up
+
+1. A dedicated SSH key pair — separate from your daily-driver `~/.ssh/id_*`,
+   used only by SSHGate to reach remote servers through the gate.
+2. *(Tier 2 only)* A `sshgatesigner` Unix user that holds the master Ed25519
+   signing key. Isolated from your Claude session — Claude cannot read it.
+3. *(Tier 2 only)* A Telegram bot — your phone-side approval endpoint. Made
+   via @BotFather. If you don't have one yet, you'll be walked through it.
+4. `~/.config/sshgate/` and *(Tier 2 only)* `/var/lib/sshgatesigner/` — local
+   config + key + audit-log paths, mode 0700 / 0640.
+5. SSHGate binaries — built from source via `make build` on your machine.
+   No remote dependencies fetched at runtime.
+
+### What you'll need handy
+
+- **Tier 1 (read-only):** nothing beyond Go ≥1.22 and one Linux server you
+  can SSH into right now. No sudo, no Telegram. ~2 minutes.
+- **Tier 2 (full v1):** sudo access on this machine, a Telegram account, and
+  ~10 minutes. The bot token and your Telegram user-id can be generated
+  mid-flow if you don't have them yet — you'll be pointed at @BotFather and
+  @userinfobot.
+
+### Choose the tier when prompted
+
+Pick **Tier 1** first if you want to try SSHGate without committing to the
+phone-tap flow. **Tier 2** is the upgrade path — re-run `/sshgate:setup`
+any time to add the signer. **Tier 3** (hosted server signer) is scaffolded
+but not yet deployable; the menu will tell you so.
+
+**Proceed with install?** *(default: yes — just hit enter)*
 
 ---
 
