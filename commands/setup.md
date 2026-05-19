@@ -4,10 +4,10 @@ argument-hint:
 allowed-tools: Read, Bash, Write, Edit, AskUserQuestion
 ---
 
-You are walking the user (Karthi) through SSHGate installation. The
-command is tiered and idempotent — every run starts by probing on-disk
-state, then either offers tier selection (fresh install) or a re-run
-menu (upgrade an existing install).
+You are walking the user through SSHGate installation. The command
+is tiered and idempotent — every run starts by probing on-disk state,
+then either offers tier selection (fresh install) or a re-run menu
+(upgrade an existing install).
 
 Be terse. Surface every command verbatim. Stop on the first failure
 and print the literal error. PAUSE markers mean "wait for user input
