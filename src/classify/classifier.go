@@ -216,9 +216,16 @@ func classifySegment(seg string) Kind {
 	if len(tokens) == 0 {
 		return KindUnknown
 	}
-	// Strip leading FOO=bar VAR=baz assignments (don't change classification).
+	// Strip leading FOO=bar VAR=baz assignments. Any of these env vars is a
+	// known shell-execution vector (e.g. GIT_EXTERNAL_DIFF, LD_PRELOAD,
+	// IFS, PATH); safer to classify the wrapping command as WRITE rather
+	// than ignore the prefix and trust the wrapped binary not to honor it.
 	i := 0
 	for i < len(tokens) && isAssignment(tokens[i]) {
+		key := tokens[i][:strings.IndexByte(tokens[i], '=')]
+		if dangerousEnvVars[key] {
+			return KindWrite
+		}
 		i++
 	}
 	if i >= len(tokens) {
@@ -296,6 +303,42 @@ func isAssignment(tok string) bool {
 	return true
 }
 
+// dangerousEnvVars is the denylist of environment variable keys that
+// known-allowlisted binaries will honor as shell-execution / loader /
+// file-side-effect vectors. If any of these appears as a leading
+// `KEY=VAL` prefix on a command, the whole command is classified WRITE
+// regardless of head — the wrapped binary cannot be trusted to ignore
+// the smuggled env. Cited in
+// docs/audits/security-research-readonly-bypass-2026-05-19.md (BLOCKER-3).
+var dangerousEnvVars = map[string]bool{
+	"GIT_EXTERNAL_DIFF":   true,
+	"GIT_SSH_COMMAND":     true,
+	"GIT_SSH":             true,
+	"GIT_PAGER":           true,
+	"GIT_EDITOR":          true,
+	"GIT_EXEC_PATH":       true,
+	"GIT_TERMINAL_PROMPT": true,
+	"LESSOPEN":            true,
+	"LESSCLOSE":           true,
+	"LESSEDIT":            true,
+	"LD_PRELOAD":          true,
+	"LD_LIBRARY_PATH":     true,
+	"LD_AUDIT":            true,
+	"IFS":                 true,
+	"PATH":                true,
+	"SHELL":               true,
+	"BASH_ENV":            true,
+	"ENV":                 true,
+	"PYTHONSTARTUP":       true,
+	"PYTHONPATH":          true,
+	"PERL5OPT":            true,
+	"PERL5LIB":            true,
+	"RUBYOPT":             true,
+	"RUBYLIB":             true,
+	"MANPAGER":            true,
+	"PAGER":               true, // many tools spawn this; safer to deny
+}
+
 // argRule narrows a head command from "read by default" to KindWrite when
 // specific argument patterns appear (e.g. `sed -i`, `find -delete`).
 // A nil rule means "always read."
@@ -326,7 +369,7 @@ var readAllowlist = map[string]argRule{
 	"grep":  nil,
 	"egrep": nil,
 	"fgrep": nil,
-	"awk":   nil,
+	"awk":   awkRule,
 	"sed":   sedRule,
 	"sort":  nil,
 	"uniq":  nil,
@@ -390,33 +433,194 @@ var readAllowlist = map[string]argRule{
 	// (Spec lists them under write; corpus has no read-side example for them.)
 }
 
-// findRule: `find` is read unless it has -delete or -exec.
+// findRule: `find` is read unless it has -delete, an -exec* primitive, or
+// a file-writing action (`-fprint`, `-fprintf`, `-fprint0`, `-fls`) or an
+// interactive exec (`-ok`, `-okdir`). Conservative: ANY `-fprint*` arg
+// is a write. Cited as BLOCKER-2 in
+// docs/audits/security-research-readonly-bypass-2026-05-19.md.
 func findRule(args []string) Kind {
 	for _, a := range args {
-		if a == "-delete" || a == "-exec" || a == "-execdir" || a == "-ok" || a == "-okdir" {
+		switch a {
+		case "-delete", "-exec", "-execdir", "-ok", "-okdir",
+			"-fprint", "-fprintf", "-fprint0", "-fls":
+			return KindWrite
+		}
+		// Defensive: any future `-fprint*` variant (or abbreviation) is
+		// also a write — find writes files for the whole `-fprint*` family.
+		if strings.HasPrefix(a, "-fprint") {
 			return KindWrite
 		}
 	}
 	return KindRead
 }
 
-// sedRule: `sed` is read unless invoked with -i (in-place edit).
+// sedRule: `sed` is read iff `-i`/`--in-place` is absent AND no sed
+// script arg contains one of these execute/write primitives:
+//   - `/e`  — `e` flag on s/// substitution OR a standalone `e` command
+//     (executes the pattern space as a shell command)
+//   - `e}`  — `e` flag at end of a `{...}` block
+//   - `/w ` — `w FILE` writes the pattern space to FILE (after s///)
+//   - `<addr>w ` / `<addr>r ` / `<addr>R ` — read/write file commands
+//
+// Only the SCRIPT arg is scanned (the arg after `-e`/`--expression`, or
+// the first non-flag arg when neither is present). Filename args are
+// NOT scanned — that avoids false positives like `/etc/hosts` matching
+// `/e`. False positives in scripts (e.g. a regex literally containing
+// `/e`) fall safely to WRITE. Cited as BLOCKER-1 in
+// docs/audits/security-research-readonly-bypass-2026-05-19.md.
 func sedRule(args []string) Kind {
+	scripts := sedScripts(args)
 	for _, a := range args {
 		// -i, --in-place, and combined flags like -ie or -i.bak all mutate.
 		if a == "-i" || a == "--in-place" || strings.HasPrefix(a, "--in-place=") {
 			return KindWrite
-		}
-		if strings.HasPrefix(a, "-i") && len(a) > 1 && a[1] == 'i' {
-			// already matched above
-			continue
 		}
 		// -i.bak, -iE etc. (combined short flag form).
 		if len(a) >= 2 && a[0] == '-' && a[1] == 'i' && !strings.HasPrefix(a, "--") {
 			return KindWrite
 		}
 	}
+	for _, s := range scripts {
+		if sedScriptIsDangerous(s) {
+			return KindWrite
+		}
+	}
 	return KindRead
+}
+
+// sedScripts extracts the sed script args from a sed command line. The
+// rule per GNU sed(1):
+//   - every `-e SCRIPT` / `--expression SCRIPT` / `--expression=SCRIPT`
+//     contributes a script
+//   - every `-f FILE` / `--file FILE` is a script file (its CONTENT is
+//     opaque to us; the FILE arg itself is not a script)
+//   - if neither `-e` nor `-f` is present, the first non-flag arg is the
+//     script and any remaining non-flag args are input files
+//
+// Conservative behavior: if `-f` is present we know we cannot see the
+// script, so we treat that whole invocation as if the script were
+// dangerous (caller falls through to WRITE).
+func sedScripts(args []string) []string {
+	var scripts []string
+	sawEOrF := false
+	hasF := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-e" || a == "--expression":
+			sawEOrF = true
+			if i+1 < len(args) {
+				scripts = append(scripts, args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "--expression="):
+			sawEOrF = true
+			scripts = append(scripts, strings.TrimPrefix(a, "--expression="))
+		case a == "-f" || a == "--file":
+			sawEOrF = true
+			hasF = true
+			if i+1 < len(args) {
+				i++ // skip the file arg; we can't see its content
+			}
+		case strings.HasPrefix(a, "--file="):
+			sawEOrF = true
+			hasF = true
+		}
+	}
+	if !sawEOrF {
+		// First non-flag arg is the script.
+		for _, a := range args {
+			if len(a) > 0 && a[0] != '-' {
+				scripts = append(scripts, a)
+				break
+			}
+		}
+	}
+	if hasF {
+		// Script file content is opaque; fall safely to WRITE by injecting
+		// a sentinel known-dangerous script. Saves a separate boolean.
+		scripts = append(scripts, "/e")
+	}
+	return scripts
+}
+
+// sedScriptIsDangerous reports whether script contains a sed exec/write
+// primitive. Substring scan only — no parsing — so it errs on the side
+// of classifying ambiguous scripts as write.
+func sedScriptIsDangerous(script string) bool {
+	// `s///e` substitution flag: a `/` followed by `e` then a non-letter
+	// terminator. The naive `Contains("/e")` would false-positive on
+	// regex anchors like `\s/e`-shaped patterns, but for typical sed
+	// scripts this substring is a reliable marker.
+	if strings.Contains(script, "/e") || strings.Contains(script, "e}") {
+		return true
+	}
+	// `w FILE` / `r FILE` / `R FILE` commands. The file-side `w` after
+	// s/// is `/w FILE` (caught here by the `/w ` form), but `w` can
+	// also appear as a standalone command with an address: `1w /tmp/x`
+	// or `/regex/w /tmp/x`. We scan for the command letter followed by
+	// a space, with the preceding char being address-shaped: digit,
+	// `;`, `}`, `{`, `/`, or start-of-string.
+	if strings.Contains(script, "/w ") || strings.Contains(script, "/r ") || strings.Contains(script, "/R ") {
+		return true
+	}
+	for i := 0; i < len(script); i++ {
+		c := script[i]
+		if (c == 'r' || c == 'R' || c == 'w') && i+1 < len(script) && script[i+1] == ' ' {
+			if i == 0 {
+				return true
+			}
+			p := script[i-1]
+			if p >= '0' && p <= '9' {
+				return true
+			}
+			if p == ';' || p == '}' || p == '{' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// awkRule: `awk` is read iff the program (any non-flag arg) does NOT
+// contain a shell-execution or file-write primitive. Substring-scan only
+// — false positives fall safely to WRITE. Cited as BLOCKER-4 in
+// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+//
+// Dangerous substrings:
+//   - "system"   — system("cmd") forks a shell
+//   - "getline " — pipe-or-file getline can exec or read arbitrary files
+//   - `| "` / `|"` — pipe to a shell command
+//   - `> "` / `>"` / `>>` — redirect to a file
+func awkRule(args []string) Kind {
+	for _, a := range args {
+		if len(a) == 0 || a[0] == '-' {
+			continue
+		}
+		if awkProgIsDangerous(a) {
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+func awkProgIsDangerous(prog string) bool {
+	if strings.Contains(prog, "system") {
+		return true
+	}
+	if strings.Contains(prog, "getline ") {
+		return true
+	}
+	if strings.Contains(prog, `| "`) || strings.Contains(prog, `|"`) {
+		return true
+	}
+	if strings.Contains(prog, `> "`) || strings.Contains(prog, `>"`) {
+		return true
+	}
+	if strings.Contains(prog, ">>") {
+		return true
+	}
+	return false
 }
 
 // curlRule: `curl` is read unless it specifies a write HTTP method,

@@ -195,3 +195,39 @@ READ	wget --output-document=- https://example.com/cfg
 WRITE	curl -o /tmp/x https://example.com
 WRITE	curl --output /tmp/x https://example.com
 READ	curl https://example.com/api/status
+
+# --- 2026-05-19 read-only-gate bypass BLOCKERs (security research audit) ---
+# B1: sed `e` flag / `w`/`r`/`R` commands execute shell or write files.
+WRITE	sed 's/.*/id/e'
+WRITE	sed -e 's/X/Y/e' /etc/hosts
+WRITE	sed 's/X/Y/w /tmp/log' file
+WRITE	sed '1r /etc/passwd' file
+# B1 — simple-reader sed forms still pass.
+READ	sed 's/foo/bar/' /etc/hosts
+
+# B2: find `-fprint*`, `-fls`, `-ok*` write files or exec commands.
+WRITE	find /tmp -fprintf /etc/passwd 'evil\n'
+WRITE	find /tmp -fprint /tmp/list
+WRITE	find /tmp -fls /tmp/list
+WRITE	find /tmp -fprint0 /tmp/list
+WRITE	find /tmp -ok rm {} \;
+# B2 — simple find readers still pass.
+READ	find /tmp -name '*.log'
+READ	find /tmp -name '*.log' -print
+
+# B3: env-var smuggling — dangerous KEY=VAL prefixes force WRITE.
+WRITE	GIT_EXTERNAL_DIFF='sh -c "id"' git log -p
+WRITE	GIT_SSH_COMMAND='ssh -o ProxyCommand=...' git ls-remote origin
+WRITE	LD_PRELOAD=/tmp/evil.so cat /etc/hosts
+WRITE	IFS=$'\n' ls /etc
+WRITE	PATH=/tmp ls
+WRITE	PYTHONSTARTUP=/tmp/evil.py python -c "print(1)"
+
+# B4: awk `system()`, `getline`, pipe-to-cmd, redirect-to-file → WRITE.
+WRITE	awk 'BEGIN{system("rm /tmp/x")}'
+WRITE	awk 'BEGIN{getline x; print x}' /etc/hosts
+WRITE	awk '{print | "rm /tmp/x"}' file
+WRITE	awk '{print > "/tmp/log"}' file
+# B4 — simple awk readers still pass.
+READ	awk '{print $1}' /etc/passwd
+READ	awk '/^root/ {print $1}' /etc/passwd
