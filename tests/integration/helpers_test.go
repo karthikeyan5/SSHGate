@@ -295,7 +295,7 @@ func buildGateLinux(t *testing.T) string {
 		"-trimpath",
 		"-ldflags", "-s -w",
 		"-o", out,
-		"./src/gate/cmd/gate",
+		"./src/gate/cmd/sshgate-gate",
 	)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
@@ -345,7 +345,7 @@ func deployGateBinary(t *testing.T, pubKeyPath string) {
 
 	// Make ~/.sshgate-gate; install the binary and the pubkey.
 	if out, err := dockerExec(t, nil, fmt.Sprintf(
-		"mkdir -p %[1]s/.gate && chown %[2]s:%[2]s %[1]s/.gate && chmod 700 %[1]s/.gate",
+		"mkdir -p %[1]s/.sshgate-gate && chown %[2]s:%[2]s %[1]s/.sshgate-gate && chmod 700 %[1]s/.sshgate-gate",
 		containerHome, remoteUser)); err != nil {
 		t.Fatalf("mkdir .gate: %v\n%s", err, out)
 	}

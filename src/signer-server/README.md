@@ -1,6 +1,6 @@
-# velsigner-server (v2 scaffold)
+# sshgate-signer-server (v2 scaffold)
 
-The hosted velsigner: a centralized signing service that SSHGate plugins
+The hosted signer: a centralized signing service that SSHGate plugins
 across any number of laptops can hit over HTTPS. v2.0 is a SCAFFOLD that
 establishes the architecture, the wire protocol surface, and a SQLite
 state store. The human-approval surface (WebAuthn + TOTP + web UI) is
@@ -8,7 +8,7 @@ v2.1 work.
 
 ## Why
 
-v1's local velsigner + Telegram backend works well for one operator on
+v1's local signer + Telegram backend works well for one operator on
 one laptop. v2 is the answer to "what happens when":
 
 - A second laptop needs to request signatures against the same trust
@@ -21,15 +21,15 @@ one laptop. v2 is the answer to "what happens when":
 - An LLM explainer renders better in a web page than in a Telegram chat.
 
 Full motivation is in `docs/specs/2026-05-19-sshgate-design.md`
-§"v2 vision: Centralized velsigner server."
+§"v2 vision: Centralized signer server."
 
 ## Architecture
 
 ```
    ┌──────────────────────────┐         ┌──────────────────────────┐
-   │ SSHGate plugin (laptop)  │  HTTPS  │ velsigner-server (VPS)   │
+   │ SSHGate plugin (laptop)  │  HTTPS  │ sshgate-signer-server (VPS)   │
    │                          │ ──────► │                          │
-   │ velsigner daemon         │ POST    │ POST /v1/sign      ──┐   │
+   │ signer daemon         │ POST    │ POST /v1/sign      ──┐   │
    │   backend = "hosted"     │ /v1/    │ GET  /v1/poll/{id} ──┤   │
    │   ↳ HostedServerBackend  │   sign  │ GET  /v1/audit       │   │
    │     │ long-polls /v1/    │ ◄────── │ GET  /healthz        │   │
@@ -50,19 +50,19 @@ On a fresh VPS (Linux, systemd, Go toolchain installed):
 
 ```bash
 git clone https://github.com/karthikeyan5/sshgate.git
-cd sshgate/src/velsigner-server
+cd sshgate/src/signer-server
 sudo ./install/deploy.sh
 ```
 
 The deploy script:
-- creates a `velsigner-server` system user (no login shell)
+- creates a `sshgate-signer-server` system user (no login shell)
 - builds the binary with `go build`
-- generates a bearer API key at `/etc/velsigner-server/keys/api-key.txt`
+- generates a bearer API key at `/etc/sshgate-signer-server/keys/api-key.txt`
 - installs a systemd unit and starts the service
 - exposes the daemon on `127.0.0.1:8443` (TLS is the reverse proxy's job)
 
 The script prints the API key path on completion; copy it to each laptop
-that will speak to this server and reference it from the velsigner
+that will speak to this server and reference it from the signer
 config:
 
 ```toml
@@ -70,14 +70,14 @@ config:
 type = "hosted"
 
 [backend.hosted]
-base_url      = "https://velsigner-server.example.com"
-api_key_file  = "/var/lib/velsigner/tokens/hosted-api.key"
+base_url      = "https://sshgate-signer-server.example.com"
+api_key_file  = "/var/lib/sshgatesigner/tokens/hosted-api.key"
 client_id     = "karthi-laptop"
 poll_wait_sec = 30
 timeout_sec   = 60
 ```
 
-After editing the config, restart `velsigner.service` on the laptop.
+After editing the config, restart `sshgate-signer-telegram.service` on the laptop.
 
 ## What v2.0 does NOT do
 
@@ -108,13 +108,13 @@ This is the SCAFFOLD. The following are deliberately deferred to v2.1+:
 
 ## Packages
 
-- `src/velsigner-server/`            — HTTP server + handlers (Server, routes)
-- `src/velsigner-server/cmd/`        — entry point (`velsigner-server` binary)
-- `src/velsigner-server/store/`      — SQLite-backed Store + interface
-- `src/velsigner-server/install/`    — deploy.sh + systemd unit template
+- `src/signer-server/`            — HTTP server + handlers (Server, routes)
+- `src/signer-server/cmd/`        — entry point (`sshgate-signer-server` binary)
+- `src/signer-server/store/`      — SQLite-backed Store + interface
+- `src/signer-server/install/`    — deploy.sh + systemd unit template
 
 The matching client (`HostedServerBackend`) lives in
-`src/velsigner/backend/hosted.go`; it shares the wire shape exactly so a
+`src/signer/backend/hosted.go`; it shares the wire shape exactly so a
 single config swap (`backend.type = "hosted"` + `[backend.hosted]`
 block) redirects approval traffic.
 

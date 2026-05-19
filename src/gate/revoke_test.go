@@ -23,7 +23,7 @@ func seedAuthorizedKeys(t *testing.T, home, body string) string {
 	return path
 }
 
-// seedGateDir creates home/.gate with a couple of placeholder files.
+// seedGateDir creates home/.sshgate-gate with a couple of placeholder files.
 func seedGateDir(t *testing.T, home string) string {
 	t.Helper()
 	dir := filepath.Join(home, ".sshgate-gate")
@@ -233,7 +233,7 @@ func TestRevoke_RejectsEmptyArgs(t *testing.T) {
 	if _, err := gate.Revoke("/tmp", "", "/tmp/gate"); err == nil {
 		t.Error("empty gateDir: expected error")
 	}
-	if _, err := gate.Revoke("/tmp", "/tmp/.gate", ""); err == nil {
+	if _, err := gate.Revoke("/tmp", "/tmp/.sshgate-gate", ""); err == nil {
 		t.Error("empty gateBinaryPath: expected error")
 	}
 }

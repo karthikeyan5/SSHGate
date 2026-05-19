@@ -147,7 +147,7 @@ func run(args []string) int {
 	}
 	// Note: assertion that we're running as the `signer` user
 	// (production) vs any user (--dev) is omitted from v1.4. The
-	// install script creates the signer user and the systemd unit
+	// install script creates the sshgatesigner user and the systemd unit
 	// runs under `User=signer`; that's the load-bearing layer. If
 	// the operator runs the binary as some other non-root user, the
 	// 0o077 mask check on the key file will catch them.
