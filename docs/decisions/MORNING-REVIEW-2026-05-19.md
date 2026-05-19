@@ -273,3 +273,32 @@ Six small fixes from the audit reports landed as one-commit-each per METHODOLOGY
 5. **(Future) Remaining MINORs** — Mi5 (audit empty cmd list on respondError), Mi7 (revoke over-match — parse authorized_keys properly), Mi8 (Runner.Run ctx-cancel SSH semantics), Mi11 (TelegramBackend Wait method). S9 TOFU first-trust mitigation (operator-side). All are polish, not correctness.
 
 I'm still running per the `/goal` Stop hook — say "stop" when you want me to wind down.
+
+---
+
+## ⏸ Karthi-pending-review items (added post-session-wrap)
+
+### Classifier security research + fixes — needs your quick review
+
+You flagged you still need to review these (no action from me until then). Quick map so we can discuss:
+
+**The research** (~600 lines; skim only): `docs/audits/security-research-readonly-bypass-2026-05-19.md`
+- 12 scenarios surveyed, 5 industry tools (lshell, rssh, git-shell, OpenClaw exec policy, Teleport)
+- Headline insight (one line): "the exec allowlist is a string-matching system pretending to be a semantics-reasoning system; every documented CVE in OpenClaw maps onto a present-hole pattern in SSHGate"
+
+**The fixes (already merged — `go test -race ./...` green):**
+- `884967c` (BLOCKERs, 4 of 4 fixed): sed `e`/`w`/`r`/`R` flags, find `-fprint*`, env-var smuggling (LD_PRELOAD/GIT_EXTERNAL_DIFF/etc), awk `system()`
+- `ad74ef8` (MAJORs, 5 of 5 fixed): `env <cmd>` wrapper recursion, journalctl `--rotate`/`--vacuum-*`, `git -c <config>=...` blanket-block, GNU long-option abbreviation (sed `--in-p*`, journalctl `--rot*`), curl `-K`/`--config`
+- `b03e895` (S11 MINOR, fixed inline): metachar guard widened to include `\n` `\r` `\x00`
+- `14e9a01` (S2 MINOR, fixed inline): systemd `SystemCallFilter=@system-service`
+
+**Still-deferred MINORs from the research (4 items):** TOFU first-trust mitigation (operator-side, no code fix), revoke-line over-match (Mi7), redactlist-cap pre-benchmark, plus a couple of small audit-noise things — listed in the research file itself.
+
+**Discussion points worth your time (the "is anything worth discussing" question):**
+
+1. The fundamental tension the research surfaced: **string-matching allowlists are leaky by design.** We've now hit ~all the obvious leaks documented in adjacent tools (OpenClaw etc.), but the next-level fix is structural — kernel-level enforcement (Landlock — already noted as v1.2.1+ in the redactor work). Worth deciding whether to prioritize that earlier than v1.2.1, given the redactor work also wants it.
+2. **`git -c` conservative blanket-block** (commit `ad74ef8`): I refused ANY `git -c <config>=...` because the dangerous-config-key list is inevitably incomplete. This means `git -c color.ui=never log` (a benign UX tweak) now requires Telegram approval. Acceptable trade?
+3. **awk and sed: scripts with side-effect constructs → write** (commit `884967c`): I scan only the identified script args (not all positional args) — `sed -n '1,10p' /etc/hosts` still works as a read. But `sed -f scriptfile` is now always WRITE because the script content is opaque to us. That breaks any read-only `sed -f` use case. Acceptable, or do we want a way to whitelist specific scriptfiles?
+4. **Long-option abbreviation handling** (commit `ad74ef8`): I implemented prefix-matching for known dangerous long-options (`--in*` → `--in-place`, `--rot*` → `--rotate`). This works for the cases we know about. Future bypass: an option we DIDN'T list still gets through. Worth a structural approach (parse the full GNU getopt grammar) or accept the rat-race?
+
+These are the only discussion-worthy points; everything else is mechanical. Ping when you want to walk through.
