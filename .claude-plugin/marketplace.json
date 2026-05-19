@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sshgate",
+  "owner": {
+    "name": "Karthikeyan",
+    "email": "karthikeyan5@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "sshgate",
+      "description": "SSH into your Linux servers from Claude Code. Reads run freely; writes require a Telegram tap to approve. Three trust domains, one signing key isolated under a dedicated Unix user, no agent ever holds the key.",
+      "category": "ops",
+      "source": "."
+    }
+  ]
+}
