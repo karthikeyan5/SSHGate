@@ -8,8 +8,8 @@
 //	--config <path>   TOML config (default: /etc/velsigner/config.toml or
 //	                  $VELSIGNER_CONFIG)
 //	--init            Generate keypair + skeleton config + state dirs, exit
-//	--dev             Allow running as a non-velsigner user; use
-//	                  $XDG_RUNTIME_DIR for runtime paths in --init
+//	--dev             Only meaningful with --init: anchor generated paths
+//	                  under $XDG_RUNTIME_DIR. No-op at runtime.
 //	--version         Print version and exit
 //
 // On startup the daemon:
@@ -122,7 +122,7 @@ func run(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", defaultConfigPath(), "TOML config file")
 	doInit := fs.Bool("init", false, "Generate keypair + skeleton config + state dirs, then exit")
-	dev := fs.Bool("dev", false, "Dev mode: allow non-velsigner user, use $XDG_RUNTIME_DIR for --init")
+	dev := fs.Bool("dev", false, "Dev mode: only meaningful with --init (anchors generated paths under $XDG_RUNTIME_DIR); ignored at runtime")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -151,7 +151,12 @@ func run(args []string) int {
 	// runs under `User=velsigner`; that's the load-bearing layer. If
 	// the operator runs the binary as some other non-root user, the
 	// 0o077 mask check on the key file will catch them.
-	_ = *dev
+	//
+	// --dev is therefore a no-op on the runtime path; it only affects
+	// --init (path anchoring under $XDG_RUNTIME_DIR). The flag is kept
+	// declared at the top so `velsigner --dev --init` parses cleanly;
+	// the help string for --dev says so explicitly.
+	_ = dev
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
