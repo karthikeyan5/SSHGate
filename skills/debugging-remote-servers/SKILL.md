@@ -102,18 +102,25 @@ it's a read. A few non-obvious cases:
   (they mutate the journal).
 - **`apt update`** — write (mutates the apt cache).
 - **`curl -X POST …`**, any non-GET HTTP method — write.
-- **Any pipe-to-file** (`cmd > /var/log/x`, `cmd | tee /etc/x`) —
-  write, regardless of what's on the left of the pipe.
-- **Any pipeline at all** in v1 — pipes default to write because the
-  classifier doesn't yet walk pipe chains. `grep foo /etc/passwd |
-  wc -l` is treated as a write.
+- **Pipelines are classified per-segment** (since v1.1). A pure-read
+  pipeline like `cat /etc/hosts | grep foo` or `ps aux | grep nginx`
+  is a READ — no Telegram approval. A pipeline with *any* write
+  segment (e.g. `cat /etc/foo | tee /tmp/bar`, or `cmd > /tmp/x |
+  echo done`) is a WRITE.
+- **Redirects (`>`, `>>`)** are ALWAYS WRITE, regardless of what's on
+  the left side.
+- **Command substitution `$(...)`** and **process substitution
+  `<(...)`, `>(...)`** are ALWAYS WRITE (fail-safe: the classifier
+  doesn't try to inspect the substituted command).
+- **`tee`, `sudo`, `find -delete / -exec / -fprint*`, `awk` with
+  `system()`, `sed` with `e`/`w`/`r` flags** — always WRITE
+  (true-write triggers, no exceptions).
 - **`docker exec …`** — write (the inner command is opaque to the
   classifier).
-- **`sudo …`** — write, always.
 
-When you need pure-read access to data via a pipeline (`ps aux | grep
-nginx`), the simplest workaround is to run the unpiped read and grep
-the output yourself in the conversation.
+If a pure-read pipeline still classifies as write (e.g. an obscure
+read tool the classifier doesn't recognise), run the segments
+unpipelined and grep the output yourself in the conversation.
 
 ## Concrete example — bulk-approval pattern
 
