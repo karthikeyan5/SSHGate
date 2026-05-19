@@ -137,7 +137,7 @@ Tap approve. All four run in order. If any fails, the rest stop.
 
 ## Status
 
-v1 + v1.1 shipped. 50 commits, 12 Go packages, 192+ subtests plus a Docker-backed integration suite, three audit gates clean (code review, PII, security). All four phases of the v1 plan landed: cryptographic loop, real Telegram approval with bulk, auto-setup of new servers, the polish layer (list/status/revoke + skill + slash commands).
+v1 + v1.1 shipped. Three audit gates clean (code review, PII, security), plus a Docker-backed integration suite. All four phases of the v1 plan landed: cryptographic loop, real Telegram approval with bulk, auto-setup of new servers, the polish layer (list/status/revoke + skill + slash commands).
 
 v2 scaffold is wired but not deployable. The hosted `sshgate-signer-server` exists as an HTTP service with SQLite state and a swap-point client backend; the signer daemon can already route through it via one config change. What's missing for v2 to be usable: WebAuthn passkey + TOTP auth on the web UI, a web UI at all, and multi-operator approval logic. Tracked in `src/signer-server/README.md`.
 

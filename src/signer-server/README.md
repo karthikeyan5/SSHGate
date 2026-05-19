@@ -72,7 +72,7 @@ type = "hosted"
 [backend.hosted]
 base_url      = "https://sshgate-signer-server.example.com"
 api_key_file  = "/var/lib/sshgatesigner/tokens/hosted-api.key"
-client_id     = "karthi-laptop"
+client_id     = "my-laptop"
 poll_wait_sec = 30
 timeout_sec   = 60
 ```
