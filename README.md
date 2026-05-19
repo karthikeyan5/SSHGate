@@ -157,4 +157,4 @@ Short version: three trust domains — your user (runs Claude + the MCP, holds t
 
 ## License
 
-TBD — to be selected before publish.
+MIT — see `LICENSE`.
