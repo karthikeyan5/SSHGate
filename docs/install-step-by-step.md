@@ -2,11 +2,59 @@
 
 This is the human-readable install guide. The quick path is to let
 Claude Code drive: open a Claude Code session in this repo and run
-`/sshgate:setup`. The slash command walks the same six steps below
-and pauses for your input where needed.
+`/sshgate:setup`. The slash command walks the tiered flow below and
+pauses for your input where needed.
 
 If you'd rather do it by hand (or don't have Claude Code installed),
 follow the manual path.
+
+---
+
+## Tiers
+
+SSHGate ships three install tiers. Pick the one matching how much
+trust you want to delegate.
+
+### Tier 1 — Read-only
+
+- velgate is deployed on each remote; the SSHGate dedicated SSH key
+  is forced through it via `command="~/.velgate/velgate"`.
+- **No** signer is installed: `velsigner` user/daemon does not exist,
+  no master key, no Telegram bot.
+- velgate's keystore treats the absent `velgate.pub` as "no signing
+  key configured" — reads execute, writes exit 77 with:
+  `velgate: no signing key configured (read-only install — re-run /sshgate:setup to add a signer)`.
+- **Trust model:** you trust Claude not to actively exploit SSH read
+  access (file enumeration, log harvesting); you rely on velgate to
+  deny writes locally without any approval channel.
+- **Use when:** you want to try the gate quickly; you don't yet have
+  a phone you want tied to the laptop; the remotes are low-stakes.
+
+### Tier 2 — Local Telegram signer
+
+- Everything in tier 1, plus:
+  - `velsigner` Unix user (no shell, no login) owns
+    `/var/lib/velsigner/keys/velgate.key` — the master signing key.
+  - `velsigner.service` systemd unit talks Telegram.
+  - Each write command queues for a phone-tap approval before
+    velsigner signs it; velgate verifies the signature against
+    `velgate.pub` on the remote.
+- **Trust model:** the master key is isolated under a dedicated Unix
+  user. Claude (running as you) cannot read it. Every write requires
+  your active tap on Telegram. The bot's `allowed_user_id` pins the
+  channel to your account.
+- **Use when:** you want active human-in-the-loop approvals; you're
+  comfortable with a Telegram bot as the second factor.
+
+### Tier 3 — Hosted server signer
+
+- **NOT YET AVAILABLE (v2.x).** The hosted signer
+  (`src/velsigner-server`) is scaffolded but the web UI + WebAuthn
+  approval flow is incomplete.
+- Master key lives on a dedicated VPS behind WebAuthn; multiple
+  operators can share approvals. Documented for completeness.
+- **Use when:** v2.x ships and you want to share SSHGate access
+  across a team without each operator running their own velsigner.
 
 ---
 
@@ -51,17 +99,17 @@ assumes Linux.
 /sshgate:setup
 ```
 
-That's it. Claude Code will build the binaries, run the installer,
-walk you through the Telegram config, prompt you for the bot token,
-and capture the chat_id. The command is idempotent; re-running is safe.
+That's it. Claude Code probes on-disk state, classifies the current
+tier, and either offers a tier menu (fresh install) or a re-run menu
+(upgrade an existing install). Tier 1 needs no sudo at all; Tier 2
+pauses for `sudo ./scripts/install.sh` runs. The command is
+idempotent; re-running is safe.
 
 ---
 
-## Manual path
+## Manual path — Tier 1 (read-only)
 
-Six steps. Three sudo touchpoints (two `install.sh` runs and the
-token paste prompt is folded inside the second one). Every step is
-idempotent: re-running after a partial failure is safe.
+Three steps, no sudo.
 
 ### 1. Verify Go is installed
 
@@ -73,23 +121,60 @@ You need 1.22 or newer. If missing, install from https://go.dev/dl/.
 
 ### 2. Build the binaries
 
-From the SSHGate repo root:
-
 ```bash
 go build -o bin/sshgate-mcp ./src/mcp/cmd/sshgate-mcp
-go build -o bin/velsigner   ./src/velsigner/cmd/velsigner
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w' \
     -o bin/velgate-linux-amd64 ./src/velgate/cmd/velgate
 ```
 
-Or use the Makefile:
+(velsigner is **not** needed for tier 1.)
+
+### 3. Create the SSHGate SSH key + registry
 
 ```bash
-make build velgate-linux
+mkdir -p ~/.config/sshgate/ssh && chmod 700 ~/.config/sshgate/ssh
+ssh-keygen -t ed25519 -N '' -C 'sshgate-dedicated' \
+    -f ~/.config/sshgate/ssh/sshgate_ed25519
+echo '{"servers":{}}' > ~/.config/sshgate/servers.json
 ```
 
-### 3. Run the installer (first pass)
+Confirm the private key is mode 0600:
+
+```bash
+stat -c '%a' ~/.config/sshgate/ssh/sshgate_ed25519
+# expect: 600
+```
+
+### 4. Add a server (read-only deploy)
+
+From a Claude session, ask the model to call `sshgate.add_server`
+with `read_only=true`. The tool uploads velgate but skips
+velgate.pub — the remote runs in read-only mode. Reads succeed,
+writes return exit 77 with the "no signing key configured" message.
+
+To upgrade a tier-1 server to tier-2 later (after you've added a
+signer), re-run add_server with `read_only=false` and the same
+bootstrap credentials. The new velgate.pub is pushed idempotently.
+
+---
+
+## Manual path — Tier 2 (local Telegram signer)
+
+Assumes Tier 1 is already in place (binaries built, SSH key + registry
+exist). Three sudo touchpoints (two `install.sh` runs and the token
+paste prompt is folded inside the second one). Every step is
+idempotent: re-running after a partial failure is safe.
+
+### 1. Build velsigner
+
+```bash
+go build -o bin/velsigner ./src/velsigner/cmd/velsigner
+```
+
+(Or use `make build velgate-linux` to build all three binaries.)
+
+### 2. Run the installer (first pass)
 
 ```bash
 sudo ./scripts/install.sh
@@ -122,7 +207,7 @@ systemctl is-active velsigner
 # expect: active
 ```
 
-### 4. Configure the Telegram backend
+### 3. Configure the Telegram backend
 
 The `--init`-generated config selects the stub backend. To get
 phone-tap approvals you switch it to telegram and add your numeric
@@ -154,7 +239,7 @@ Sanity-check with `sudo cat /var/lib/velsigner/config/config.toml`.
 You should see `type = "telegram"` and the three telegram keys, no
 duplicates.
 
-### 5. Run the installer again (token + restart)
+### 4. Run the installer again (token + restart)
 
 Create the Telegram bot first: message @BotFather, send `/newbot`,
 choose a name and a username ending in `bot`. BotFather replies with
@@ -196,7 +281,7 @@ copy-paste included a stray newline (the installer's regex catches
 this and refuses to write, but check the file mode if it's there),
 or `allowed_user_id = 0` (you forgot to substitute `NNNN`).
 
-### 6. Capture chat_id from `/start` and validate
+### 5. Capture chat_id from `/start` and validate
 
 Open Telegram, find the bot you created (search the username you
 gave to BotFather), and send it `/start`. velsigner's polling loop
@@ -244,7 +329,26 @@ systemctl status velsigner --no-pager
 
 You should see `Active: active (running)` and the version string.
 
-### 7. (Optional) LLM command explainer
+If you upgraded from Tier 1 — that is, you had read-only servers
+already registered — you also need to push the new `velgate.pub` to
+each one so signed writes can be verified. Copy the pubkey to the
+MCP-side distribution path:
+
+```bash
+mkdir -p ~/.config/sshgate/pubkey-distrib
+sudo cp /var/lib/velsigner/keys/velgate.pub \
+    ~/.config/sshgate/pubkey-distrib/velgate.pub
+sudo chown "$USER" ~/.config/sshgate/pubkey-distrib/velgate.pub
+chmod 644 ~/.config/sshgate/pubkey-distrib/velgate.pub
+```
+
+Then, from a Claude session, re-run `sshgate.add_server` for each
+registered alias with `read_only=false` and the same bootstrap
+credentials you used originally. The tool detects the existing
+restricted entry in `authorized_keys` and pushes the new
+`velgate.pub` idempotently — no rewrites, no rollback risk.
+
+### 6. (Optional) LLM command explainer
 
 By default the approval message lists the queued commands verbatim.
 With this step enabled, velsigner additionally asks an OpenAI-compatible
