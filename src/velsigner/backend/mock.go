@@ -55,6 +55,15 @@ func (m *MockBackend) Approve(reqID, approvedBy string) {
 	m.resolve(reqID, Result{Status: StatusApproved, ApprovedBy: approvedBy})
 }
 
+// ApproveWithSignatures resolves reqID with StatusApproved AND a
+// pre-canned list of remote-style signatures, simulating a
+// HostedServerBackend approval. The daemon's response path will pass
+// the signatures through verbatim (after validating length + per-entry
+// Cmd match) instead of signing locally with d.Key.
+func (m *MockBackend) ApproveWithSignatures(reqID string, sigs []SignedCmd, approvedBy string) {
+	m.resolve(reqID, Result{Status: StatusApproved, ApprovedBy: approvedBy, Signatures: sigs})
+}
+
 // Deny resolves reqID with StatusDenied.
 func (m *MockBackend) Deny(reqID string) {
 	m.resolve(reqID, Result{Status: StatusDenied})

@@ -426,6 +426,11 @@ func TestTelegram_ApprovePath(t *testing.T) {
 	if got.ApprovedBy != "@karthi" {
 		t.Errorf("ApprovedBy = %q; want @karthi", got.ApprovedBy)
 	}
+	// Telegram is a local-signing backend: it must leave Signatures nil
+	// so the daemon falls back to d.Key for the cryptographic step.
+	if got.Signatures != nil {
+		t.Errorf("Signatures = %v; want nil (Telegram is approval-only, daemon signs locally)", got.Signatures)
+	}
 
 	// Callback should have been answered.
 	waitFor(t, time.Second, func() bool { return len(fake.callbackAnswersSnapshot()) == 1 })

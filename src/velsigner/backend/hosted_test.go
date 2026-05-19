@@ -148,6 +148,17 @@ func TestHostedServerBackend_Approved(t *testing.T) {
 		if res.ApprovedBy != "karthi" {
 			t.Errorf("ApprovedBy = %q; want karthi", res.ApprovedBy)
 		}
+		// Remote-signing contract: Signatures must be populated, one
+		// per request command, with the wire string from the server.
+		if len(res.Signatures) != 1 {
+			t.Fatalf("Signatures len = %d; want 1 (one per request command)", len(res.Signatures))
+		}
+		if res.Signatures[0].Cmd != "echo hi" {
+			t.Errorf("Signatures[0].Cmd = %q; want echo hi", res.Signatures[0].Cmd)
+		}
+		if res.Signatures[0].Sig != "VELGATE_SIG:fake" {
+			t.Errorf("Signatures[0].Sig = %q; want VELGATE_SIG:fake (passthrough of server's wire string)", res.Signatures[0].Sig)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Request did not resolve within 3s")
 	}

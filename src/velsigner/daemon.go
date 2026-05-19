@@ -150,11 +150,35 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String()}
 
 	if result.Status == backend.StatusApproved {
-		sigs, err := d.signAll(req.Commands)
-		if err != nil {
-			// A signing failure is a "we ran into the kernel's RNG
-			// being broken" event — surface as error.
-			return d.respondError(conn, req.RequestID, fmt.Sprintf("sign: %v", err))
+		// Two paths:
+		//   1. Remote-signing backend (HostedServerBackend): the server
+		//      holds the key and returned the wire-formatted signatures
+		//      in Result.Signatures. We validate length + per-entry Cmd
+		//      match (defence against a server that returns signatures
+		//      for the wrong commands) and pass through verbatim.
+		//   2. Local-signing backend (Telegram / Stub / Mock without
+		//      pre-canned sigs): Result.Signatures is nil, so we sign
+		//      with d.Key.
+		var sigs []signResponseSig
+		if len(result.Signatures) > 0 {
+			if len(result.Signatures) != len(req.Commands) {
+				return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature count mismatch: got %d, want %d", len(result.Signatures), len(req.Commands)))
+			}
+			sigs = make([]signResponseSig, len(result.Signatures))
+			for i, s := range result.Signatures {
+				if s.Cmd != req.Commands[i].Cmd {
+					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature cmd mismatch at index %d", i))
+				}
+				sigs[i] = signResponseSig{Cmd: s.Cmd, Sig: s.Sig}
+			}
+		} else {
+			localSigs, err := d.signAll(req.Commands)
+			if err != nil {
+				// A signing failure is a "we ran into the kernel's RNG
+				// being broken" event — surface as error.
+				return d.respondError(conn, req.RequestID, fmt.Sprintf("sign: %v", err))
+			}
+			sigs = localSigs
 		}
 		resp.Signatures = sigs
 	}

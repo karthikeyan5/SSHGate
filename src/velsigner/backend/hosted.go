@@ -274,7 +274,18 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 
 		switch body.Status {
 		case "approved":
-			out <- Result{Status: StatusApproved, ApprovedBy: body.ApprovedBy}
+			// Convert wire-shape signedSig → backend.SignedCmd so the
+			// daemon's signing path can pass these through verbatim
+			// instead of re-signing with its (now-vestigial-in-this-
+			// mode) local key.
+			var sigs []SignedCmd
+			if len(body.Signatures) > 0 {
+				sigs = make([]SignedCmd, len(body.Signatures))
+				for i, s := range body.Signatures {
+					sigs[i] = SignedCmd{Cmd: s.Cmd, Sig: s.Sig}
+				}
+			}
+			out <- Result{Status: StatusApproved, ApprovedBy: body.ApprovedBy, Signatures: sigs}
 			return
 		case "denied":
 			out <- Result{Status: StatusDenied, ApprovedBy: body.ApprovedBy}
@@ -300,23 +311,6 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 			return
 		}
 	}
-}
-
-// HostedSignatures is exposed for tests that want to convert the
-// signed payload list back to per-command sig strings. The daemon's
-// existing signing path (daemon.signAll) is bypassed when this
-// backend is in use because the server holds the key; this helper
-// is the bridge between the wire shape and the daemon's response
-// shape.
-//
-// Currently unused by the production daemon (the daemon expects
-// Backend to drive only approval, not signing). Wiring the server's
-// signatures back into the socket response is a follow-up: the
-// Backend interface needs a richer Result type. See v2.1 TODO.
-func HostedSignatures(_ pollBody) []signedSig {
-	// Intentionally unimplemented in scaffold 3/4. See Result
-	// shape limitations described above.
-	return nil
 }
 
 // validate returns the first config error, if any.

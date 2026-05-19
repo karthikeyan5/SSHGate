@@ -335,6 +335,138 @@ func TestDaemon_ApprovedButWriteFails_AuditRecordsUndelivered(t *testing.T) {
 	}
 }
 
+func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
+	t.Parallel()
+	// Simulates a HostedServerBackend that returned pre-signed wire
+	// strings. The daemon must pass them through unmodified — NOT
+	// re-sign with d.Key.
+	mock := backend.NewMockBackend()
+	d, pub, audit, auditPath := newDaemon(t, mock)
+	defer audit.Close()
+
+	cannedSigs := []backend.SignedCmd{
+		{Cmd: "systemctl restart nginx", Sig: "VELGATE_SIG:remote-sig-1"},
+		{Cmd: "apt install -y certbot", Sig: "VELGATE_SIG:remote-sig-2"},
+	}
+	mock.ApproveWithSignatures("r_remote1", cannedSigs, "karthi")
+
+	req := `{"kind":"sign","request_id":"r_remote1","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60},{"server":"prod","cmd":"apt install -y certbot","ttl_seconds":60}]}`
+	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest: %v", err)
+	}
+
+	var resp struct {
+		RequestID  string `json:"request_id"`
+		Status     string `json:"status"`
+		Signatures []struct {
+			Cmd string `json:"cmd"`
+			Sig string `json:"sig"`
+		} `json:"signatures"`
+	}
+	if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%q", err, conn.out.String())
+	}
+	if resp.Status != "approved" {
+		t.Fatalf("Status = %q; want approved", resp.Status)
+	}
+	if len(resp.Signatures) != 2 {
+		t.Fatalf("got %d sigs; want 2", len(resp.Signatures))
+	}
+	for i, s := range resp.Signatures {
+		if s.Cmd != cannedSigs[i].Cmd {
+			t.Errorf("sig %d Cmd = %q; want %q", i, s.Cmd, cannedSigs[i].Cmd)
+		}
+		if s.Sig != cannedSigs[i].Sig {
+			t.Errorf("sig %d Sig = %q; want %q (daemon must pass canned remote sig through verbatim, NOT re-sign locally)", i, s.Sig, cannedSigs[i].Sig)
+		}
+	}
+	// Pubkey-derived from d.Key is referenced to keep the linter from
+	// flagging the unused return from newDaemon; the assertion above is
+	// the real check (canned strings ≠ d.Key-derived signatures).
+	_ = pub
+
+	audit.Close()
+	got := readAudit(t, auditPath)
+	if len(got) != 1 || got[0].Status != "approved" || got[0].ApprovedBy != "karthi" {
+		t.Errorf("audit = %+v; want one approved event by karthi", got)
+	}
+}
+
+func TestDaemon_RemoteSign_LengthMismatch_RespondsError(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, _, audit, auditPath := newDaemon(t, mock)
+	defer audit.Close()
+
+	// Two commands in request, one signature returned.
+	mock.ApproveWithSignatures("r_mismatch_len",
+		[]backend.SignedCmd{{Cmd: "echo a", Sig: "VELGATE_SIG:x"}},
+		"karthi")
+	req := `{"kind":"sign","request_id":"r_mismatch_len","commands":[{"server":"p","cmd":"echo a","ttl_seconds":60},{"server":"p","cmd":"echo b","ttl_seconds":60}]}`
+	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest: %v", err)
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Status != "error" {
+		t.Errorf("Status = %q; want error", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Errorf("Error empty; want length-mismatch reason")
+	}
+	audit.Close()
+	got := readAudit(t, auditPath)
+	if len(got) != 1 || got[0].Status != "error" {
+		t.Errorf("audit = %+v; want one error", got)
+	}
+}
+
+func TestDaemon_RemoteSign_CmdMismatch_RespondsError(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, _, audit, auditPath := newDaemon(t, mock)
+	defer audit.Close()
+
+	// Length matches but the second sig's Cmd doesn't match the
+	// request's second command — defence against a misbehaving server.
+	mock.ApproveWithSignatures("r_mismatch_cmd",
+		[]backend.SignedCmd{
+			{Cmd: "echo a", Sig: "VELGATE_SIG:x1"},
+			{Cmd: "WRONG", Sig: "VELGATE_SIG:x2"},
+		},
+		"karthi")
+	req := `{"kind":"sign","request_id":"r_mismatch_cmd","commands":[{"server":"p","cmd":"echo a","ttl_seconds":60},{"server":"p","cmd":"echo b","ttl_seconds":60}]}`
+	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest: %v", err)
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Status != "error" {
+		t.Errorf("Status = %q; want error", resp.Status)
+	}
+	if !bytes.Contains([]byte(resp.Error), []byte("cmd mismatch")) {
+		t.Errorf("Error = %q; want a cmd-mismatch reason", resp.Error)
+	}
+	audit.Close()
+	got := readAudit(t, auditPath)
+	if len(got) != 1 || got[0].Status != "error" {
+		t.Errorf("audit = %+v; want one error", got)
+	}
+}
+
 // readAudit re-opens the audit log file and parses all lines.
 func readAudit(t *testing.T, path string) []velsigner.AuditEvent {
 	t.Helper()

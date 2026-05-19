@@ -61,6 +61,16 @@ func (s ResultStatus) String() string {
 	}
 }
 
+// SignedCmd is a single pre-signed command produced by a remote-signing
+// backend. Cmd is the literal shell command line (must match the
+// corresponding ApprovalRequest.Commands[i].Cmd verbatim); Sig is the
+// fully-formed "VELGATE_SIG:..." wire string the daemon will return to
+// the MCP without further processing.
+type SignedCmd struct {
+	Cmd string `json:"cmd"`
+	Sig string `json:"sig"` // "VELGATE_SIG:..." full wire string
+}
+
 // Result is the resolution of a single ApprovalRequest. ApprovedBy is
 // populated when the backend can identify the approver (e.g. Telegram's
 // from.id) — used purely for the audit log. Stub and mock leave it
@@ -68,6 +78,10 @@ func (s ResultStatus) String() string {
 type Result struct {
 	Status     ResultStatus
 	ApprovedBy string
+	// Signatures, when non-nil, contains pre-signed wire strings for each
+	// command in the original ApprovalRequest. Set by remote-signing
+	// backends (HostedServerBackend). Local-signing backends leave nil.
+	Signatures []SignedCmd
 }
 
 // Backend abstracts the approval-channel mechanism (Telegram in v1.2,
