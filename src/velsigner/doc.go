@@ -31,8 +31,3 @@
 // with "velsigner: ". Stdout is unused (the protocol is on the Unix
 // socket).
 package velsigner
-
-// Compile-time assertion that *Daemon implements RequestHandler. Lives
-// here rather than in daemon.go to avoid a cycle with the test file
-// during refactors.
-var _ RequestHandler = (*Daemon)(nil)

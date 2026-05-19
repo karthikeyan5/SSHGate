@@ -316,3 +316,6 @@ func writeJSONLine(w io.Writer, v any) error {
 func jsonMarshal(v any) ([]byte, error) {
 	return json.Marshal(v)
 }
+
+// Compile-time assertion that *Daemon implements RequestHandler.
+var _ RequestHandler = (*Daemon)(nil)
