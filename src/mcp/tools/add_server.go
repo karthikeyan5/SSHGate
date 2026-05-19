@@ -93,6 +93,55 @@ const remoteAuthKeysBackup = "~/.ssh/authorized_keys.sshgate-backup"
 // lowercase / digit / hyphen continuation, 1-31 chars total.
 var aliasPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 
+// hostnamePattern matches a DNS hostname per RFC 1123 (one or more
+// labels separated by dots; each label starts and ends with
+// alphanumeric, may contain hyphens in between; case-insensitive).
+// We additionally accept IPv4 dotted-quad and bracket-stripped IPv6
+// via parseHostLiteral below.
+var hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// usernamePattern matches a POSIX-style username: starts with lowercase
+// letter or underscore, followed by up to 31 lowercase letters / digits
+// / underscores / hyphens (32 char max — `useradd` upstream cap).
+var usernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// validateHost rejects Host strings that are neither a DNS hostname
+// nor a bare IPv4/IPv6 literal. The check is case-insensitive on the
+// hostname path; net.ParseIP handles both v4 and v6 forms (callers
+// pass IPv6 literals without brackets — net.JoinHostPort re-brackets
+// at dial time).
+func validateHost(host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return errors.New("host is empty")
+	}
+	if len(host) > 253 {
+		return fmt.Errorf("host %q exceeds 253 chars", host)
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	if !hostnamePattern.MatchString(strings.ToLower(host)) {
+		return fmt.Errorf("host %q is not a valid hostname or IP literal", host)
+	}
+	return nil
+}
+
+// validateUser rejects User strings that don't look like POSIX
+// usernames. Unicode, embedded whitespace, and shell metacharacters
+// are rejected at this boundary so they never reach the audit log
+// or an SSH ClientConfig.
+func validateUser(user string) error {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return errors.New("user is empty")
+	}
+	if !usernamePattern.MatchString(user) {
+		return fmt.Errorf("user %q is not a valid POSIX username (regex %s)", user, usernamePattern)
+	}
+	return nil
+}
+
 // bootstrapDialTimeout bounds the bootstrap-leg dial + handshake.
 const bootstrapDialTimeout = 20 * time.Second
 
@@ -128,11 +177,11 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	if !aliasPattern.MatchString(in.Alias) {
 		return AddServerOutput{}, fmt.Errorf("tools: invalid alias %q (must match %s)", in.Alias, aliasPattern)
 	}
-	if strings.TrimSpace(in.Host) == "" {
-		return AddServerOutput{}, errors.New("tools: host is empty")
+	if err := validateHost(in.Host); err != nil {
+		return AddServerOutput{}, fmt.Errorf("tools: %w", err)
 	}
-	if strings.TrimSpace(in.User) == "" {
-		return AddServerOutput{}, errors.New("tools: user is empty")
+	if err := validateUser(in.User); err != nil {
+		return AddServerOutput{}, fmt.Errorf("tools: %w", err)
 	}
 	port := in.Port
 	if port == 0 {
