@@ -1,166 +1,154 @@
 # SSHGate
 
-A Claude Code plugin that lets the agent SSH into your servers to
-debug or do maintenance. Read commands run freely. Write commands
-need a single button-tap on your phone (via a dedicated Telegram bot)
-before they execute. The signing key is isolated from the agent at
-the OS level, so the agent cannot bypass the gate.
+A Claude Code plugin that lets the agent SSH into your Linux servers. Reads run freely. Writes need one tap on your phone.
 
-## Status
+---
 
-v1 — feature complete.
+## The problem
 
-- [x] Phase 0 — Repo scaffolding, Go module, plugin manifest, Docker test target
-- [x] Phase 1 — Cryptographic loop end-to-end (reads work, writes stub-denied)
-- [x] Phase 2 — Real Telegram approval + bulk approval (`run_batch`)
-- [x] Phase 3 — Auto-setup flow (`/sshgate:add`)
-- [x] Phase 4 — `list_servers`, `status`, `revoke_server`, slash commands, skill, docs
+When an AI agent needs to diagnose a remote server, the workflow today is a relay. The human SSHes in, runs a command, pastes the output back into the chat. The agent reads it, asks for the next command. The human SSHes again. Twenty round-trips later, the agent has a guess at what's wrong. The agent could have done this in seconds on its own.
 
-## What it does
+The reason it doesn't is that full SSH access for an agent is dangerous. `rm -rf` on the wrong path, an accidental `truncate`, a supply-chain compromise of the agent's runtime, a hallucinated `systemctl stop` — any of these on a production server is a bad day. The human stays in the loop not to be useful, but to be a gate.
 
-SSHGate is the front door Claude uses to operate your Linux servers.
-You register each server once (`/sshgate:add prod-db user@host`), and
-from then on Claude can SSH in to read state (`df -h`, `journalctl`,
-`systemctl status`) without bothering you. The classifier on the
-remote side knows which commands mutate state and refuses to run them
-unless the SSH command carries a fresh Ed25519 signature from the
-local `sshgate-signer-telegram` daemon.
+The right shape is a gate that doesn't waste the human's time. Diagnostics flow through automatically. Anything that mutates state pauses for an explicit human "yes."
 
-When Claude wants to write — restart a service, edit a file, install
-a package — it bundles the writes (one or many) into a single sign
-request to `sshgate-signer-telegram`. `sshgate-signer-telegram` posts the command list to your
-Telegram via a dedicated bot, with `[✓ Approve all] [✗ Deny]`
-buttons. One tap and Claude proceeds; deny or ignore for 60 seconds
-and the request fails closed.
+---
 
-The plugin is the Claude-side shape of an idea designed to be
-hostable on a server (v2 — see the spec). The v1 build keeps
-everything on your laptop: a local daemon, a personal Telegram bot,
-your own remote servers.
+## SSHGate solves this
 
-## Security model
+SSHGate puts a small binary on every remote server that classifies each incoming command and enforces the gate:
 
-The agent runs as your normal Unix user; `sshgate-signer-telegram` runs as a
-separate Unix user that owns the master Ed25519 signing key
-(`/var/lib/sshgatesigner/keys/gate.key`, mode `0600`). Claude cannot
-read that file. It cannot ptrace `sshgate-signer-telegram` (different uid; kernel
-yama blocks it). It cannot impersonate you on Telegram (Telegram
-authenticates `from.id` on its servers; your user id is in the bot's
-allowlist; Claude has no Telegram session). On every remote server,
-the `gate` binary verifies each signed command against
-`gate.pub` before it executes — even if `sshgate-signer-telegram` were
-compromised, the remote-side gate enforces the policy independently.
-Reads are still gated: the SSH key SSHGate uses has `command=` forced
-to `~/.sshgate-gate/gate` in `authorized_keys`, so every connection
-goes through the classifier. Read commands pass; write commands
-without a valid signature are denied.
+```
+read command              → execute
+write command + signature → verify → execute
+write command, no sig     → deny
+```
+
+Three lines of logic. The signing key is held by a separate Unix user the agent cannot read from, and it only signs after you tap "approve" on Telegram. The agent never holds the key. The human never types another shell command.
+
+---
+
+## Three components
+
+**gate** (`sshgate-gate`) — the remote-side Go binary. ~500 LOC. Lives at `~/.sshgate-gate/gate` on each server you register. OpenSSH calls it via `command="..."` forcing in `authorized_keys`, so every connection on the SSHGate key routes through it. gate classifies the command, verifies the `SSHGATE_SIG:` prefix if present, and runs or denies. The classifier is compiled in; gate stores no config.
+
+**signer-telegram** (`sshgate-signer-telegram`) — the local approval daemon on your laptop. Runs as a separate Unix user (`sshgatesigner`) so Claude — running as you — cannot read its key file, ptrace its process, or read its Telegram bot token. When a write arrives, signer-telegram DMs you on a dedicated Telegram bot with the command list and Approve/Deny buttons; it signs only after your tap, and only if Telegram's `from.id` matches the allowlisted user.
+
+**MCP server** (`sshgate-mcp`) — the Claude Code plugin half. Exposes `run`, `run_batch`, `add_server`, `list_servers`, `status`, and `revoke_server` as MCP tools. Reads SSH directly; writes go to signer-telegram first for approval, then SSH the signed command across.
+
+---
+
+## What you get
+
+- Ask Claude to debug a server in plain English. Reads stream back instantly with no approval friction. "What's eating disk on prod-db" becomes one chat turn instead of fifteen.
+- Restart services, install packages, edit configs with one tap on your phone. Your laptop and your phone are the two trust domains; the agent is neither.
+- Bulk-approve a sequence of writes in one tap. Claude queues `apt update && apt install nginx && systemctl enable nginx && systemctl start nginx` as a single approval. Each command is still individually signed for audit; the "bulk" is purely the UI.
+- Register a new server in one slash command: `/sshgate:add prod-db ubuntu@prod-db.example.com`. The plugin auto-installs gate, lays in the restricted `authorized_keys` entry, and verifies end-to-end with a probe.
+- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them.
+
+---
+
+## Three tiers of setup
+
+`/sshgate:setup` is tiered and idempotent. Start with the lightest tier that meets your needs; you can upgrade later without tearing anything down.
+
+**Tier 1 — Read-only.** gate is deployed to every remote, but no signing key is uploaded. Reads work; writes are denied at the gate. No Telegram bot, no signer daemon, no sudo. Fastest install. Recommended for the first run while you decide whether you want write access at all.
+
+**Tier 2 — Local Telegram signer.** The full v1 install. Master keypair under the `sshgatesigner` system user, signer-telegram systemd unit, dedicated Telegram bot for approvals. Writes require a phone tap. This is the default for daily use.
+
+**Tier 3 — Hosted server.** Not yet available. Reserved for the v2 architecture (hosted `sshgate-signer-server` with WebAuthn + TOTP web auth, multi-operator approval rules, central audit). The signer-telegram backend interface is the swap point; gate, the MCP, and the slash commands stay the same.
+
+---
 
 ## Install
 
-```bash
+```
 /plugin install sshgate
 /sshgate:setup
 ```
 
-`/sshgate:setup` is the guided one-time installer: it builds the Go
-binaries, creates the `sshgatesigner` system user, generates the master
-key, prompts you for your @BotFather token, installs the systemd
-unit, and captures your Telegram `chat_id` after you send `/start`.
-It is idempotent — safe to re-run.
+`/sshgate:setup` walks you through Tier 1 first (read-only), and offers the Tier 2 upgrade in the same flow when you're ready. It probes on-disk state on every run, so re-running it is safe.
 
-The full manual procedure (for users without Claude Code or who want
-to read what `/sshgate:setup` does) is in
-[`docs/install-step-by-step.md`](docs/install-step-by-step.md).
+Full step-by-step (for users without Claude Code, or anyone who wants to read what `/sshgate:setup` does under the hood): [`docs/install-step-by-step.md`](docs/install-step-by-step.md).
 
-Requirements: Linux with systemd, Go 1.22+, `sudo`, a Telegram
-account. Remote servers must be reachable over SSH and run Linux.
+Requirements: Linux with systemd, Go 1.22+, sudo (for Tier 2 only), a Telegram account (for Tier 2 only). Remote servers must be reachable over SSH and run Linux.
 
-### macOS (laptop) support
-
-`sshgate-mcp` and `sshgate-signer-telegram` cross-compile to macOS — Mac users
-running Claude Code can build them with `make darwin`, which produces
-`bin/sshgate-mcp-darwin-{amd64,arm64}` and
-`bin/sshgate-signer-telegram-darwin-{amd64,arm64}`. `gate` stays Linux-only
-because it's deployed to remote Linux servers, not your laptop.
-
-v1.1 macOS support is **cross-compile only**: `scripts/install.sh`
-is Linux-specific (it uses `useradd`, `systemctl`, and
-`/etc/systemd/system/`), so on macOS you'll currently install the
-binaries by hand and write a launchd plist instead of the systemd
-unit. File paths also differ — `/usr/local/bin` on Intel Macs,
-`/opt/homebrew/bin` on Apple Silicon. A fully scripted macOS install
-path (launchd plist template + `install-darwin.sh`) lands in v1.2.
+---
 
 ## Usage examples
 
-**Diagnose a full disk.**
+**Read — no approval.**
 
-> "prod-db is slow, can you check what's eating disk?"
+> "What's eating disk on prod-db?"
 
-Claude runs `df -h`, `du -sh /var/log/*`, `find / -size +100M -mtime
--7` directly — all reads, no Telegram pings. Surfaces the culprit in
-chat. No approvals required.
+Claude calls `sshgate.run("prod-db", "df -h")`, then `du -sh /var/log/*`, then `find /var -size +100M`. All three are reads. They stream back into chat with no Telegram pings. Claude surfaces the culprit.
 
-**Restart a service.**
+**Single write — one tap.**
 
 > "Restart nginx on prod-db."
 
-Claude calls `sshgate.run prod-db "systemctl restart nginx"`. Your
-phone buzzes with `[✓ Approve] [✗ Deny]`. Tap approve; the command
-runs; Claude reports the result.
-
-**Add a new server.**
+Claude calls `sshgate.run("prod-db", "systemctl restart nginx")`. Your phone buzzes with:
 
 ```
-/sshgate:add web-1 ubuntu@web-1.example.com
+SSHGate approval — prod-db
+1. systemctl restart nginx
+
+[Approve]   [Deny]
 ```
 
-SSHGate bootstraps `gate` onto the host (uses your existing SSH
-agent for the first connection), installs the dedicated SSHGate key
-with `command="..."` forcing, verifies end-to-end with a probe, and
-saves the alias.
+Tap approve. The command runs. Claude reports the result.
 
-## MCP tools
+**Bulk write — one tap for four commands.**
 
-| Tool                          | Description                                                                | Approval         |
-|-------------------------------|----------------------------------------------------------------------------|------------------|
-| `mcp__sshgate__run`           | Run a single command on a server. Read → immediate. Write → approval.      | Write only       |
-| `mcp__sshgate__run_batch`     | Run multiple commands. Bulk-approval covers all writes in one tap.         | Write only, once |
-| `mcp__sshgate__list_servers`  | Return registered server aliases with host/user/added_at.                  | None             |
-| `mcp__sshgate__status`        | Signer socket reachability + per-server SSH reachability + ping ms.     | None             |
-| `mcp__sshgate__add_server`    | Register a new server alias; auto-installs `gate` on the remote.        | None (bootstrap) |
-| `mcp__sshgate__revoke_server` | Sign and run `SSHGATE_REVOKE`; clean up `authorized_keys` and `~/.sshgate-gate/`. | One approval     |
+> "Update the nginx config and restart it."
 
-## Slash commands
+Claude calls `sshgate.run_batch("prod-db", [...])` with four commands. Your phone buzzes once:
 
-| Command                        | Arguments                            | What it does                                                |
-|--------------------------------|--------------------------------------|-------------------------------------------------------------|
-| `/sshgate:setup`               | —                                    | One-time install; builds binaries, sets up signer + bot. |
-| `/sshgate:add`                 | `<alias> <user@host>[:port]`         | Register a server; auto-installs gate on the remote.     |
-| `/sshgate:status`              | —                                    | Signer + per-server health report.                       |
-| `/sshgate:revoke`              | `<alias>`                            | Tear down gate on a remote; drop the alias.              |
-| `/sshgate:run`                 | `<alias> <command...>`               | Explicit single-command run (Claude usually calls the tool directly). |
+```
+SSHGate approval — prod-db
+4 commands queued:
+1. cat > /etc/nginx/sites-available/app.conf <<'EOF' ...
+2. nginx -t
+3. systemctl reload nginx
+4. systemctl status nginx
 
-A skill at `skills/debugging-remote-servers/SKILL.md` activates
-automatically when you ask Claude to debug or operate a registered
-server — it teaches the agent the right tool order and the
-bulk-approval pattern.
+[Approve all]   [Deny]
+```
 
-## License
+Tap approve. All four run in order. If any fails, the rest stop.
 
-TBD — to be selected before publish.
+---
 
-## Status / roadmap
+## What SSHGate is NOT
+
+- Not a replacement for SSH. It sits on top of SSH.
+- Not a configuration management tool (Ansible, Chef, Puppet). It runs the commands you (or the agent) write; it does not own desired state.
+- Not a full access proxy (Teleport, StrongDM). No session recording, no MFA at the SSH layer, no SSO, no per-user RBAC.
+- Not a secret manager. It gates commands, not credentials.
+- Not a multi-operator approval system in v1. One operator, one phone, one Telegram DM. Multi-operator is a v2 feature.
+
+---
+
+## Status
+
+v1 + v1.1 shipped. 50 commits, 12 Go packages, 192+ subtests plus a Docker-backed integration suite, three audit gates clean (code review, PII, security). All four phases of the v1 plan landed: cryptographic loop, real Telegram approval with bulk, auto-setup of new servers, the polish layer (list/status/revoke + skill + slash commands).
+
+v2 scaffold is wired but not deployable. The hosted `sshgate-signer-server` exists as an HTTP service with SQLite state and a swap-point client backend; the signer daemon can already route through it via one config change. What's missing for v2 to be usable: WebAuthn passkey + TOTP auth on the web UI, a web UI at all, and multi-operator approval logic. Tracked in `src/signer-server/README.md`.
 
 - Design spec: [`docs/specs/2026-05-19-sshgate-design.md`](docs/specs/2026-05-19-sshgate-design.md)
 - Implementation plan: [`docs/plans/2026-05-19-sshgate-v1-implementation.md`](docs/plans/2026-05-19-sshgate-v1-implementation.md)
 - Morning review / decision log: [`docs/decisions/MORNING-REVIEW-2026-05-19.md`](docs/decisions/MORNING-REVIEW-2026-05-19.md)
 
-v1.1 cascade: LLM command explainer in approvals, macOS desktop
-support, automated signer user provisioning, refined pipe/chain
-classification.
+---
 
-v2 cascade: hosted `sshgate-signer-server` (HTTPS API, WebAuthn passkey +
-TOTP, multi-operator approval, central audit log) — see the spec's
-"v2 vision" section. The `sshgate-signer-telegram` backend interface is the
-swap-point; `gate`, the MCP, and the slash commands do not change.
+## Architecture
+
+Full diagram, trust-domain breakdown, wire protocol, and threat model: [`docs/specs/2026-05-19-sshgate-design.md`](docs/specs/2026-05-19-sshgate-design.md).
+
+Short version: three trust domains — your user (runs Claude + the MCP, holds the SSH client key), the `sshgatesigner` user (runs signer-telegram, holds the master signing key + bot token), and Telegram (authenticates your phone). Each remote server runs gate as the only thing the SSHGate SSH key can invoke, enforced by OpenSSH's `command=` forcing. Reads pass; writes need a fresh Ed25519 signature from signer-telegram, which signer-telegram only produces after a verified phone tap.
+
+---
+
+## License
+
+TBD — to be selected before publish.
