@@ -108,6 +108,15 @@ func (s *Server) Listen(ctx context.Context) error {
 	// Close the listener when ctx is cancelled so Accept returns.
 	stopCh := make(chan struct{})
 	go func() {
+		// Belt-and-braces panic recovery, mirroring serveOne. The
+		// watcher goroutine is trivial (one select + Close) so a
+		// panic is highly unlikely, but a silent panic here would
+		// leave the accept loop wedged on a closed-context listener.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "velsigner: panic in listener watcher: %v\n", r)
+			}
+		}()
 		select {
 		case <-ctx.Done():
 		case <-stopCh:
