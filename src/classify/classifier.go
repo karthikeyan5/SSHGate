@@ -388,8 +388,13 @@ var readAllowlist = map[string]argRule{
 	"groups":      nil,
 	"date":        nil,
 	"timedatectl": nil,
-	"env":         nil,
-	"printenv":    nil,
+	// `env` is special: it is allowed as a read-only print-the-environment
+	// command, but with any positional argument it acts as a wrapper for
+	// another command. envRule recursively classifies the wrapped command
+	// against this same map, so we wire it up in init() below to avoid
+	// an initialization cycle.
+	"env":      nil,
+	"printenv": nil,
 	// Pure-output builtins: spec lists `echo/cat/tee with redirects` under
 	// write. Top-level redirect detection runs before head lookup, so a
 	// bare `echo done` reaches this map and is correctly a read.
@@ -416,7 +421,7 @@ var readAllowlist = map[string]argRule{
 	"wget":       wgetRule,
 
 	// Logs / who.
-	"journalctl": nil,
+	"journalctl": journalctlRule,
 	"dmesg":      nil,
 	"last":       nil,
 	"lastlog":    nil,
@@ -431,6 +436,146 @@ var readAllowlist = map[string]argRule{
 
 	// Package managers default to write; only their query subcommands are read.
 	// (Spec lists them under write; corpus has no read-side example for them.)
+}
+
+func init() {
+	// Wire envRule into the allowlist after the map literal is initialized.
+	// envRule recursively reads readAllowlist, which would be an
+	// initialization cycle if expressed directly in the literal.
+	readAllowlist["env"] = envRule
+}
+
+// envRule classifies `env` invocations. `env` is READ iff it is invoked
+// with no args (prints the environment) or only with `KEY=VAL` assignments
+// and no trailing wrapped command. The moment a non-assignment positional
+// appears, `env` is acting as a wrapper — we recursively classify the
+// wrapped command and apply the dangerous-env-var denylist to each
+// assignment. Any `env` flag (`-i`, `-u`, `-S`, `--ignore-environment`,
+// `--unset`, `--split-string`, `--chdir`, `--block-signal`, etc.) is
+// treated as WRITE because each of them can smuggle execution or
+// significantly change the wrapper's behavior. Cited as MAJOR-1 in
+// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+func envRule(args []string) Kind {
+	if len(args) == 0 {
+		return KindRead
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		// Any env flag (short or long) is conservatively WRITE.
+		if len(a) > 0 && a[0] == '-' && a != "--" {
+			return KindWrite
+		}
+		// `--` end-of-options: everything after is the wrapped command.
+		if a == "--" {
+			rest := args[i+1:]
+			if len(rest) == 0 {
+				return KindRead
+			}
+			return classifyWrapped(rest)
+		}
+		// KEY=VAL assignment: deny dangerous keys, otherwise skip.
+		if isAssignment(a) {
+			key := a[:strings.IndexByte(a, '=')]
+			if dangerousEnvVars[key] {
+				return KindWrite
+			}
+			continue
+		}
+		// First non-assignment positional: wrapped command + its args.
+		return classifyWrapped(args[i:])
+	}
+	// All tokens were KEY=VAL assignments with no wrapped command.
+	return KindRead
+}
+
+// classifyWrapped recursively classifies a wrapped command (the part of
+// `env KEY=VAL cmd args...` after the assignments). It runs the same
+// per-segment logic as `classifySegment`, but on an already-tokenized
+// slice and without re-splitting on control operators (the tokens were
+// pre-split by the outer tokenizer / segmenter).
+func classifyWrapped(tokens []string) Kind {
+	if len(tokens) == 0 {
+		return KindUnknown
+	}
+	// Re-run the assignment-strip loop (the wrapper may be `env env FOO=bar cmd`).
+	i := 0
+	for i < len(tokens) && isAssignment(tokens[i]) {
+		key := tokens[i][:strings.IndexByte(tokens[i], '=')]
+		if dangerousEnvVars[key] {
+			return KindWrite
+		}
+		i++
+	}
+	if i >= len(tokens) {
+		return KindUnknown
+	}
+	head := tokens[i]
+	args := tokens[i+1:]
+	if head == "sudo" {
+		return KindWrite
+	}
+	rule, ok := readAllowlist[head]
+	if !ok {
+		return KindWrite
+	}
+	if rule == nil {
+		return KindRead
+	}
+	return rule(args)
+}
+
+// journalctlRule: `journalctl` is read iff none of its mutating flags are
+// present. The dangerous flags rotate, vacuum (delete), flush, sync,
+// release var-log, update the catalog, or generate FSS keys. GNU long
+// options accept unambiguous prefixes, so we use prefix-match against
+// each dangerous flag stem. Cited as MAJOR-2 in
+// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+func journalctlRule(args []string) Kind {
+	for _, a := range args {
+		if journalctlFlagIsDangerous(a) {
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// journalctlDangerousLong is the list of journalctl long-option stems
+// that mutate state. We match any arg whose `--` prefix is a prefix of
+// one of these stems (GNU getopt prefix-abbreviation), with one safety
+// constraint: the matched arg must have at least 3 chars after `--`
+// (e.g. `--rot`) to avoid colliding with unrelated short prefixes like
+// `--no-pager`. The bound was chosen empirically from journalctl(1).
+var journalctlDangerousLong = []string{
+	"rotate",
+	"vacuum-size",
+	"vacuum-time",
+	"vacuum-files",
+	"flush",
+	"sync",
+	"relinquish-var",
+	"smart-relinquish-var",
+	"update-catalog",
+	"setup-keys",
+}
+
+func journalctlFlagIsDangerous(a string) bool {
+	if !strings.HasPrefix(a, "--") {
+		return false
+	}
+	body := a[2:]
+	// Strip `=VALUE` suffix; we only care about the option name.
+	if eq := strings.IndexByte(body, '='); eq >= 0 {
+		body = body[:eq]
+	}
+	if len(body) < 3 {
+		return false
+	}
+	for _, stem := range journalctlDangerousLong {
+		if strings.HasPrefix(stem, body) {
+			return true
+		}
+	}
+	return false
 }
 
 // findRule: `find` is read unless it has -delete, an -exec* primitive, or
@@ -472,7 +617,12 @@ func sedRule(args []string) Kind {
 	scripts := sedScripts(args)
 	for _, a := range args {
 		// -i, --in-place, and combined flags like -ie or -i.bak all mutate.
-		if a == "-i" || a == "--in-place" || strings.HasPrefix(a, "--in-place=") {
+		// GNU getopt also accepts any unambiguous prefix of a long option;
+		// sed has no other long option starting with `--in`, so any
+		// `--in<anything>` arg is `--in-place` (or its `=VALUE` form).
+		// Cited as MAJOR-4 in
+		// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+		if a == "-i" || strings.HasPrefix(a, "--in") {
 			return KindWrite
 		}
 		// -i.bak, -iE etc. (combined short flag form).
@@ -640,6 +790,12 @@ func curlRule(args []string) Kind {
 		case "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
 			"-F", "--form", "-T", "--upload-file":
 			return KindWrite
+		case "-K", "--config":
+			// `-K FILE` reads curl directives from FILE; that file can
+			// specify `--output FILE`, `--upload-file`, `-X POST`, etc.
+			// The config file is opaque to us. Cited as MAJOR-5 in
+			// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+			return KindWrite
 		case "-o", "--output":
 			// `-o FILE` writes to disk; `-o -` is stdout (still read).
 			if i+1 < len(args) && args[i+1] != "-" {
@@ -658,6 +814,9 @@ func curlRule(args []string) Kind {
 			if strings.TrimPrefix(a, "--output=") != "-" {
 				return KindWrite
 			}
+		}
+		if strings.HasPrefix(a, "--config=") {
+			return KindWrite
 		}
 		if strings.HasPrefix(a, "-X") && len(a) > 2 {
 			m := strings.ToUpper(a[2:])
@@ -756,6 +915,21 @@ func dockerRule(args []string) Kind {
 // `git config --set` (and write-side variants like --unset/--add) are
 // write; `git config --get` and bare `git config <name>` are read.
 func gitRule(args []string) Kind {
+	// `git -c KEY=VAL` injects ad-hoc config. Many config keys execute
+	// shell commands when git invokes them: `core.pager`, `core.editor`,
+	// `core.sshCommand`, `core.hooksPath`, `gpg.program`, `diff.external`,
+	// `credential.helper`, any `alias.*` (a `!`-prefixed alias is an
+	// arbitrary shell command), and so on. Rather than maintain a
+	// denylist (which inevitably misses a key), classify ANY `git -c ...`
+	// invocation as WRITE. Cited as MAJOR-3 in
+	// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-c" || a == "--config-env" ||
+			strings.HasPrefix(a, "--config-env=") {
+			return KindWrite
+		}
+	}
 	sub := firstNonFlag(args)
 	switch sub {
 	case "status", "log", "diff", "show", "branch",

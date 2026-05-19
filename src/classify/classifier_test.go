@@ -72,6 +72,45 @@ func TestClassify_EdgeCases(t *testing.T) {
 		{"curl -o /tmp/x is write", "curl -o /tmp/x https://example.com", KindWrite},
 		{"curl -o - is read", "curl -o - https://example.com", KindRead},
 		{"curl -O remote-name is write", "curl -O https://example.com/file.tar", KindWrite},
+
+		// 2026-05-19 audit MAJOR follow-ups.
+		// M1: env wrapper recursion.
+		{"env bare", "env", KindRead},
+		{"env only assignments", "env LANG=C TZ=UTC", KindRead},
+		{"env wrap read", "env FOO=bar cat /etc/hosts", KindRead},
+		{"env wrap write", "env rm /tmp/x", KindWrite},
+		{"env -i wrap", "env -i cat /etc/hosts", KindWrite},
+		{"env LD_PRELOAD wrap", "env LD_PRELOAD=/tmp/x cat /etc/hosts", KindWrite},
+		{"env -- read", "env -- cat /etc/hosts", KindRead},
+		{"env -- write", "env -- rm /tmp/x", KindWrite},
+		{"env nested env", "env FOO=bar env BAR=baz cat /etc/hosts", KindRead},
+		{"env nested env write", "env FOO=bar env BAR=baz rm /tmp/x", KindWrite},
+
+		// M2: journalctl mutating flags.
+		{"journalctl --rotate is write", "journalctl --rotate", KindWrite},
+		{"journalctl --rot abbrev", "journalctl --rot", KindWrite},
+		{"journalctl --vacuum-size= write", "journalctl --vacuum-size=10M", KindWrite},
+		{"journalctl --vacu abbrev", "journalctl --vacu=10M", KindWrite},
+		{"journalctl --flush is write", "journalctl --flush", KindWrite},
+		{"journalctl read still works", "journalctl -u nginx", KindRead},
+		{"journalctl --no-pager read", "journalctl --no-pager -u nginx", KindRead},
+
+		// M3: git -c injection.
+		{"git -c core.pager is write", "git -c core.pager='sh -c id' log", KindWrite},
+		{"git -c alias is write", "git -c alias.x='!id' x", KindWrite},
+		{"git --config-env is write", "git --config-env=KEY=ENV log", KindWrite},
+		{"plain git log still read", "git log --oneline", KindRead},
+
+		// M4: GNU long-option abbreviation for sed --in-place.
+		{"sed --in-pl is write", "sed --in-pl 's/x/y/' /etc/hosts", KindWrite},
+		{"sed --in-p is write", "sed --in-p 's/x/y/' /etc/hosts", KindWrite},
+		{"sed --in is write", "sed --in 's/x/y/' /etc/hosts", KindWrite},
+		{"sed --in-place=.bak write", "sed --in-place=.bak 's/x/y/' /etc/hosts", KindWrite},
+
+		// M5: curl -K config bypass.
+		{"curl -K is write", "curl -K /tmp/cfg https://example.com", KindWrite},
+		{"curl --config is write", "curl --config /tmp/cfg https://example.com", KindWrite},
+		{"curl --config= is write", "curl --config=/tmp/cfg https://example.com", KindWrite},
 	}
 
 	for _, tc := range cases {

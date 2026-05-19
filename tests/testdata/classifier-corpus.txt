@@ -231,3 +231,70 @@ WRITE	awk '{print > "/tmp/log"}' file
 # B4 — simple awk readers still pass.
 READ	awk '{print $1}' /etc/passwd
 READ	awk '/^root/ {print $1}' /etc/passwd
+
+# --- 2026-05-19 read-only-gate bypass MAJORs (security research audit) ---
+# M1: `env <cmd>` wrapper bypass. `env` alone is read; `env KEY=VAL` is read;
+# `env KEY=VAL cmd args...` recursively classifies the wrapped command; any
+# env flag (-i, -u, -S, --ignore-environment, etc.) forces WRITE.
+WRITE	env rm /tmp/x
+WRITE	env -i rm /tmp/x
+WRITE	env -u PATH rm /tmp/x
+WRITE	env --ignore-environment rm /tmp/x
+WRITE	env LD_PRELOAD=/tmp/evil.so cat /etc/hosts
+WRITE	env GIT_SSH_COMMAND='sh -c "id"' git ls-remote origin
+WRITE	env -- rm /tmp/x
+READ	env
+READ	env FOO=bar
+READ	env FOO=bar cat /etc/hosts
+READ	env FOO=bar ls /tmp
+READ	env LANG=C printenv PATH
+
+# M2: journalctl mutating flags (--rotate, --vacuum-*, --flush, --update-catalog,
+# --setup-keys, --relinquish-var, --smart-relinquish-var, --sync) force WRITE,
+# including GNU long-option abbreviations.
+WRITE	journalctl --rotate
+WRITE	journalctl --vacuum-size=100M
+WRITE	journalctl --vacuum-time=7d
+WRITE	journalctl --vacuum-files=10
+WRITE	journalctl --flush
+WRITE	journalctl --sync
+WRITE	journalctl --relinquish-var
+WRITE	journalctl --smart-relinquish-var
+WRITE	journalctl --update-catalog
+WRITE	journalctl --setup-keys
+WRITE	journalctl --rot
+WRITE	journalctl --vacu
+WRITE	journalctl --flu
+# M2 — simple journalctl readers still pass.
+READ	journalctl -u nginx --since "1 hour ago"
+READ	journalctl -xe
+READ	journalctl --no-pager -u nginx
+
+# M3: `git -c KEY=VAL ...` injects config (core.pager, alias.*, diff.external,
+# core.sshCommand, gpg.program, etc.) — all reach a shell. Conservative: any
+# `-c` arg forces WRITE.
+WRITE	git -c core.pager='sh -c "id"' log
+WRITE	git -c alias.x='!id' x
+WRITE	git -c core.sshCommand='evil' fetch
+WRITE	git -c core.editor='vim' status
+WRITE	git --config-env=core.pager=ENV log
+# M3 — bare git read forms still pass.
+READ	git log --oneline
+READ	git status
+
+# M4: GNU long-option abbreviation. sed `--in-pl`, `--in`, `--in-p` all
+# expand to `--in-place` and mutate the file. journalctl `--rot` / `--vacu`
+# / `--flu` expand to their dangerous canonical forms (covered above in M2).
+WRITE	sed --in-place 's/X/Y/' /etc/hosts
+WRITE	sed --in-pl 's/X/Y/' /etc/hosts
+WRITE	sed --in-p 's/X/Y/' /etc/hosts
+WRITE	sed --in 's/X/Y/' /etc/hosts
+WRITE	sed --in-place=.bak 's/X/Y/' /etc/hosts
+
+# M5: curl `-K FILE` / `--config FILE` reads directives from FILE; the file
+# can specify any curl arg including `--output FILE` or `-T FILE`.
+WRITE	curl -K /tmp/cfg https://example.com
+WRITE	curl --config /tmp/cfg https://example.com
+WRITE	curl --config=/tmp/cfg https://example.com
+# M5 — bare curl read still passes.
+READ	curl https://example.com/status
