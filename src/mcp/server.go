@@ -337,9 +337,16 @@ func formatListServersSummary(out tools.ListServersOutput) string {
 // TextContent block. Structured content carries the full StatusOutput.
 func formatStatusSummary(out tools.StatusOutput) string {
 	var b strings.Builder
-	if out.SignerSocket.Reachable {
+	switch {
+	case out.SignerSocket.Reachable:
 		fmt.Fprintf(&b, "signer: reachable (%s)", out.SignerSocket.Path)
-	} else {
+	case !out.SignerSocket.Configured:
+		// Tier 1: no signer daemon installed. This is the expected
+		// read-only state, not a failure to debug (audit M4).
+		fmt.Fprintf(&b, "signer: not configured (%s) — read-only / Tier 1; writes are denied at the gate. Run /sshgate:setup to add a Telegram signer.", out.SignerSocket.Path)
+	default:
+		// Configured (socket file present) but the dial failed — a real
+		// Tier-2 daemon problem worth surfacing.
 		fmt.Fprintf(&b, "signer: UNREACHABLE (%s): %s", out.SignerSocket.Path, out.SignerSocket.Error)
 	}
 	for _, sv := range out.Servers {

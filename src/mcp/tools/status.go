@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -22,7 +23,13 @@ type StatusInput struct{}
 type SignerStatus struct {
 	Path      string `json:"path"`
 	Reachable bool   `json:"reachable"`
-	Error     string `json:"error,omitempty"`
+	// Configured is true when the socket file EXISTS (a signer daemon
+	// is installed), regardless of whether the dial succeeded. On Tier 1
+	// (read-only, no signer) the socket file is absent, so Configured is
+	// false and an unreachable signer is the NORMAL, expected state —
+	// not something to debug. Audit M4.
+	Configured bool   `json:"configured"`
+	Error      string `json:"error,omitempty"`
 }
 
 // ServerStatus is one row in StatusOutput.Servers. PingMS is the
@@ -172,6 +179,11 @@ func probeSignerSocket(ctx context.Context, path string) SignerStatus {
 	if path == "" {
 		s.Error = "signer socket path not configured"
 		return s
+	}
+	// Configured iff the socket file exists. Absent = Tier 1 (no signer
+	// daemon installed); that is normal, not a failure. Audit M4.
+	if _, err := os.Stat(path); err == nil {
+		s.Configured = true
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, statusSignerDialTimeout)
 	defer cancel()

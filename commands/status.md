@@ -23,9 +23,25 @@ Signer
   reachable: yes
 ```
 
-If unreachable, surface the error verbatim and suggest
-`systemctl status sshgate-signer-telegram` and `journalctl -u sshgate-signer-telegram -n 30 --no-pager`
-as next steps. Do not run them yourself unless the user asks.
+Branch on `signer_socket.configured` before deciding what to print:
+
+- `configured: false` → this is a **Tier-1 (read-only)** install: no
+  signer daemon exists, so an unreachable socket is EXPECTED. Print it
+  as normal, e.g.:
+
+  ```
+  Signer
+    socket:    /run/sshgatesigner/sock
+    status:    not configured (read-only / Tier 1) — writes denied at the gate
+  ```
+
+  Do NOT suggest debugging the daemon; suggest `/sshgate:setup` to add a
+  signer instead.
+- `configured: true` AND `reachable: false` → a real Tier-2 daemon
+  problem. Surface the error verbatim and suggest
+  `systemctl status sshgate-signer-telegram` and
+  `journalctl -u sshgate-signer-telegram -n 30 --no-pager`. Do not run
+  them yourself unless the user asks.
 
 Then a per-server table (use plain text, not markdown tables — they
 render poorly in the CLI):
