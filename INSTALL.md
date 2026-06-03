@@ -52,12 +52,14 @@ cryptographic gate is enforced on each remote server independently.
    via @BotFather. If you don't have one yet, you'll be walked through it.
 4. `~/.config/sshgate/` and *(Tier 2 only)* `/var/lib/sshgatesigner/` — local
    config + key + audit-log paths, mode 0700 / 0640.
-5. SSHGate binaries — built from source via `make build` on your machine.
+5. SSHGate binaries — built from your clone via `make install-local`
+   (puts `sshgate-mcp` + `sshgate-signer-telegram` on your `$PATH` and
+   the remote `sshgate-gate-linux-amd64` under `~/.config/sshgate/bin/`).
    No remote dependencies fetched at runtime.
 
 ### What you'll need handy
 
-- **Tier 1 (read-only):** nothing beyond Go ≥1.22 and one Linux server you
+- **Tier 1 (read-only):** nothing beyond Go ≥1.25 and one Linux server you
   can SSH into right now. No sudo, no Telegram. ~2 minutes.
 - **Tier 2 (full v1):** sudo access on this machine, a Telegram account, and
   ~10 minutes. The bot token and your Telegram user-id can be generated
@@ -81,10 +83,10 @@ but not yet deployable; the menu will tell you so.
 go version
 ```
 
-If "command not found": tell the user to install Go ≥1.22 from
+If "command not found": tell the user to install Go ≥1.25 from
 https://go.dev/dl/, then re-run this install. Stop.
 
-If the printed version is older than 1.22: tell the user to upgrade Go and
+If the printed version is older than 1.25: tell the user to upgrade Go and
 re-run. Stop.
 
 Tier 2 also needs `sudo` access on the local machine and a Telegram account
@@ -96,17 +98,26 @@ per-server later via `/sshgate:add`, not here.
 
 ## 2. Clone the repo and add as a local marketplace
 
-`/sshgate:setup` needs access to the full Go source tree (`src/`, `scripts/`,
-`Makefile`). Claude Code's marketplace cache from a remote GitHub source only
-ships the plugin subtree, not the build inputs. So the canonical install is:
-clone the repo first, then point Claude Code at the local clone as a
-marketplace.
+Claude Code's `/plugin install` copies ONLY the plugin subtree
+(`.claude-plugin/`, `commands/`, `skills/`, `.mcp.json`) into a versioned
+cache — it strips `src/`, `scripts/`, `Makefile`, and `bin/`. So the MCP
+binary cannot live under the cache; it must be on your `$PATH`. The
+canonical install: clone the repo, build the binaries onto `$PATH` with
+`make install-local`, then register the clone as a local marketplace.
 
 Tell the user:
 
-> "Pick a directory to keep the SSHGate source (e.g. `~/src`), then run:
+> "Pick a directory to keep the SSHGate source (e.g. `~/src`), clone it, and
+> build the binaries onto your PATH:
 >
 >     mkdir -p ~/src && cd ~/src && git clone https://github.com/karthikeyan5/SSHGate
+>     cd ~/src/SSHGate && make install-local
+>
+> `make install-local` puts `sshgate-mcp` and `sshgate-signer-telegram` in
+> `~/go/bin` and the remote gate binary in `~/.config/sshgate/bin/`. Confirm
+> `~/go/bin` is on your PATH:
+>
+>     command -v sshgate-mcp || echo 'NOT ON PATH — add ~/go/bin (or `go env GOPATH`/bin) to your PATH and re-open the shell'
 >
 > Then in this Claude Code session, run these three slash commands and tell
 > me when they're done:
@@ -115,9 +126,9 @@ Tell the user:
 >     /plugin install sshgate@sshgate
 >     /reload-plugins
 >
-> Replace `~/src/SSHGate` with wherever you cloned. The `git clone` location
-> is permanent — the plugin's `/sshgate:setup` reads source from there to
-> compile binaries."
+> Replace `~/src/SSHGate` with wherever you cloned. The `/reload-plugins`
+> AFTER `make install-local` is what makes the MCP tool surface appear (the
+> server spawns the now-on-PATH `sshgate-mcp` binary)."
 
 Wait for the user to confirm completion and capture the clone path (we'll
 need it in step 3).
@@ -125,30 +136,20 @@ need it in step 3).
 ## 3. Verify the plugin loaded
 
 After step 2's `/reload-plugins`, the SSHGate slash commands should be
-available. Probe:
+available and the MCP binary should be on `$PATH`. The cache does NOT
+contain `src/` or `go.mod` (that is expected and correct — the binaries
+live on `$PATH`, not under the cache). Probe the two things that actually
+matter:
 
 ```bash
-PLUGIN_ROOT=$(ls -d ~/.claude/plugins/cache/*/sshgate 2>/dev/null | head -1)
-if [ -z "$PLUGIN_ROOT" ]; then
-  echo "ERROR: sshgate plugin not found in ~/.claude/plugins/cache — did step 2 complete?"
-  exit 1
-fi
-SRC_ROOT=$(cd "$PLUGIN_ROOT/../.." 2>/dev/null && pwd)
-if [ -z "$SRC_ROOT" ] || [ ! -f "$SRC_ROOT/go.mod" ]; then
-  # The marketplace.json points "source" at "." so PLUGIN_ROOT itself may be
-  # the repo root. Try that.
-  if [ -f "$PLUGIN_ROOT/go.mod" ]; then
-    SRC_ROOT="$PLUGIN_ROOT"
-  else
-    echo "ERROR: no go.mod near $PLUGIN_ROOT — looks like the marketplace points at a remote GitHub source, not a local clone. Go back to step 2 and 'git clone' first, then 'marketplace add' the clone path."
-    exit 1
-  fi
-fi
-echo "Plugin source root: $SRC_ROOT"
+command -v sshgate-mcp >/dev/null 2>&1 && echo "mcp-bin: ok ($(command -v sshgate-mcp))" || echo "mcp-bin: MISSING — re-run 'make install-local' in your clone and ensure ~/go/bin is on PATH"
+command -v sshgate-signer-telegram >/dev/null 2>&1 && echo "signer-bin: ok" || echo "signer-bin: MISSING (only needed for Tier 2) — re-run 'make install-local'"
 ```
 
-If `go.mod` is missing, the marketplace was added with a remote source
-rather than a local clone path. Stop and send the user back to step 2.
+If `sshgate-mcp` is MISSING, the binary is not on `$PATH`: send the user
+back to step 2's `make install-local` and the PATH check. The MCP tool
+surface will be dead until `sshgate-mcp` resolves on `$PATH` and the
+session is reloaded.
 
 ## 4. Run /sshgate:setup
 
@@ -179,9 +180,12 @@ Tell the user:
 
 The setup command walks every step itself. For Tier 2 it will:
 
-- Build `bin/sshgate-mcp`, `bin/sshgate-gate-linux-amd64`, `bin/sshgate-signer-telegram`.
-- PAUSE for the user to run `sudo ${CLAUDE_PLUGIN_ROOT}/scripts/install.sh`
-  in a separate terminal.
+- Confirm the binaries from `make install-local` are on `$PATH`
+  (`sshgate-mcp`, `sshgate-signer-telegram`) and the gate cross-binary is
+  staged at `~/.config/sshgate/bin/sshgate-gate-linux-amd64`.
+- PAUSE for the user to run `sudo scripts/install.sh` from their clone
+  (e.g. `sudo ~/src/SSHGate/scripts/install.sh`) in a separate terminal —
+  the plugin cache has no `scripts/`, so the script runs from the clone.
 - Walk the Telegram config (user_id from @userinfobot, bot token from
   @BotFather, second install.sh pass).
 - Capture chat_id from a `/start` Telegram message.
@@ -199,12 +203,14 @@ After `/sshgate:setup` reports completion, run:
 /sshgate:status
 ```
 
-For a Tier 1 install with no servers yet registered, expect:
+For a Tier 1 install with no servers yet registered, expect (note the
+`status: not configured` line — the signer socket is absent on Tier 1,
+which is the normal read-only state, NOT an error):
 
 ```
 Signer
   socket:    /run/sshgatesigner/sock
-  reachable: no   (signer not configured for tier 1 — expected)
+  status:    not configured (read-only / Tier 1) — writes denied at the gate
 
 No servers registered. Add one with /sshgate:add <alias> <user@host>.
 ```
@@ -212,10 +218,13 @@ No servers registered. Add one with /sshgate:add <alias> <user@host>.
 For a Tier 2 install with no servers yet, expect the signer socket
 reachable. Either case is healthy at this point.
 
-If `signer_socket.reachable: no` AND the user picked Tier 2, the daemon
-didn't come up. Run `systemctl status sshgate-signer-telegram` and
+If status reports `configured: true` AND `reachable: no` (Tier 2 only — the
+socket file exists but the dial failed), the daemon didn't come up. Run
+`systemctl status sshgate-signer-telegram` and
 `journalctl -u sshgate-signer-telegram -n 30 --no-pager`, surface the
-output, and ask the user whether to keep debugging or roll back.
+output, and ask the user whether to keep debugging or roll back. On Tier 1
+a `not configured` signer is expected — do NOT debug a daemon that was
+never installed.
 
 ## 6. Tell the user the install is complete
 
