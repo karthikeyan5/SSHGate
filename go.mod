@@ -8,6 +8,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.51.0
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -25,5 +26,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.1 // indirect
 )
