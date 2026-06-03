@@ -74,9 +74,11 @@ type AddServerOutput struct {
 // consults when running AddServer. Defaults are populated when fields
 // are zero; tests inject overrides directly.
 type addServerCfg struct {
-	// GateBinaryPath is the local path to the cross-compiled
-	// gate binary. Default: bin/gate-linux-amd64 next to the
-	// running MCP binary.
+	// GateBinaryPath is the local path to the cross-compiled gate
+	// binary (sshgate-gate-linux-amd64). Default: resolved by
+	// defaultGateBinaryPath — $SSHGATE_GATE_BIN, then
+	// <configRoot>/bin/, then os.Executable-relative, then
+	// $CLAUDE_PLUGIN_ROOT/bin/.
 	GateBinaryPath string
 	// GatePubPath is the local path to the gate signing pubkey.
 	// Default: <configRoot>/pubkey-distrib/gate.pub.
@@ -214,7 +216,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	// Read local materials first so we fail fast before touching the
 	// remote.
 	gateBin, err := readLocalFile(cfg.GateBinaryPath, "gate binary",
-		"build it with `make gate-linux` first")
+		"run /sshgate:setup (or `make install-local`) to build sshgate-gate-linux-amd64 into ~/.config/sshgate/bin/")
 	if err != nil {
 		return AddServerOutput{}, err
 	}
@@ -518,34 +520,58 @@ func (r *Runner) resolveAddServerCfg() (addServerCfg, error) {
 	return cfg, nil
 }
 
-// defaultGateBinaryPath resolves the bundled gate-linux-amd64
-// binary. It checks $SSHGATE_PLUGIN_ROOT first (set by Claude Code at
-// plugin load), then falls back to <dir(os.Executable())>/../bin.
+// gateBinaryName is the canonical basename of the cross-compiled
+// remote gate binary (linux/amd64). It is the PREFIXED name produced
+// by `make sshgate-gate-linux` and `make install-local`. The old
+// unprefixed `gate-linux-amd64` is gone (audit B3).
+const gateBinaryName = "sshgate-gate-linux-amd64"
+
+// defaultGateBinaryPath resolves the cross-compiled gate binary. The
+// /plugin install cache strips src/ and bin/, so we cannot rely on a
+// path under the plugin cache. Resolution order (audit B3/M1/m1):
+//
+//  1. $SSHGATE_GATE_BIN — explicit operator override (absolute path).
+//  2. <configRoot>/bin/sshgate-gate-linux-amd64 — the STABLE location
+//     `make install-local` writes to (~/.config/sshgate/bin/).
+//  3. <dir(os.Executable())>/sshgate-gate-linux-amd64 — covers the
+//     `go install` layout where the gate sits beside sshgate-mcp in
+//     $GOPATH/bin (dev / belt-and-braces).
+//  4. $CLAUDE_PLUGIN_ROOT/bin/sshgate-gate-linux-amd64 — last-resort
+//     legacy path for a clone-as-plugin-root install that still ships
+//     a built bin/. (Note: this is CLAUDE_PLUGIN_ROOT, not the dead
+//     SSHGATE_PLUGIN_ROOT that was never set — audit m1.)
+//
+// Each candidate is stat-checked; the first that exists wins. If none
+// exists we return candidate (2) so readLocalFile surfaces a clean
+// error naming the stable location and the build command.
 func defaultGateBinaryPath() (string, error) {
-	if root := os.Getenv("SSHGATE_PLUGIN_ROOT"); root != "" {
-		return filepath.Join(root, "bin", "gate-linux-amd64"), nil
+	if env := os.Getenv("SSHGATE_GATE_BIN"); env != "" {
+		return env, nil
 	}
-	exe, err := os.Executable()
+
+	root, err := configRoot()
 	if err != nil {
-		return "", fmt.Errorf("os.Executable: %w", err)
+		return "", err
 	}
-	// Two layouts we expect:
-	//   <root>/bin/sshgate-mcp        (production plugin layout)
-	//   <root>/.../sshgate-mcp        (go test / dev)
-	// Try sibling first, then parent's bin dir.
-	dir := filepath.Dir(exe)
-	candidates := []string{
-		filepath.Join(dir, "gate-linux-amd64"),
-		filepath.Join(dir, "..", "bin", "gate-linux-amd64"),
+	configCandidate := filepath.Join(root, "bin", gateBinaryName)
+
+	candidates := []string{configCandidate}
+
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), gateBinaryName))
 	}
+	if pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT"); pluginRoot != "" {
+		candidates = append(candidates, filepath.Join(pluginRoot, "bin", gateBinaryName))
+	}
+
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
 	}
-	// Fall through with the first candidate; readLocalFile will
-	// surface a clean error mentioning the build target.
-	return candidates[0], nil
+	// None found: return the stable config-root candidate so the
+	// missing-file error points the operator at the right place.
+	return configCandidate, nil
 }
 
 // configRoot returns the SSHGate config root honouring
