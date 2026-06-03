@@ -74,20 +74,24 @@ follow https://github.com/karthikeyan5/SSHGate/blob/main/INSTALL.md to install s
 
 The agent clones the repo, registers it as a local marketplace, installs the plugin, and walks you through `/sshgate:setup`. You'll be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only). The whole flow is ~2 minutes for Tier 1, ~10 minutes for Tier 2.
 
-**Manual install.** Clone the repo, then in Claude Code:
+**Manual install.** Clone the repo, build the binaries onto your `$PATH`, then add the plugin:
 
 ```
+git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate
+cd ~/src/SSHGate && make install-local      # sshgate-mcp + sshgate-signer-telegram -> ~/go/bin; gate -> ~/.config/sshgate/bin
 /plugin marketplace add ~/src/SSHGate
 /plugin install sshgate@sshgate
 /reload-plugins
 /sshgate:setup
 ```
 
+(`make install-local` is required because Claude Code's `/plugin install` copies only the plugin subtree into its cache — not `src/`, `Makefile`, or `bin/` — so the MCP binary must be on your `$PATH`, not under the cache. Ensure `~/go/bin` is on `$PATH`.)
+
 `/sshgate:setup` walks you through Tier 1 first (read-only), and offers the Tier 2 upgrade in the same flow when you're ready. It probes on-disk state on every run, so re-running it is safe.
 
 Full step-by-step (for users without Claude Code, or anyone who wants to read what `/sshgate:setup` does under the hood): [`docs/install-step-by-step.md`](docs/install-step-by-step.md).
 
-Requirements: Linux with systemd, Go 1.22+, sudo (for Tier 2 only), a Telegram account (for Tier 2 only). Remote servers must be reachable over SSH and run Linux.
+Requirements: Go 1.25+; Linux with systemd (Tier 2 only — Tier 1 needs no systemd), sudo (Tier 2 only), a Telegram account (Tier 2 only). Remote servers must be reachable over SSH and run Linux.
 
 macOS: cross-compile only in v1.x; native install path is v1.2. See [the install guide](docs/install-step-by-step.md#macos-users) for status.
 
