@@ -12,7 +12,7 @@
 // Environment overrides:
 //
 //	$XDG_CONFIG_HOME         — config root (default ~/.config)
-//	$SSHGATE_SIGNER_SOCK  — signer socket (default /run/signer/sock)
+//	$SSHGATE_SIGNER_SOCK  — signer socket (default /run/sshgatesigner/sock)
 //
 // Stdio: stdout is the JSON-RPC channel (do not log there). stderr
 // is the operator log. stdin EOF is a clean shutdown signal.
@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	defaultSignerSock = "/run/signer/sock"
+	defaultSignerSock = "/run/sshgatesigner/sock"
 	// signTimeout covers the signer-side approval window (60s for
 	// Telegram in v2) plus a couple of seconds of socket slack.
 	signTimeout = 75 * time.Second
