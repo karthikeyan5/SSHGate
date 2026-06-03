@@ -376,3 +376,17 @@ This is the running list Karthi asked for. I append here as I go; nothing here b
 - **Component versions unified to `0.2.0`** (were plugin 0.1.0 / mcp 0.1.5 / signer 0.1.4). Minor; signals "install actually works now." FYI.
 
 **Open process question for the morning:** the "second way to review" — if you meant the billed `/code-review ultra` cloud review, I can't launch that myself (it's user-triggered). I'll have done a thorough dispatched code-review + an independent fresh-eyes pass + a security review. Do you want to additionally run `/code-review ultra` yourself in the morning over the branch?
+
+- **⚠️ Live Tier-2 install needs your hands.** I verified Tier-2 as far as possible without your hardware: `resolveInitPaths` unit-proven (derives `/var/lib/sshgatesigner`, socket `/run/sshgatesigner/sock`), `install.sh` `bash -n` + path/systemd-unit trace all consistent, the init→socket→key→pubkey chain now agrees end-to-end. But the actual `sudo ./scripts/install.sh` (creates the `sshgatesigner` user + systemd unit), the Telegram bot config, and a real signed-write-from-phone round-trip require a real systemd host + your Telegram + a remote server. The manual checklist is in the fix plan Task 5.4 Steps 4–5. **Please run that checklist once before relying on Tier-2** — Tier-1 (read-only) is fully proven and safe to hand to your tester now.
+
+---
+
+## ✅ Install-flow fix — COMPLETE + verified (branch `fix/install-flow-2026-06-03`) — 2026-06-04
+
+The fresh-user install was broken end-to-end (your tester couldn't install it). Root cause + fix, all on branch `fix/install-flow-2026-06-03` (20 commits), built via the audit→plan→Gate0-spec-review→subagent-implement→per-phase-review→verify pipeline:
+
+**Root cause (the thing that broke your tester):** `/plugin install` copies only component dirs (`.claude-plugin/`, `commands/`, `skills/`, `.mcp.json`) into the cache and STRIPS `src/`, `Makefile`, `bin/`. So `${CLAUDE_PLUGIN_ROOT}/bin/sshgate-mcp` (which `.mcp.json` named) could never exist → MCP server dead on arrival → no `sshgate.*` tools. Proven via your c3 plugin's `stt/` being stripped. **Fix: adopt c3's pattern** — `.mcp.json` runs the bare PATH command `sshgate-mcp`, built by `go install` into `~/go/bin` via `make install-local`. Plus 5 other distinct blockers (gate-binary name drift killing `/sshgate:add`; signer init hardcoding `/var/lib/signer` so Tier-2 install aborted; socket path `/run/signer/sock` vs `/run/sshgatesigner`; gate.pub never staged) — all fixed and unified on the `sshgatesigner` layout.
+
+**Verification (run by me):** unit `-race` suite green; integration suite (real Docker SSH through the gate) green; **hermetic fresh-user Tier-1 walkthrough proves the MCP server now starts + registers and the gate resolver finds the staged binary**; Tier-2 unit+trace consistent. gitleaks clean repo-wide. All 6 BLOCKER root-causes + 5 MAJOR + MINORs closed; full detail in `docs/audits/install-flow-audit-2026-06-03.md`.
+
+**Status:** functionally done + verified; Gate-4 triple review (code-review-guidelines + fresh-eyes + security) running. After it's clean → merge to main + push so your tester can install. Then I move to the v1.2 R2–R7 roadmap.
