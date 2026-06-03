@@ -37,7 +37,7 @@ and one concrete next step.
 - **The user denies any approval-related step (token paste, sudo
   prompt, Telegram link).** Stop. Do not re-prompt — ask why and
   offer to skip the tier or roll back.
-- **A required external dependency is missing (Go < 1.22, `jq`
+- **A required external dependency is missing (Go < 1.25, `jq`
   missing for the registry-enumeration step, `systemctl` absent
   because the user is on macOS or a non-systemd distro).** Tell the
   user which dependency is missing and stop; do not try to install
@@ -72,32 +72,37 @@ service unit.
 
 ## Step -1 — Plugin-load preflight
 
-Before probing on-disk state, verify the plugin is loaded from a local
-clone (not a remote-marketplace cache that ships only the plugin subtree
-without the build inputs). `${CLAUDE_PLUGIN_ROOT}` should resolve to a
-directory containing `go.mod` and `scripts/install.sh`.
+The MCP binary is on the user's `$PATH` (Claude Code's `/plugin install`
+strips `src/`/`bin/` from the cache, so it cannot live there). Verify the
+binary resolves AND locate the user's clone (which has `src/` for builds).
 
 ```bash
-test -f "${CLAUDE_PLUGIN_ROOT}/go.mod" && echo "src:ok" || echo "src:missing"
+command -v sshgate-mcp >/dev/null 2>&1 && echo "mcp-bin:ok ($(command -v sshgate-mcp))" || echo "mcp-bin:missing"
 ```
+
+Ask the user for their clone path if you don't already have it (it is where
+they ran `git clone` / `make install-local` — typically `~/src/SSHGate`).
+Verify the clone has the build inputs:
 
 ```bash
-test -x "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh" && echo "scripts:ok" || echo "scripts:missing"
+CLONE="${SSHGATE_CLONE:-$HOME/src/SSHGate}"
+test -f "$CLONE/go.mod" && echo "clone:ok ($CLONE)" || echo "clone:missing"
 ```
 
-If either is missing, tell the user verbatim:
+If `mcp-bin:missing`, tell the user verbatim:
 
-> "SSHGate's plugin cache is missing the build inputs (`go.mod` or
-> `scripts/install.sh`). This usually means the marketplace was added
-> from a remote GitHub source rather than a local clone, which ships
-> only the plugin subtree. Fix it:
+> "The `sshgate-mcp` binary is not on your `$PATH`. Claude Code's
+> `/plugin install` only copies the plugin subtree — it does not build or
+> ship binaries. Build them from your clone:
 >
-> 1. Clone the repo: `git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate`
-> 2. Re-add the marketplace from the clone: `/plugin marketplace add ~/src/SSHGate`
-> 3. Reinstall: `/plugin uninstall sshgate@sshgate && /plugin install sshgate@sshgate && /reload-plugins`
-> 4. Re-run `/sshgate:setup`."
+> 1. Clone if you haven't: `git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate`
+> 2. Build onto PATH: `cd ~/src/SSHGate && make install-local`
+> 3. Ensure `~/go/bin` (or `\`go env GOPATH\`/bin`) is on your PATH.
+> 4. `/reload-plugins`, then re-run `/sshgate:setup`."
 
-Stop on either failure. Do not silently proceed.
+If `clone:missing`, ask the user for the actual clone path and re-probe.
+Stop on either failure. Do not silently proceed. Remember the clone path as
+`$CLONE` — the build steps below run there, NOT in `${CLAUDE_PLUGIN_ROOT}`.
 
 ---
 
@@ -214,24 +219,30 @@ Stop.
 go version
 ```
 
-If not 1.22 or newer, tell the user to install Go from
+If not 1.25 or newer, tell the user to install Go from
 https://go.dev/dl/ and stop.
 
-### T1.2 — Build binaries
+### T1.2 — Build binaries (in the user's clone, NOT the plugin cache)
 
-Build `sshgate-mcp` and `sshgate-gate-linux-amd64`. sshgate-signer-telegram is NOT needed
-in tier 1; skip it.
+Build runs in `$CLONE` (the git clone, which has `src/`), never in
+`${CLAUDE_PLUGIN_ROOT}` (the cache has no `src/`). `make install-local`
+puts `sshgate-mcp` on `$PATH` and stages the remote gate binary at
+`~/.config/sshgate/bin/sshgate-gate-linux-amd64`. (`sshgate-signer-telegram`
+is also built but unused in Tier 1.)
 
 ```bash
-cd "${CLAUDE_PLUGIN_ROOT}" && go build -o bin/sshgate-mcp ./src/mcp/cmd/sshgate-mcp
+cd "$CLONE" && make install-local
 ```
+
+Confirm the gate cross-binary was staged and the MCP binary is on PATH:
 
 ```bash
-cd "${CLAUDE_PLUGIN_ROOT}" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-gate-linux-amd64 ./src/gate/cmd/sshgate-gate
+ls -la "${HOME}/.config/sshgate/bin/sshgate-gate-linux-amd64" && command -v sshgate-mcp
 ```
 
-After each build, run `ls -la ${CLAUDE_PLUGIN_ROOT}/bin/<name>` and
-report the size.
+Report both. If `sshgate-mcp` does not resolve, tell the user to add
+`~/go/bin` (or `` `go env GOPATH`/bin ``) to their `$PATH` and re-open the
+shell, then re-run.
 
 ### T1.3 — Create the SSHGate SSH key
 
@@ -284,11 +295,11 @@ Print verbatim (substituting the real PLUGIN_ROOT):
 >
 > - SSH key: ~/.config/sshgate/ssh/sshgate_ed25519
 > - Registry: ~/.config/sshgate/servers.json
-> - gate binary: <PLUGIN_ROOT>/bin/sshgate-gate-linux-amd64
+> - gate binary: ~/.config/sshgate/bin/sshgate-gate-linux-amd64
 >
-> Add a server:
+> Add a server (read-only — no signer yet on Tier 1):
 >
->     /sshgate:add <alias> <user@host>
+>     /sshgate:add <alias> <user@host> --read-only
 >
 > Reads will work through the gate; writes will be denied locally with:
 >
@@ -306,11 +317,21 @@ continue to **Tier 2 flow** (Tier-1 state is the prerequisite).
 This builds on Tier 1 (which must be in place — re-probe Step 0 if you
 got here without running Tier 1 first).
 
-### T2.1 — Build sshgate-signer-telegram
+### T2.1 — Confirm the signer binary + bin/ artifacts (already built by install-local)
+
+`make install-local` (run in T1.2) depends on `make build`, so it already
+produced the clone's `bin/*` artifacts — including `bin/sshgate-signer-telegram`
+and `bin/sshgate-gate-linux-amd64` — that `scripts/install.sh` (T2.2)
+consumes from `$CLONE/bin/`. Do NOT run a separate `make build`;
+`install-local` is the single build command.
+
+Just confirm the artifacts install.sh needs are present:
 
 ```bash
-cd "${CLAUDE_PLUGIN_ROOT}" && go build -o bin/sshgate-signer-telegram ./src/signer/cmd/sshgate-signer-telegram
+ls -la "$CLONE/bin/sshgate-signer-telegram" "$CLONE/bin/sshgate-gate-linux-amd64"
 ```
+
+If either is missing (e.g. T1.2 was skipped), run `cd "$CLONE" && make install-local`.
 
 ### T2.2 — Run the installer (first pass)
 
@@ -322,9 +343,9 @@ install (sshgatesigner user, /var/lib/sshgatesigner/ skeleton, systemd unit,
 
 > Open a separate terminal and run:
 >
->     sudo ${CLAUDE_PLUGIN_ROOT}/scripts/install.sh
+>     sudo $CLONE/scripts/install.sh
 >
-> (replace `${CLAUDE_PLUGIN_ROOT}` with the actual path printed below).
+> (replace `$CLONE` with the actual path printed below).
 >
 > The script is idempotent — safe to re-run if it fails partway. Tell
 > me when it's done.
@@ -332,7 +353,7 @@ install (sshgatesigner user, /var/lib/sshgatesigner/ skeleton, systemd unit,
 Print the resolved path with:
 
 ```bash
-echo "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
+echo "$CLONE/scripts/install.sh"
 ```
 
 After confirmation, verify the daemon:
@@ -418,7 +439,7 @@ the daemon.
 >
 > Then, in your sudo terminal, run:
 >
->     sudo ${CLAUDE_PLUGIN_ROOT}/scripts/install.sh
+>     sudo $CLONE/scripts/install.sh
 >
 > The script will detect the new `type = "telegram"` and prompt:
 >
