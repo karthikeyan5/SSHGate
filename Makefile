@@ -1,9 +1,9 @@
-.PHONY: all build test test-integration vet clean sshgate-gate-linux \
+.PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server
 
 all: vet test build
 
-build: sshgate-signer-server
+build: sshgate-signer-server sshgate-gate-linux
 	mkdir -p bin
 	go build -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
 	go build -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
@@ -43,7 +43,31 @@ darwin: sshgate-mcp-darwin sshgate-signer-telegram-darwin
 	@echo "darwin builds done; sshgate-gate remains linux-only (deployed to Linux remotes)"
 
 # Full cross-build matrix: linux laptop binaries + linux remote sshgate-gate + darwin laptop binaries.
-cross: build sshgate-gate-linux darwin
+cross: build darwin
+
+# install-local is the fresh-clone laptop install used by /sshgate:setup
+# and INSTALL.md. It depends on `build`, so ONE `make install-local`
+# produces everything the install needs:
+#   - <clone>/bin/*  (sshgate-mcp, sshgate-signer-telegram, sshgate-gate,
+#                     sshgate-gate-linux-amd64) for scripts/install.sh
+#   - $PATH binaries in $(go env GOPATH)/bin via `go install`
+#                     (.mcp.json now references the bare `sshgate-mcp`)
+#   - sshgate-gate-linux-amd64 staged into the STABLE config location the
+#     MCP's add_server resolver checks (~/.config/sshgate/bin/), decoupled
+#     from the plugin cache that `/plugin install` cannot keep src/ in.
+# Run from the user's clone (it has src/). Honors $XDG_CONFIG_HOME.
+install-local: build
+	go install ./src/mcp/cmd/sshgate-mcp
+	go install ./src/signer/cmd/sshgate-signer-telegram
+	mkdir -p "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -trimpath -ldflags='-s -w' \
+		-o "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/sshgate-gate-linux-amd64" \
+		./src/gate/cmd/sshgate-gate
+	@echo "install-local done:"
+	@echo "  <clone>/bin/* (incl. sshgate-gate-linux-amd64) -> for scripts/install.sh"
+	@echo "  sshgate-mcp, sshgate-signer-telegram -> $$(go env GOPATH)/bin (must be on PATH)"
+	@echo "  sshgate-gate-linux-amd64 -> $${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/"
 
 test:
 	go test -race ./...
