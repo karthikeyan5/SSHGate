@@ -10,7 +10,7 @@ the local signer socket and every registered server.
 Call the MCP tool `mcp__sshgate__status` with an empty input object.
 The tool returns:
 
-- `signer_socket`: `{ path, reachable, error }`
+- `signer_socket`: `{ path, configured, reachable, error }` (`configured` is true when the signer socket file exists; on Tier 1 it is false, which is normal)
 - `servers`: array of `{ alias, reachable, ping_ms, error }`
 
 Format the result as two short sections. Signer first — it's the

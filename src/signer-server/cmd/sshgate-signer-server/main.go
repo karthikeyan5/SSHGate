@@ -7,7 +7,7 @@
 // Flags:
 //
 //	--config <path>          TOML config (default: /etc/signer-server/config.toml
-//	                          or $VELSIGNER_SERVER_CONFIG)
+//	                          or $SSHGATE_SIGNER_SERVER_CONFIG)
 //	--api-key-file <path>    Single bearer-token file (0600). v2.0 only;
 //	                          v2.1 replaces with per-client keys + WebAuthn.
 //	--addr <host:port>       Listen address (default: :8443). TLS is
@@ -171,7 +171,7 @@ func loadAPIKey(path string) (string, error) {
 // the path is reserved for v2.1 when [auth], [tls], and [store]
 // blocks land.
 func defaultConfigPath() string {
-	if p := os.Getenv("VELSIGNER_SERVER_CONFIG"); p != "" {
+	if p := os.Getenv("SSHGATE_SIGNER_SERVER_CONFIG"); p != "" {
 		return p
 	}
 	return "/etc/signer-server/config.toml"
