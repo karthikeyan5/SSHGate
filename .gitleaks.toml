@@ -1,0 +1,21 @@
+# SSHGate gitleaks configuration.
+#
+# Extends gitleaks' default ruleset (so every built-in detector still runs
+# repo-wide) and adds ONE narrowly-scoped allowlist: the redactor's own test
+# corpus. Those files exist precisely to hold fake-but-secret-SHAPED strings
+# so the v1.2 redactor's scanner can be tested against them — they are
+# intentional fixtures, not real credentials. Allowlisting is path-scoped to
+# the redactor test files and its testdata so a real secret committed anywhere
+# else in the tree is still caught.
+title = "SSHGate"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Redactor test fixtures + rule-pattern files hold intentional secret-SHAPED strings: test files verify the scanner redacts them, and rules/*.go are the DETECTION regexes themselves (e.g. a -----BEGIN PRIVATE KEY----- pattern). None are real credentials. Scoped to the redactor; a real secret anywhere else is still caught."
+paths = [
+  '''src/redact/.*_test\.go$''',
+  '''src/redact/rules/.*\.go$''',
+  '''testdata/redact/.*''',
+]
