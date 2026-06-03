@@ -252,4 +252,19 @@ if ! systemctl is-active --quiet sshgate-signer-telegram; then
 fi
 
 log "sshgate-signer-telegram is active"
+
+# Step 10: stage gate.pub into the invoking user's MCP distribution
+# path so /sshgate:add (read-write) can find it without a manual copy.
+# add_server reads ~/.config/sshgate/pubkey-distrib/gate.pub (audit B6).
+PUBKEY_SRC="$SIGNER_HOME/keys/gate.pub"
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "$PUBKEY_SRC" ]; then
+    USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    if [ -n "$USER_HOME" ]; then
+        DISTRIB_DIR="$USER_HOME/.config/sshgate/pubkey-distrib"
+        log "staging gate.pub -> $DISTRIB_DIR/gate.pub (owner $SUDO_USER)"
+        install -d -m 0755 -o "$SUDO_USER" -g "$SUDO_USER" "$DISTRIB_DIR"
+        install -m 0644 -o "$SUDO_USER" -g "$SUDO_USER" "$PUBKEY_SRC" "$DISTRIB_DIR/gate.pub"
+    fi
+fi
+
 log "done"
