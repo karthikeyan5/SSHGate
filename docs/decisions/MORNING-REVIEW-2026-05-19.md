@@ -302,3 +302,77 @@ You flagged you still need to review these (no action from me until then). Quick
 4. **Long-option abbreviation handling** (commit `ad74ef8`): I implemented prefix-matching for known dangerous long-options (`--in*` → `--in-place`, `--rot*` → `--rotate`). This works for the cases we know about. Future bypass: an option we DIDN'T list still gets through. Worth a structural approach (parse the full GNU getopt grammar) or accept the rat-race?
 
 These are the only discussion-worthy points; everything else is mechanical. Ping when you want to walk through.
+
+---
+
+## ✅ Karthi's resolution of the 4 classifier questions — 2026-06-03
+
+Walked through via voice. Verdicts:
+
+1. **Landlock / kernel-level enforcement** → **DEFER, but track so we never lose it.** Karthi: "make sure we do the kernel-level fix later… add it to the todo somewhere if it's not already there." Already the lead entry in `docs/FUTURE.md` → "Kernel-level read enforcement (Linux Landlock)" with a trigger condition. Now also carried as a standing task so it surfaces in the task list, not just the backlog doc. **No code change now.**
+2. **`git -c <k>=<v>` conservative blanket-block** → **ACCEPTED as-is.** Karthi: "no comments there." The benign-flag UX cost (e.g. `git -c color.ui=never log` needs a tap) is acceptable. Closed.
+3. **`sed -f` / `awk -f` always WRITE** → **ACCEPTED as-is.** Karthi: "no comments there." Opaque-scriptfile → WRITE is the right conservative call. Closed.
+4. **Long-option abbreviation rat-race** → **UNSOLVED — keep in "needs figuring out."** Karthi: "we'll have to find a solution to it… keep it in things that needs to be figured out." Prefix-matching known-dangerous flags (shipped in `ad74ef8`) handles the catalogued cases; an *unlisted* dangerous long-option still slips through. The structural fix (parse the full GNU getopt grammar, or per-binary option tables) is an open problem. Tracked in `docs/FUTURE.md` → "Read-only gate hardening" and as a standing task. **No code change now** — flagged as open research.
+
+Net: questions 2 and 3 are closed (no change). Questions 1 and 4 stay open as tracked future work; neither blocks anything shipping.
+
+---
+
+## 🌙 Overnight autonomous goal — 2026-06-03
+
+Karthi's mandate (voice): fix the SSHGate install flow so a fresh user can actually install + use it; self-review before pushing (don't push anything broken or sensitive); then complete whatever roadmap is clear enough to finish without his input. Work through the night, no check-ins.
+
+Operating model unchanged: coordinator mode — Opus subagents implement, main session plans/verifies/commits. Every Karthi-attention decision logged here.
+
+**Order of work:**
+1. **Installability audit** (running — workflow `wf_d2f05458-693`) → verified blocker list.
+2. **Fix the install flow** (Tier 1 read-only first, then Tier 2 signer) until a fresh-clone walkthrough works end-to-end. Verify by actually tracing/executing each step.
+3. **Self-review + secret scan, then push** the install fixes.
+4. **Complete the clear roadmap** — v1.2 R2–R7 + audit gates — phase by phase, each verified before the next, per the subagent-driven method.
+
+Decisions that genuinely need Karthi go to the "⏸ MORNING DISCUSSION" block at the very bottom of this file; everything else I decide and log here.
+
+---
+
+## 🚦 Quality gates in force for this overnight run — 2026-06-03
+
+Karthi's instruction: strict gates so NO bad code (functionality) gets committed and NO bad spec gets into development. These are the gates I hold myself to. Any commit/spec that hasn't cleared its gate does not proceed.
+
+**Gate 0 — Spec gate (before any new spec/plan enters development).**
+- Spec written via the brainstorming→writing-plans discipline (or, for already-specced v1.2 work, the existing locked plan).
+- Self-review for placeholders / contradictions / scope creep / ambiguity.
+- A dedicated spec-review subagent confirms the plan is complete, internally consistent, and matches intent BEFORE any implementer touches code.
+- If the spec is wrong or unclear → it does NOT enter development; it goes to the morning-discussion list instead of guessing.
+
+**Gate 1 — Per-task implementation gate (subagent-driven-development two-stage review).**
+- Fresh implementer subagent per task, TDD (failing test first).
+- Stage A: spec-compliance reviewer subagent — built exactly what the task said, nothing extra, nothing missing.
+- Stage B: code-quality reviewer subagent — against `~/arogara/code-review/` guidelines (go.md, daemon guidelines, etc.).
+- Both stages must reach ✅ (review loop repeats until clean) before the task is marked done.
+
+**Gate 2 — Commit gate.**
+- `go build ./...` clean, `go vet ./...` clean, `go test -race ./...` green (plus integration suite where it applies). NEVER commit with a red suite.
+- I verify the actual command output myself (verification-before-completion) — no trusting a subagent's "tests pass" self-report.
+
+**Gate 3 — Push gate.**
+- gitleaks / PII scan (`~/arogara/pii-audit/scan.sh`) clean — no secret-shaped literals, no real user_id, nothing that trips GitHub push protection.
+- Diff self-reviewed. Only then push.
+
+**Gate 4 — Final completion gate (Karthi: "only then you're done").** Run when the overnight build is otherwise complete:
+1. **Full code review** against the `~/arogara/code-review/` guidelines project (dispatched, multi-dimension).
+2. **Second independent review lens** — a fresh-eyes review pass independent of the guidelines reviewer (different reviewer, adversarial). [If the "second way" Karthi meant is the billed `/code-review ultra` cloud review, that one is user-triggered — see morning-discussion list.]
+3. **Security review** — self-conducted threat-model + bypass audit, in the style of the existing `docs/audits/security-*` reports.
+All three must be clean (all BLOCKER/MAJOR fixed) before I declare the work done.
+
+---
+
+## ⏸ MORNING DISCUSSION — decisions taken overnight I'm not fully sure about (2026-06-03 run)
+
+This is the running list Karthi asked for. I append here as I go; nothing here blocked me overnight (I made a reasonable call and kept moving), but each is worth a second opinion in the morning.
+
+- **Install model changed: adopted the c3 PATH-binary pattern.** DECIDED (FYI, not blocking). The audit proved Claude Code's `/plugin install` strips everything except component dirs (`.claude-plugin/`, `commands/`, `skills/`, `.mcp.json`) — so `${CLAUDE_PLUGIN_ROOT}/bin/sshgate-mcp` and "build `src/` in the plugin root" can NEVER work. Proof: your own c3 plugin's `stt/` dir is stripped from its cache copy; c3 survives only because its `.mcp.json` uses a bare PATH command (`c3-claude-adapter`) built via `go install` to `~/go/bin`. SSHGate now does the same: `.mcp.json` → bare `sshgate-mcp`, binaries via `go install`, gate cross-binary staged to `~/.config/sshgate/bin/`. This is the only correct pattern; no real alternative. Mentioning it because it's a notable shift from the documented marketplace-cache model.
+- **`/sshgate:add` auto-falls back to read-only when no local signer pubkey exists.** DECIDED KEEP — please sanity-check. Rationale: it fails SAFE (read-only denies writes), LOUD (prints "deployed in read-only mode… run /sshgate:setup to add a signer, then re-run add to upgrade"), and recoverable. The alternative (hard-fail demanding an explicit `--read-only`) is worse UX for the dominant Tier-1 path. The only downside: a Tier-2 user whose pubkey staging silently failed gets a read-only server — but that surfaces in the printed message and in `/sshgate:status`, and read-only is the safe direction to fail. If you'd rather it hard-fail and force the explicit flag, say so.
+- **go.mod floor corrected to `go 1.25.0` (was a malformed `1.26.1`); docs raised 1.22 → 1.25.** Not a free choice: `go mod tidy` forces 1.25.0 because go-sdk, x/crypto, and the modernc.org/sqlite chain all declare `go 1.25.0`. Side effect: the documented minimum genuinely rises to Go 1.25, so users on 1.22–1.24 (who the old docs implied were fine) now must upgrade. Unavoidable given the deps. FYI.
+- **Component versions unified to `0.2.0`** (were plugin 0.1.0 / mcp 0.1.5 / signer 0.1.4). Minor; signals "install actually works now." FYI.
+
+**Open process question for the morning:** the "second way to review" — if you meant the billed `/code-review ultra` cloud review, I can't launch that myself (it's user-triggered). I'll have done a thorough dispatched code-review + an independent fresh-eyes pass + a security review. Do you want to additionally run `/code-review ultra` yourself in the morning over the branch?
