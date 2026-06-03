@@ -242,7 +242,10 @@ ls -la "${HOME}/.config/sshgate/bin/sshgate-gate-linux-amd64" && command -v sshg
 
 Report both. If `sshgate-mcp` does not resolve, tell the user to add
 `~/go/bin` (or `` `go env GOPATH`/bin ``) to their `$PATH` and re-open the
-shell, then re-run.
+shell, then re-run. Because `.mcp.json` invokes the bare PATH command
+`sshgate-mcp`, after adding `~/go/bin` to PATH the user must fully **restart**
+Claude Code (quit and relaunch) — not just `/reload-plugins` — so the
+`sshgate-mcp` server is spawned with the updated PATH.
 
 ### T1.3 — Create the SSHGate SSH key
 
@@ -289,7 +292,7 @@ test -s "${HOME}/.config/sshgate/servers.json" || echo '{"servers":{}}' > "${HOM
 
 ### T1.5 — Summarise
 
-Print verbatim (substituting the real PLUGIN_ROOT):
+Print verbatim:
 
 > SSHGate tier 1 (read-only) is ready.
 >

@@ -104,9 +104,9 @@ func run(args []string) int {
 	signer := &signpkg.Client{SocketPath: socketPath, Timeout: signTimeout}
 	sshClient := &sshpkg.Client{KeyPath: keyPath, KnownHostsPath: khPath, Timeout: sshTimeout}
 	runner := &tools.Runner{
-		Servers:           servers,
-		Sign:              signer,
-		SSH:               sshClient,
+		Servers:        servers,
+		Sign:           signer,
+		SSH:            sshClient,
 		SignerSockPath: socketPath,
 	}
 

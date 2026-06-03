@@ -260,6 +260,10 @@ PUBKEY_SRC="$SIGNER_HOME/keys/gate.pub"
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "$PUBKEY_SRC" ]; then
     USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
     if [ -n "$USER_HOME" ]; then
+        # Assumes the default ~/.config location; an operator who runs SSHGate
+        # with a custom $XDG_CONFIG_HOME must stage gate.pub there manually
+        # (sudo scrubs XDG_CONFIG_HOME, so install.sh cannot see it).
+        # add_server's read-only fallback fails safe if the path mismatches.
         DISTRIB_DIR="$USER_HOME/.config/sshgate/pubkey-distrib"
         log "staging gate.pub -> $DISTRIB_DIR/gate.pub (owner $SUDO_USER)"
         install -d -m 0755 -o "$SUDO_USER" -g "$SUDO_USER" "$DISTRIB_DIR"

@@ -128,7 +128,10 @@ Tell the user:
 >
 > Replace `~/src/SSHGate` with wherever you cloned. The `/reload-plugins`
 > AFTER `make install-local` is what makes the MCP tool surface appear (the
-> server spawns the now-on-PATH `sshgate-mcp` binary)."
+> server spawns the now-on-PATH `sshgate-mcp` binary). If `~/go/bin` was just
+> added to your PATH, fully **restart** Claude Code (quit and relaunch) — not
+> just `/reload-plugins` — so the `sshgate-mcp` server is spawned with the
+> updated PATH."
 
 Wait for the user to confirm completion and capture the clone path (we'll
 need it in step 3).

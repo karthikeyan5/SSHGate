@@ -24,7 +24,7 @@ test -f "${XDG_CONFIG_HOME:-$HOME/.config}/sshgate/pubkey-distrib/gate.pub" && e
 
   - `signer:yes` → `read_only = false` (Tier-2 signed-write deploy).
   - `signer:no` → **auto-fall back to read-only.** Set `read_only = true` and tell the user verbatim:
-    > "No local signer pubkey found (`~/.config/sshgate/pubkey-distrib/gate.pub` is absent), so '<alias>' is being deployed in read-only mode. Reads will work; writes are denied at the gate. Run /sshgate:setup to add a Telegram signer, then re-run /sshgate:add <alias> <user@host> to upgrade it to signed-write."
+    > "No local signer pubkey found (`~/.config/sshgate/pubkey-distrib/gate.pub` — or your $XDG_CONFIG_HOME equivalent — is absent), so '<alias>' is being deployed in read-only mode. Reads will work; writes are denied at the gate. Run /sshgate:setup to add a Telegram signer, then re-run /sshgate:add <alias> <user@host> to upgrade it to signed-write."
 
 Then call the MCP tool `mcp__sshgate__add_server` with:
 - `alias`: parsed alias
