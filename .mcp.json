@@ -1,8 +1,10 @@
 {
   "mcpServers": {
     "sshgate": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/sshgate-mcp",
-      "env": {}
+      "command": "sshgate-mcp",
+      "env": {
+        "SSHGATE_SIGNER_SOCK": "/run/sshgatesigner/sock"
+      }
     }
   }
 }
