@@ -56,7 +56,7 @@ func LoadKey(path string) (ed25519.PrivateKey, error) {
 // delete or rotate explicitly.
 //
 // The two paths may share a parent directory (the common case under
-// /var/lib/signer/keys); the directory-fsync is performed twice in
+// /var/lib/sshgatesigner/keys); the directory-fsync is performed twice in
 // that case, which is harmless.
 func GenerateKeyPair(privPath, pubPath string) error {
 	// Pre-flight: refuse on existing target.

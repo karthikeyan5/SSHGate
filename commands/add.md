@@ -19,7 +19,7 @@ If the required positional arguments are missing, print the argument-hint and st
 - Otherwise, probe for a local signing pubkey:
 
 ```bash
-test -f "${HOME}/.config/sshgate/pubkey-distrib/gate.pub" && echo "signer:yes" || echo "signer:no"
+test -f "${XDG_CONFIG_HOME:-$HOME/.config}/sshgate/pubkey-distrib/gate.pub" && echo "signer:yes" || echo "signer:no"
 ```
 
   - `signer:yes` → `read_only = false` (Tier-2 signed-write deploy).

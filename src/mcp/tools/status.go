@@ -47,8 +47,8 @@ type ServerStatus struct {
 // signer block stands on its own (always present); Servers is the
 // alphabetically-sorted per-registered-server health view.
 type StatusOutput struct {
-	SignerSocket SignerStatus `json:"signer_socket"`
-	Servers         []ServerStatus  `json:"servers"`
+	SignerSocket SignerStatus   `json:"signer_socket"`
+	Servers      []ServerStatus `json:"servers"`
 }
 
 const (
