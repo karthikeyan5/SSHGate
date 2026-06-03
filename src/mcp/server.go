@@ -43,7 +43,7 @@ func isCleanShutdown(err error) bool {
 // Version is the SSHGate MCP server's reported version string. It
 // flows into the JSON-RPC initialize response and from there into
 // Claude Code's session log.
-const Version = "0.1.5"
+const Version = "0.2.0"
 
 // ServerName MUST equal the .mcp.json key. Claude Code routes tool
 // names by "mcp__<ServerName>__<tool>" — a mismatch causes silent

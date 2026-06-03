@@ -50,7 +50,7 @@ import (
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
-const version = "0.1.4"
+const version = "0.2.0"
 
 type tomlConfig struct {
 	Paths struct {
