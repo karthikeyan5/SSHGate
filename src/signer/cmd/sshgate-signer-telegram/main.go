@@ -1,12 +1,13 @@
-// Command signer is the local approval daemon for SSHGate. It runs
-// as a dedicated OS user (`signer`) on Karthi's laptop, owns the
-// master Ed25519 signing key, and signs commands only after the
-// configured Backend returns Approved.
+// Command sshgate-signer-telegram is the local approval daemon for
+// SSHGate. It runs as a dedicated OS user (`sshgatesigner`) on the
+// operator's laptop, owns the master Ed25519 signing key, and signs
+// commands only after the configured Backend returns Approved.
 //
 // Flags:
 //
-//	--config <path>   TOML config (default: /etc/signer/config.toml or
-//	                  $VELSIGNER_CONFIG)
+//	--config <path>   TOML config (default:
+//	                  /var/lib/sshgatesigner/config/config.toml or
+//	                  $SSHGATE_SIGNER_CONFIG)
 //	--init            Generate keypair + skeleton config + state dirs, exit
 //	--dev             Only meaningful with --init: anchor generated paths
 //	                  under $XDG_RUNTIME_DIR. No-op at runtime.
@@ -68,7 +69,7 @@ type tomlConfig struct {
 
 // hostedConfig is the [backend.hosted] block, consulted only when
 // backend.type = "hosted". The v2 swap-point: setting this in
-// /etc/signer/config.toml redirects approval traffic from the
+// /var/lib/sshgatesigner/config/config.toml redirects approval traffic from the
 // local Telegram bot to the centralized signer-server.
 type hostedConfig struct {
 	// BaseURL is the signer-server origin (no trailing slash),
@@ -145,7 +146,7 @@ func run(args []string) int {
 		logf("%v", err)
 		return 1
 	}
-	// Note: assertion that we're running as the `signer` user
+	// Note: assertion that we're running as the `sshgatesigner` user
 	// (production) vs any user (--dev) is omitted from v1.4. The
 	// install script creates the sshgatesigner user and the systemd unit
 	// runs under `User=signer`; that's the load-bearing layer. If
@@ -413,13 +414,15 @@ func buildExplainer(c explainerConfig) (backend.Explainer, error) {
 	}, nil
 }
 
-// defaultConfigPath returns the value of $VELSIGNER_CONFIG if set,
-// otherwise /etc/signer/config.toml.
+// defaultConfigPath returns the value of $SSHGATE_SIGNER_CONFIG if set,
+// otherwise the canonical /var/lib/sshgatesigner/config/config.toml.
+// The systemd unit always passes --config explicitly; this default is
+// only used for hand-runs.
 func defaultConfigPath() string {
-	if p := os.Getenv("VELSIGNER_CONFIG"); p != "" {
+	if p := os.Getenv("SSHGATE_SIGNER_CONFIG"); p != "" {
 		return p
 	}
-	return "/etc/signer/config.toml"
+	return "/var/lib/sshgatesigner/config/config.toml"
 }
 
 // assertNonRoot returns an error if the process is running as UID 0.
