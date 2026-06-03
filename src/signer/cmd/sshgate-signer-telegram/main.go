@@ -462,6 +462,71 @@ func flockOrFail(lockPath string) (func(), error) {
 	}, nil
 }
 
+// initPaths holds the resolved on-disk locations for `--init`.
+type initPaths struct {
+	Root, KeyPath, PubPath, AuditPath, SockPath, ConfigPath string
+}
+
+// resolveInitPaths computes the init layout from the --config path. It
+// performs NO I/O (so it is unit-testable unprivileged); doInitFlow does
+// the MkdirAll/keygen/config-write using the result.
+//
+// Production (non-dev): root is the config file's GRANDPARENT
+// (<root>/config/config.toml -> <root>), keys/pub/audit live under
+// <root>/keys + <root>/log, and the socket is the fixed runtime path
+// /run/sshgatesigner/sock provisioned by the systemd unit
+// (RuntimeDirectory=sshgatesigner). A non-absolute configPath is rejected
+// — the path-relative derivation would otherwise silently mis-root the
+// state dir (audit B4/B5/B6).
+//
+// Dev (--init --dev): everything is anchored FLAT under the config file's
+// own directory (or $XDG_RUNTIME_DIR/signer-<pid> when no absolute
+// --config is given) so tests and local runs need no privileged /run or
+// /var/lib access. This preserves the existing dev layout exactly.
+func resolveInitPaths(configPath string, dev bool) (initPaths, error) {
+	if dev {
+		var root string
+		if configPath != "" && filepath.IsAbs(configPath) {
+			root = filepath.Dir(configPath)
+		} else {
+			runtime := os.Getenv("XDG_RUNTIME_DIR")
+			if runtime == "" {
+				runtime = filepath.Join(os.TempDir(), "signer-dev")
+			}
+			root = filepath.Join(runtime, "signer-"+strconv.Itoa(os.Getpid()))
+		}
+		return initPaths{
+			Root:       root,
+			KeyPath:    filepath.Join(root, "gate.key"),
+			PubPath:    filepath.Join(root, "gate.pub"),
+			AuditPath:  filepath.Join(root, "approvals.log"),
+			SockPath:   filepath.Join(root, "sock"),
+			ConfigPath: configPath,
+		}, nil
+	}
+
+	// Production: derive the state root from the --config grandparent so
+	// the operator controls the layout. install.sh passes
+	// --config /var/lib/sshgatesigner/config/config.toml ->
+	// root = /var/lib/sshgatesigner (audit B4 — previously hardcoded
+	// /var/lib/signer, which the unprivileged sshgatesigner user could
+	// not create).
+	if configPath == "" || !filepath.IsAbs(configPath) {
+		return initPaths{}, fmt.Errorf("non-dev --init requires an absolute --config path (e.g. /var/lib/sshgatesigner/config/config.toml); got %q", configPath)
+	}
+	root := filepath.Dir(filepath.Dir(configPath))
+	return initPaths{
+		Root:      root,
+		KeyPath:   filepath.Join(root, "keys", "gate.key"),
+		PubPath:   filepath.Join(root, "keys", "gate.pub"),
+		AuditPath: filepath.Join(root, "log", "approvals.log"),
+		// Socket is a fixed runtime path provisioned by the systemd unit
+		// (RuntimeDirectory=sshgatesigner) — audit B5.
+		SockPath:   "/run/sshgatesigner/sock",
+		ConfigPath: configPath,
+	}, nil
+}
+
 // doInitFlow generates a fresh keypair, creates the state directories,
 // and writes a skeleton TOML config at configPath. The flow is
 // idempotent only in the sense of "second run fails clearly" — it
@@ -472,31 +537,11 @@ func flockOrFail(lockPath string) (func(), error) {
 // so the operator can run the daemon entirely in userspace; --config is
 // resolved relative to that root if it does not look absolute.
 func doInitFlow(configPath string, dev bool) error {
-	var root, keyPath, pubPath, auditPath, sockPath string
-	if dev {
-		runtime := os.Getenv("XDG_RUNTIME_DIR")
-		if runtime == "" {
-			runtime = filepath.Join(os.TempDir(), "signer-dev")
-		}
-		// Anchor everything under one dir for easy cleanup. Use the
-		// config path's parent if the operator provided one in a
-		// non-default location.
-		if configPath != "" && filepath.IsAbs(configPath) {
-			root = filepath.Dir(configPath)
-		} else {
-			root = filepath.Join(runtime, "signer-"+strconv.Itoa(os.Getpid()))
-		}
-		keyPath = filepath.Join(root, "gate.key")
-		pubPath = filepath.Join(root, "gate.pub")
-		auditPath = filepath.Join(root, "approvals.log")
-		sockPath = filepath.Join(root, "sock")
-	} else {
-		root = "/var/lib/signer"
-		keyPath = filepath.Join(root, "keys", "gate.key")
-		pubPath = filepath.Join(root, "keys", "gate.pub")
-		auditPath = filepath.Join(root, "log", "approvals.log")
-		sockPath = "/run/signer/sock"
+	p, err := resolveInitPaths(configPath, dev)
+	if err != nil {
+		return err
 	}
+	keyPath, pubPath, auditPath, sockPath := p.KeyPath, p.PubPath, p.AuditPath, p.SockPath
 
 	// Make the directories the daemon will need.
 	dirs := []string{
