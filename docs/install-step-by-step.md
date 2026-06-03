@@ -74,7 +74,7 @@ trust you want to delegate.
 
 - Linux with systemd (Ubuntu 22.04+, Debian 12+, Arch — anything
   systemd-based).
-- Go 1.22 or newer on `$PATH` (https://go.dev/dl/).
+- Go 1.25 or newer on `$PATH` (https://go.dev/dl/).
 - `sudo` access on the local machine — we create a system user,
   install binaries to `/usr/local`, and drop a systemd unit.
 - A Telegram account and access to @BotFather to create the approval
@@ -118,18 +118,25 @@ Three steps, no sudo.
 go version
 ```
 
-You need 1.22 or newer. If missing, install from https://go.dev/dl/.
+You need 1.25 or newer. If missing, install from https://go.dev/dl/.
 
-### 2. Build the binaries
+### 2. Build the binaries onto your PATH
 
 ```bash
-go build -o bin/sshgate-mcp ./src/mcp/cmd/sshgate-mcp
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags='-s -w' \
-    -o bin/sshgate-gate-linux-amd64 ./src/gate/cmd/sshgate-gate
+make install-local
 ```
 
-(signer is **not** needed for tier 1.)
+This puts `sshgate-mcp` (and `sshgate-signer-telegram`, unused in Tier 1)
+in `~/go/bin` and the remote gate binary at
+`~/.config/sshgate/bin/sshgate-gate-linux-amd64`. The MCP server is spawned
+from your `$PATH`, so confirm it resolves:
+
+```bash
+command -v sshgate-mcp || echo "NOT ON PATH — add ~/go/bin (or \`go env GOPATH\`/bin) to PATH"
+```
+
+`make install-local` is required because Claude Code's `/plugin install`
+strips `src/` and `bin/` from the plugin cache.
 
 ### 3. Create the SSHGate SSH key + registry
 
@@ -174,13 +181,21 @@ exist). Three sudo touchpoints (two `install.sh` runs and the token
 paste prompt is folded inside the second one). Every step is
 idempotent: re-running after a partial failure is safe.
 
-### 1. Build signer
+### 1. Build the binaries
+
+`make install-local` is the single build command — it depends on
+`make build`, so it produces the clone's `bin/*` artifacts (including
+`bin/sshgate-signer-telegram` and `bin/sshgate-gate-linux-amd64`, which
+`scripts/install.sh` copies in step 2) AND puts the laptop binaries on
+your `$PATH` and stages the gate. If you already ran it for Tier 1, the
+artifacts are present — skip to step 2. Otherwise:
 
 ```bash
-go build -o bin/sshgate-signer-telegram ./src/signer/cmd/sshgate-signer-telegram
+make install-local
 ```
 
-(Or use `make build sshgate-gate-linux` to build all three binaries.)
+There is no separate `make build` to run: `install-local` already covers
+it.
 
 ### 2. Run the installer (first pass)
 
