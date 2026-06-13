@@ -19,8 +19,9 @@
 #     <repo>/bin/sshgate-signer-telegram
 #     <repo>/bin/sshgate-gate-linux-amd64
 #
-# Build them first with `make build` (or the three `go build` commands
-# in commands/setup.md).
+# Build them first with `make install-local` (the canonical command used
+# throughout the install docs; it runs `make build` plus stages binaries
+# onto your PATH and the gate cross-binary into ~/.config/sshgate/bin/).
 #
 #     sudo ./scripts/install.sh
 #
@@ -57,7 +58,7 @@ GATE_BIN="$REPO_ROOT/bin/sshgate-gate-linux-amd64"
 # MCP server isn't there.
 for bin in "$SSHGATE_MCP_BIN" "$SIGNER_BIN" "$GATE_BIN"; do
     if [ ! -f "$bin" ]; then
-        printf '[install] ERROR: %s not found; run `make build` first\n' "$bin" >&2
+        printf '[install] ERROR: %s not found; run `make install-local` in your clone first\n' "$bin" >&2
         exit 66
     fi
 done

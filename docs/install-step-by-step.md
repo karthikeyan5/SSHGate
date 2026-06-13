@@ -72,15 +72,23 @@ trust you want to delegate.
 
 ## Prerequisites
 
-- Linux with systemd (Ubuntu 22.04+, Debian 12+, Arch — anything
-  systemd-based).
-- Go 1.25 or newer on `$PATH` (https://go.dev/dl/).
-- `sudo` access on the local machine — we create a system user,
-  install binaries to `/usr/local`, and drop a systemd unit.
-- A Telegram account and access to @BotFather to create the approval
-  bot.
-- (Phase 3, not Phase 2:) one or more remote Linux servers reachable
-  over SSH; you'll add them later with `/sshgate:add`.
+**Tier 1 (read-only) needs only:**
+
+- Go 1.25 or newer on `$PATH` (https://go.dev/dl/) — to build the
+  binaries. The local side is plain Go; no sudo, no systemd, no Telegram.
+- One or more remote **Linux** servers reachable over SSH; you add them
+  with `/sshgate:add`. The gate runs on the remote — that's the only side
+  that must be Linux.
+
+**Tier 2 (local Telegram signer) additionally needs:**
+
+- A **systemd-based Linux** local machine (Ubuntu 22.04+, Debian 12+,
+  Arch — anything systemd-based); the signer runs as a systemd service.
+- `sudo` access on the local machine — we create a system user, install
+  binaries to `/usr/local`, and drop a systemd unit.
+- A Telegram account and access to @BotFather to create the approval bot.
+- `jq` on `$PATH` — `/sshgate:setup` uses it to enumerate registered
+  servers during the Tier-2 steps.
 
 ### macOS users
 
