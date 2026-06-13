@@ -1,5 +1,6 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
-	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server
+	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
+	preflight e2e smoke gitleaks
 
 all: vet test build
 
@@ -90,3 +91,44 @@ vet:
 
 clean:
 	rm -rf bin
+
+# ---------------------------------------------------------------------------
+# Verification strategy (see docs/E2E-TEST-STRATEGY.md)
+#
+#   make preflight   run before EVERY push      — fast, no Docker
+#   make e2e         run after a large build /  — full end-to-end, needs Docker
+#                    before a release
+# ---------------------------------------------------------------------------
+
+# preflight: the standing pre-push gate. Format-adjacent vet, the full race
+# unit suite, a secret scan of the commits about to be pushed, and a clean
+# build. No Docker, so it runs anywhere in well under a minute.
+preflight: vet test gitleaks build
+	@echo "preflight: OK — safe to push"
+
+# gitleaks scans the commits that would be pushed (origin/main..HEAD) for
+# secrets. Skips with a loud note if gitleaks is not installed — CI must have
+# it. Scanning the push delta (not full history) keeps intentional test
+# fixtures on other branches from failing an unrelated push.
+gitleaks:
+	@if command -v gitleaks >/dev/null 2>&1; then \
+		if git rev-parse --verify -q origin/main >/dev/null 2>&1; then \
+			gitleaks detect --no-banner -c .gitleaks.toml --log-opts="origin/main..HEAD"; \
+		else \
+			gitleaks detect --no-banner -c .gitleaks.toml; \
+		fi; \
+	else \
+		echo "gitleaks: NOT INSTALLED — install before pushing (https://github.com/gitleaks/gitleaks)"; \
+	fi
+
+# e2e: the full end-to-end strategy. Everything in preflight, plus the Docker
+# integration suite (real gate deploy + read / write-denial over SSH against a
+# live sshd) and the fresh-install keyless-startup smoke. Run this after a
+# large build or before cutting a release. Requires Docker.
+e2e: preflight test-integration smoke
+	@echo "e2e: OK — full end-to-end strategy passed"
+
+# smoke: the headless fresh-user regression — the MCP server must start with
+# no config/key (Tier-1 first-run) instead of dying and killing the tool surface.
+smoke:
+	@bash scripts/smoke-fresh-install.sh
