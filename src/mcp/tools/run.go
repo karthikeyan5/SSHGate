@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 
 	"github.com/karthikeyan5/sshgate/src/classify"
@@ -63,6 +65,15 @@ type Runner struct {
 	Servers *registry.Servers
 	Sign    SignClient
 	SSH     SSHRunner
+
+	// KeyPath is the absolute path to the SSH private key used by the
+	// SSH client. It is stored here so the run/run_batch paths can
+	// produce an actionable "run /sshgate:setup" error when the key
+	// file is absent, rather than surfacing an opaque open-failure.
+	// Must match the path configured on the SSH field's underlying
+	// client. Zero value disables the pre-flight check (tests that do
+	// not care about this error shape may leave it empty).
+	KeyPath string
 
 	// WriteTTLSec is the signature validity window for writes,
 	// passed to the daemon as ttl_seconds. Zero means
@@ -133,6 +144,9 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 }
 
 func (r *Runner) runRead(ctx context.Context, e registry.Entry, cmd string) (RunOutput, error) {
+	if err := r.checkKeyReady(); err != nil {
+		return RunOutput{Kind: "read"}, err
+	}
 	stdout, stderr, exit, err := r.SSH.Run(ctx, e.Host, e.User, e.Port, cmd)
 	if err != nil {
 		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "read"},
@@ -145,6 +159,20 @@ func (r *Runner) runRead(ctx context.Context, e registry.Entry, cmd string) (Run
 		Kind:     "read",
 		Approved: false,
 	}, nil
+}
+
+// checkKeyReady returns an actionable error when Runner.KeyPath is set
+// but the key file does not exist yet. This surfaces a "run
+// /sshgate:setup" prompt to the model rather than an opaque
+// open-failure from deep inside the SSH client.
+func (r *Runner) checkKeyReady() error {
+	if r.KeyPath == "" {
+		return nil // pre-flight check disabled (tests or legacy callers)
+	}
+	if _, err := os.Stat(r.KeyPath); errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("tools: SSHGate has no SSH key yet — run /sshgate:setup to create it")
+	}
+	return nil
 }
 
 func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string) (RunOutput, error) {

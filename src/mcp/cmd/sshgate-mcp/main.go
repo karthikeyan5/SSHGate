@@ -70,47 +70,20 @@ func run(args []string) int {
 		logger.Printf("config root: %v", err)
 		return 1
 	}
-	regPath := filepath.Join(cfgRoot, "servers.json")
-	keyPath := filepath.Join(cfgRoot, "ssh", "sshgate_ed25519")
-	khPath := filepath.Join(cfgRoot, "known_hosts")
-
-	servers, err := registry.New(regPath)
-	if err != nil {
-		logger.Printf("registry: %v", err)
-		return 1
-	}
-
-	// Fail-fast: refuse to start without the SSH key. Anything later
-	// would either succeed and SSH would fail at first use, or fail
-	// in a confusing way. Better to surface the missing-key state at
-	// startup so the operator can run /sshgate:setup.
-	if err := requireFile(keyPath, 0o600); err != nil {
-		logger.Printf("ssh key: %v", err)
-		return 1
-	}
-
-	// known_hosts is created on first contact, so we only require
-	// that the file (if it exists) is mode 0600.
-	if err := requireFileIfExists(khPath, 0o600); err != nil {
-		logger.Printf("known_hosts: %v", err)
-		return 1
-	}
 
 	socketPath := os.Getenv("SSHGATE_SIGNER_SOCK")
 	if socketPath == "" {
 		socketPath = defaultSignerSock
 	}
 
-	signer := &signpkg.Client{SocketPath: socketPath, Timeout: signTimeout}
-	sshClient := &sshpkg.Client{KeyPath: keyPath, KnownHostsPath: khPath, Timeout: sshTimeout}
-	runner := &tools.Runner{
-		Servers:        servers,
-		Sign:           signer,
-		SSH:            sshClient,
-		SignerSockPath: socketPath,
+	server, err := buildServer(cfgRoot, socketPath, logger)
+	if err != nil {
+		logger.Printf("startup: %v", err)
+		return 1
 	}
 
-	server := &mcp.Server{Runner: runner, Logger: logger}
+	keyPath := filepath.Join(cfgRoot, "ssh", "sshgate_ed25519")
+	regPath := filepath.Join(cfgRoot, "servers.json")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -122,6 +95,58 @@ func run(args []string) int {
 	}
 	logger.Printf("shutdown")
 	return 0
+}
+
+// buildServer constructs the MCP server (runner + SSH client + registry)
+// for the given cfgRoot and signer socket, without calling Serve. This
+// is the testable seam: tests can call buildServer and inspect the
+// returned *mcp.Server (or error) without blocking on Serve.
+//
+// Security invariant: if the SSH key file EXISTS with insecure
+// permissions (looser than 0600), buildServer returns a non-nil error
+// and startup is aborted. If the key is simply absent, buildServer logs
+// a warning and continues — the SSH client loads the key lazily at dial
+// time, so a later /sshgate:setup will make the key available without a
+// server restart.
+func buildServer(cfgRoot, socketPath string, logger *log.Logger) (*mcp.Server, error) {
+	regPath := filepath.Join(cfgRoot, "servers.json")
+	keyPath := filepath.Join(cfgRoot, "ssh", "sshgate_ed25519")
+	khPath := filepath.Join(cfgRoot, "known_hosts")
+
+	servers, err := registry.New(regPath)
+	if err != nil {
+		return nil, fmt.Errorf("registry: %w", err)
+	}
+
+	// If the SSH key exists but has insecure permissions, abort: an
+	// existing world-readable key is a security violation regardless of
+	// whether we're in a fresh-install state.
+	if err := requireFileIfExists(keyPath, 0o600); err != nil {
+		return nil, fmt.Errorf("ssh key: %w", err)
+	}
+	// Warn (stderr only) when the key is simply absent — Tier-1 users
+	// land here at /reload-plugins time, before /sshgate:setup runs.
+	if _, statErr := os.Stat(keyPath); errors.Is(statErr, fs.ErrNotExist) {
+		logger.Printf("no SSH key at %s yet — starting in unconfigured mode; server tools need it (run /sshgate:setup). status/list work without it.", keyPath)
+	}
+
+	// known_hosts is created on first contact; only enforce 0600 when
+	// the file already exists.
+	if err := requireFileIfExists(khPath, 0o600); err != nil {
+		return nil, fmt.Errorf("known_hosts: %w", err)
+	}
+
+	signer := &signpkg.Client{SocketPath: socketPath, Timeout: signTimeout}
+	sshClient := &sshpkg.Client{KeyPath: keyPath, KnownHostsPath: khPath, Timeout: sshTimeout}
+	runner := &tools.Runner{
+		Servers:        servers,
+		Sign:           signer,
+		SSH:            sshClient,
+		KeyPath:        keyPath,
+		SignerSockPath: socketPath,
+	}
+
+	return &mcp.Server{Runner: runner, Logger: logger}, nil
 }
 
 // configRoot returns the sshgate config root, honouring
