@@ -87,21 +87,93 @@ func dateRule(args []string) Kind {
 	return KindRead
 }
 
-// ipRule: iproute2 `ip` is read for show/list/get/monitor/save but WRITES
-// host network state with action verbs (add/del/set/change/replace/...).
-// `ip` was a nil (always-READ) entry, so `ip addr add` / `ip link set` /
-// `ip route add` reconfigured the host unsigned on a read-only server. We
-// match on the action verb (not the OBJECT), and deliberately omit up/down
-// because iproute2 accepts them as read filters (`ip link show up`).
+// ipRule: iproute2 `ip [OPTIONS] OBJECT [ACTION ...]` is read ONLY for the
+// inspection actions (show/list/get/monitor/save + help) or when no action
+// token is present (object-only, e.g. `ip a`, `ip link`). Any other action
+// token reconfigures the host and is a WRITE.
+//
+// The previous rule matched a fixed denylist of full-word write verbs, so
+// iproute2's unambiguous ABBREVIATIONS slipped through and ran unsigned:
+// `ip a a 10.0.0.1/24 dev eth0` (addr add), `ip r a default via X` (route
+// add), `ip l s eth0 up` (link set), `ip n a ...` (neigh add). It was also a
+// nil-style allowlist for `ip -batch FILE`, which runs an opaque command
+// file. We now FAIL SAFE: only a recognized READ action keeps READ.
+//
+// Action classification is prefix-based to honor iproute2's abbreviation
+// matching, but a prefix that matches BOTH a read verb and a write verb is
+// AMBIGUOUS and falls to WRITE — so `s` (show/save vs set/restore family)
+// makes `ip l s eth0 up` a WRITE. Use the unambiguous `sh` for addr-show.
+// Cited by the 2026-06-14 adversarial review.
 func ipRule(args []string) Kind {
+	// Any batch/force option runs an opaque command file or bypasses safety
+	// prompts — always WRITE. iproute2 uses single-dash long options.
 	for _, a := range args {
 		switch a {
-		case "add", "del", "delete", "set", "change", "replace", "append",
-			"flush", "modify", "remove", "restore":
+		case "-b", "-batch", "--batch", "-force", "--force":
 			return KindWrite
 		}
 	}
-	return KindRead
+	// The first non-flag token is the OBJECT; the second is the ACTION.
+	var object, action string
+	have := 0
+	for _, a := range args {
+		if a == "" || a[0] == '-' {
+			continue
+		}
+		have++
+		switch have {
+		case 1:
+			object = a
+		case 2:
+			action = a
+		}
+		if have == 2 {
+			break
+		}
+	}
+	_ = object // object identity is irrelevant; we classify on the action
+	if action == "" {
+		// Object-only (or bare `ip`): a status query, e.g. `ip a`, `ip link`.
+		return KindRead
+	}
+	if ipActionIsRead(action) {
+		return KindRead
+	}
+	return KindWrite
+}
+
+// ipReadVerbs are the iproute2 actions that only observe state.
+var ipReadVerbs = []string{"show", "list", "get", "monitor", "save", "help"}
+
+// ipWriteVerbs are the common iproute2 actions that mutate state. The list is
+// only used for AMBIGUITY detection (a token that prefix-matches both a read
+// and a write verb is treated as WRITE); any unrecognized action is WRITE
+// anyway, so the list does not need to be exhaustive.
+var ipWriteVerbs = []string{
+	"add", "del", "delete", "set", "change", "chg", "replace", "append",
+	"prepend", "flush", "modify", "remove", "restore", "reset", "enslave",
+}
+
+// ipActionIsRead reports whether action unambiguously names a read-only
+// iproute2 verb: it is a prefix of some read verb and a prefix of NO write
+// verb. A prefix that matches both is ambiguous and reported false (WRITE).
+func ipActionIsRead(action string) bool {
+	matchesRead := false
+	for _, v := range ipReadVerbs {
+		if strings.HasPrefix(v, action) {
+			matchesRead = true
+			break
+		}
+	}
+	if !matchesRead {
+		return false
+	}
+	for _, v := range ipWriteVerbs {
+		if strings.HasPrefix(v, action) {
+			return false // ambiguous read/write prefix => fail safe to WRITE
+		}
+	}
+	return true
 }
 
 // ifconfigRule: `ifconfig` with no interface, only flags (-a/-s/-v), or a
@@ -119,6 +191,88 @@ func ifconfigRule(args []string) Kind {
 	}
 	if positionals >= 2 {
 		return KindWrite
+	}
+	return KindRead
+}
+
+// timedatectlRule: `timedatectl` is read for its status/inspection
+// subcommands (status/show/show-timesync/timesync-status/list-timezones) and
+// the bare no-subcommand form (which prints status). Every other subcommand
+// — set-time, set-timezone, set-ntp, set-local-rtc — MUTATES the system clock
+// or timezone (the same write class as the already-fixed `date -s`), so it is
+// a WRITE. `timedatectl` was a nil (always-READ) entry, so every set-* ran
+// unsigned on a read-only server. Cited by the 2026-06-14 adversarial review.
+func timedatectlRule(args []string) Kind {
+	sub := firstNonFlag(args)
+	switch sub {
+	case "", "status", "show", "show-timesync", "timesync-status",
+		"list-timezones":
+		return KindRead
+	}
+	return KindWrite
+}
+
+// dmesgRule: `dmesg` is read for printing the kernel ring buffer, but several
+// flags clear or change it: --clear/-C (clear), -c/--read-clear (print then
+// clear), -D/-E (disable/enable console logging), -n/--console-level (set the
+// console log level). `dmesg` was a nil (always-READ) entry, so these ran
+// unsigned. Cited by the 2026-06-14 adversarial review.
+func dmesgRule(args []string) Kind {
+	for _, a := range args {
+		switch a {
+		case "--clear", "-C", "-c", "--read-clear", "-D", "--console-off",
+			"-E", "--console-on", "-n", "--console-level":
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// ssRule: `ss` is read for socket inspection, but `-K`/`--kill` forcibly
+// closes matching sockets — a state mutation. `ss` was a nil (always-READ)
+// entry, so `ss -K ...` ran unsigned. Cited by the 2026-06-14 review.
+func ssRule(args []string) Kind {
+	for _, a := range args {
+		if a == "-K" || a == "--kill" {
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// lastlogRule: `lastlog` is read for reporting last-login times, but
+// `-C`/--clear and `-S`/--set WRITE the lastlog database. `lastlog` was a nil
+// (always-READ) entry, so these ran unsigned. Cited by the 2026-06-14 review.
+func lastlogRule(args []string) Kind {
+	for _, a := range args {
+		switch a {
+		case "-C", "--clear", "-S", "--set":
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// lessRule: `less` is read for paging files, but its log-file options write a
+// copy of the input to a named file: `-o FILE`/`-O FILE` (the `-O` form
+// overwrites without prompting) and `--log-file FILE`/`--LOG-FILE FILE`.
+// `less` was a nil (always-READ) entry, so `less -o /tmp/x file` wrote a file
+// unsigned. The output file may be bundled (`-o/tmp/x`) or the next arg.
+// `--log-file=FILE` / `--LOG-FILE=FILE` are also handled. Cited by the
+// 2026-06-14 adversarial review.
+func lessRule(args []string) Kind {
+	for _, a := range args {
+		switch a {
+		case "-o", "-O", "--log-file", "--LOG-FILE":
+			return KindWrite
+		}
+		if strings.HasPrefix(a, "--log-file=") || strings.HasPrefix(a, "--LOG-FILE=") {
+			return KindWrite
+		}
+		// Bundled short form: -o<file> / -O<file>.
+		if len(a) > 2 && a[0] == '-' && (a[1] == 'o' || a[1] == 'O') {
+			return KindWrite
+		}
 	}
 	return KindRead
 }

@@ -374,7 +374,7 @@ type argRule func(args []string) Kind
 var readAllowlist = map[string]argRule{
 	// File inspection.
 	"cat":      nil,
-	"less":     nil,
+	"less":     lessRule,
 	"more":     nil,
 	"head":     nil,
 	"tail":     nil,
@@ -412,7 +412,7 @@ var readAllowlist = map[string]argRule{
 	"id":          nil,
 	"groups":      nil,
 	"date":        dateRule,
-	"timedatectl": nil,
+	"timedatectl": timedatectlRule,
 	// `env` is special: it is allowed as a read-only print-the-environment
 	// command, but with any positional argument it acts as a wrapper for
 	// another command. envRule recursively classifies the wrapped command
@@ -434,7 +434,7 @@ var readAllowlist = map[string]argRule{
 	"htop":       nil,
 	"pgrep":      nil,
 	"lsof":       nil,
-	"ss":         nil,
+	"ss":         ssRule,
 	"netstat":    nil,
 	"ip":         ipRule,
 	"ifconfig":   ifconfigRule,
@@ -447,9 +447,9 @@ var readAllowlist = map[string]argRule{
 
 	// Logs / who.
 	"journalctl": journalctlRule,
-	"dmesg":      nil,
+	"dmesg":      dmesgRule,
 	"last":       nil,
-	"lastlog":    nil,
+	"lastlog":    lastlogRule,
 	"w":          nil,
 	"who":        nil,
 
