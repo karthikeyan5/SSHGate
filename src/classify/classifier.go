@@ -95,33 +95,52 @@ func hasPrintable(s string) bool {
 // at top level (outside quotes). Any such construct is opaque to the
 // classifier and routes the whole command through the gate.
 func containsSubstitution(s string) bool {
-	var quote byte
+	// Track single- and double-quote contexts SEPARATELY. In /bin/sh only
+	// SINGLE quotes are fully literal; command substitution `$(...)` and
+	// backticks STILL expand inside DOUBLE quotes. Suppressing detection
+	// inside double quotes (the old behavior) let `cat "$(rm -rf x)"`
+	// classify READ yet execute the rm — a read-only-gate bypass. A single
+	// quote inside double quotes (e.g. `"it's $(rm)"`) is a literal byte,
+	// not a quote opener, so the two states must be tracked independently.
+	var inSingle, inDouble bool
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if quote != 0 {
-			if c == quote {
-				quote = 0
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
 			}
-			continue
-		}
-		switch c {
-		case '\'', '"':
-			quote = c
-		case '`':
-			return true
-		case '$':
-			if i+1 < len(s) && s[i+1] == '(' {
+		case inDouble:
+			switch c {
+			case '"':
+				inDouble = false
+			case '`':
 				return true
+			case '$':
+				if i+1 < len(s) && s[i+1] == '(' {
+					return true
+				}
 			}
-		case '<', '>':
-			// Process substitution: `<(cmd)` or `>(cmd)`. We must NOT
-			// confuse `>(` with the output redirect `>` — the redirect
-			// check runs separately via hasTopLevelRedirect, and a bare
-			// `>` followed by anything other than `(` is a redirect, not
-			// a process substitution. Here we only flag the `<(` / `>(`
-			// pair.
-			if i+1 < len(s) && s[i+1] == '(' {
+		default: // unquoted
+			switch c {
+			case '\'':
+				inSingle = true
+			case '"':
+				inDouble = true
+			case '`':
 				return true
+			case '$':
+				if i+1 < len(s) && s[i+1] == '(' {
+					return true
+				}
+			case '<', '>':
+				// Process substitution `<(cmd)` / `>(cmd)` only occurs
+				// unquoted (it does not expand inside quotes). The output
+				// redirect `>` is handled separately by hasTopLevelRedirect;
+				// here we only flag the `<(` / `>(` pair.
+				if i+1 < len(s) && s[i+1] == '(' {
+					return true
+				}
 			}
 		}
 	}
