@@ -396,7 +396,7 @@ var readAllowlist = map[string]argRule{
 	"fgrep": nil,
 	"awk":   awkRule,
 	"sed":   sedRule,
-	"sort":  nil,
+	"sort":  sortRule,
 	"uniq":  nil,
 	"diff":  nil,
 	"comm":  nil,
@@ -411,7 +411,7 @@ var readAllowlist = map[string]argRule{
 	"whoami":      nil,
 	"id":          nil,
 	"groups":      nil,
-	"date":        nil,
+	"date":        dateRule,
 	"timedatectl": nil,
 	// `env` is special: it is allowed as a read-only print-the-environment
 	// command, but with any positional argument it acts as a wrapper for
@@ -436,8 +436,8 @@ var readAllowlist = map[string]argRule{
 	"lsof":       nil,
 	"ss":         nil,
 	"netstat":    nil,
-	"ip":         nil,
-	"ifconfig":   nil,
+	"ip":         ipRule,
+	"ifconfig":   ifconfigRule,
 	"ping":       nil,
 	"dig":        nil,
 	"nslookup":   nil,
@@ -749,23 +749,93 @@ func sedScriptIsDangerous(script string) bool {
 	// or `/regex/w /tmp/x`. We scan for the command letter followed by
 	// a space, with the preceding char being address-shaped: digit,
 	// `;`, `}`, `{`, `/`, or start-of-string.
-	if strings.Contains(script, "/w ") || strings.Contains(script, "/r ") || strings.Contains(script, "/R ") {
+	if strings.Contains(script, "/w ") || strings.Contains(script, "/W ") ||
+		strings.Contains(script, "/r ") || strings.Contains(script, "/R ") {
 		return true
 	}
+	// `s` substitution whose flag run contains an exec (`e`) or write
+	// (`w`/`W`) flag, for ANY delimiter — sed accepts `s|a|b|e`, `s,a,b,e`,
+	// etc., so the `/`-only substring checks above are bypassed simply by
+	// picking another delimiter.
+	if sedSCommandExecsOrWrites(script) {
+		return true
+	}
+	// Command-position exec/write letters: e (execute a command), w/W (write
+	// pattern space to a file), r/R (read a file). A command letter is in
+	// command position when preceded by start-of-script, a numeric address,
+	// a last-line `$`, or a block brace/separator, and is followed by its
+	// argument (a space). `e` may also take NO argument (execute the pattern
+	// space), terminated by end-of-script, `;`, or `}`. The `/`-preceded
+	// (regex-addressed) forms are already covered by the substring checks
+	// above (`/e`, `/w `, ...), so `/` is intentionally not in the set here.
 	for i := 0; i < len(script); i++ {
 		c := script[i]
-		if (c == 'r' || c == 'R' || c == 'w') && i+1 < len(script) && script[i+1] == ' ' {
-			if i == 0 {
-				return true
-			}
-			p := script[i-1]
-			if p >= '0' && p <= '9' {
-				return true
-			}
-			if p == ';' || p == '}' || p == '{' {
-				return true
-			}
+		if c != 'r' && c != 'R' && c != 'w' && c != 'W' && c != 'e' {
+			continue
 		}
+		hasSpaceArg := i+1 < len(script) && script[i+1] == ' '
+		noArgE := c == 'e' && (i+1 == len(script) || script[i+1] == ';' || script[i+1] == '}')
+		if !hasSpaceArg && !noArgE {
+			continue
+		}
+		if i == 0 {
+			return true
+		}
+		p := script[i-1]
+		if (p >= '0' && p <= '9') || p == ';' || p == '}' || p == '{' || p == '$' {
+			return true
+		}
+	}
+	return false
+}
+
+// sedSCommandExecsOrWrites reports whether script contains an `s///`
+// substitution whose flag run includes `e` (execute the substitution result
+// as a shell command) or `w`/`W` (write the result to a file). It handles
+// any single-character delimiter, so `s|a|b|e` / `s,a,b,e` cannot evade the
+// slash-only checks. It is intentionally conservative about what counts as a
+// delimiter (any non-alphanumeric, non-space, non-backslash byte right after
+// `s`); the `s` of an ordinary word is followed by a letter and ignored.
+func sedSCommandExecsOrWrites(script string) bool {
+	for i := 0; i+1 < len(script); i++ {
+		if script[i] != 's' {
+			continue
+		}
+		d := script[i+1]
+		if d == ' ' || d == '\t' || d == '\n' || d == '\\' ||
+			(d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || (d >= '0' && d <= '9') {
+			continue // not a delimiter — `s` is data, not a substitute command
+		}
+		// Walk past the pattern and replacement (two more delimiters),
+		// honoring backslash escapes.
+		j := i + 2
+		seen := 0
+		for j < len(script) && seen < 2 {
+			if script[j] == '\\' {
+				j += 2
+				continue
+			}
+			if script[j] == d {
+				seen++
+			}
+			j++
+		}
+		// Read the flag run that follows the closing delimiter.
+		for ; j < len(script); j++ {
+			c := script[j]
+			if c == 'e' || c == 'w' || c == 'W' {
+				return true
+			}
+			if (c >= '0' && c <= '9') || c == 'g' || c == 'p' ||
+				c == 'i' || c == 'I' || c == 'm' || c == 'M' {
+				continue // benign substitution flag
+			}
+			break // command separator or non-flag — this s-command is clean
+		}
+		if seen < 2 {
+			break // malformed/truncated; nothing more to scan
+		}
+		i = j - 1 // resume after this s-command (loop's i++ advances past it)
 	}
 	return false
 }
@@ -782,6 +852,15 @@ func sedScriptIsDangerous(script string) bool {
 //   - `> "` / `>"` / `>>` — redirect to a file
 func awkRule(args []string) Kind {
 	for _, a := range args {
+		// `-f FILE` / `-fFILE` / `--file FILE` / `--file=FILE` loads the awk
+		// program from a FILE whose content is opaque to us — it can call
+		// system()/print to a file just like an inline program. Mirror sed's
+		// `-f` handling and treat it as WRITE. (NOTE: `-F` is the field
+		// separator, a read flag — keep the lowercase/`-f` match exact.)
+		if a == "-f" || a == "--file" || strings.HasPrefix(a, "--file=") ||
+			(strings.HasPrefix(a, "-f") && len(a) > 2) {
+			return KindWrite
+		}
 		if len(a) == 0 || a[0] == '-' {
 			continue
 		}
@@ -809,6 +888,86 @@ func awkProgIsDangerous(prog string) bool {
 		return true
 	}
 	return false
+}
+
+// sortRule: `sort` is read unless it writes its output to a file via
+// `-o FILE` / `-oFILE` / `--output FILE` / `--output=FILE`. `sort` was
+// previously a nil (always-READ) allowlist entry, so `sort -o /etc/x in`
+// — a clobbering write — ran unsigned on a read-only server.
+func sortRule(args []string) Kind {
+	for _, a := range args {
+		if a == "-o" || a == "--output" ||
+			strings.HasPrefix(a, "--output=") ||
+			(strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-') {
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// dateRule: `date` is read for display (`date`, `date +FMT`, `-u`, `-d STR`,
+// `-r FILE`, `-f FILE`) but WRITES the system clock with `-s`/`--set` or a
+// bare MMDDhhmm-style positional. `date` was a nil (always-READ) entry, so
+// `date -s ...` / `date 010100002020` set the clock unsigned on a read-only
+// server. Display flags that consume a value (-d/--date, -r/--reference,
+// -f/--file) are skipped so their argument is not mistaken for a set spec.
+func dateRule(args []string) Kind {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-s" || a == "--set" || strings.HasPrefix(a, "--set=") ||
+			(strings.HasPrefix(a, "-s") && !strings.HasPrefix(a, "--") && len(a) > 2):
+			return KindWrite
+		case a == "-d" || a == "--date" || a == "-r" || a == "--reference" ||
+			a == "-f" || a == "--file":
+			i++ // value belongs to a display flag, not a set positional
+		case len(a) > 0 && (a[0] == '-' || a[0] == '+'):
+			// other flags (-u, --utc, -I[FMT], --rfc-3339=, ...) and the
+			// `+FORMAT` output spec are display-only.
+			continue
+		default:
+			// a bare positional that is not `+FORMAT` is the MMDDhhmm[[CC]YY]
+			// clock-set form.
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// ipRule: iproute2 `ip` is read for show/list/get/monitor/save but WRITES
+// host network state with action verbs (add/del/set/change/replace/...).
+// `ip` was a nil (always-READ) entry, so `ip addr add` / `ip link set` /
+// `ip route add` reconfigured the host unsigned on a read-only server. We
+// match on the action verb (not the OBJECT), and deliberately omit up/down
+// because iproute2 accepts them as read filters (`ip link show up`).
+func ipRule(args []string) Kind {
+	for _, a := range args {
+		switch a {
+		case "add", "del", "delete", "set", "change", "replace", "append",
+			"flush", "modify", "remove", "restore":
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// ifconfigRule: `ifconfig` with no interface, only flags (-a/-s/-v), or a
+// single interface name is a read (status query). A second positional means
+// it is configuring the interface (`ifconfig eth0 192.168.1.5`,
+// `ifconfig eth0 up`, `ifconfig eth0 netmask ...`) — a WRITE. `ifconfig` was
+// a nil (always-READ) entry, so every such reconfiguration ran unsigned.
+func ifconfigRule(args []string) Kind {
+	positionals := 0
+	for _, a := range args {
+		if len(a) > 0 && a[0] == '-' {
+			continue
+		}
+		positionals++
+	}
+	if positionals >= 2 {
+		return KindWrite
+	}
+	return KindRead
 }
 
 // curlRule: `curl` is read unless it specifies a write HTTP method,
