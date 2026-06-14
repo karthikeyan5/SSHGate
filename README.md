@@ -177,6 +177,24 @@ Full diagram, trust-domain breakdown, wire protocol, and threat model: [`docs/sp
 
 Short version: three trust domains — your user (runs Claude + the MCP, holds the SSH client key), the `sshgatesigner` user (runs signer-telegram, holds the master signing key + bot token), and Telegram (authenticates your phone). Each remote server runs gate as the only thing the SSHGate SSH key can invoke, enforced by OpenSSH's `command=` forcing. Reads pass; writes need a fresh Ed25519 signature from signer-telegram, which signer-telegram only produces after a verified phone tap.
 
+## Security testing — the gate red-team rig
+
+The gate's read-only classifier is the security backbone (a write that
+misclassifies as a read runs unsigned). `gate-redteam` is a standing,
+disposable harness that fires an adversarial corpus + fuzzer at the **real
+gate** in a throwaway container and reports, per command, whether a write
+slipped through — with an in-container write tripwire that catches a
+mutation **anywhere**, by any mechanism. Bring it up once, fire many
+commands, tear it down:
+
+```sh
+go build -o bin/gate-redteam ./cmd/gate-redteam
+./bin/gate-redteam up && ./bin/gate-redteam campaign --iterations 1 && ./bin/gate-redteam down
+```
+
+Full threat model, verdict schema, and agent-operator prompt:
+[`internal/redteam/README.md`](internal/redteam/README.md).
+
 ---
 
 ## License
