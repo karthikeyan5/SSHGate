@@ -559,17 +559,17 @@ jq -r '.servers | keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || 
 
 If the list is empty, skip to T2.7 — there's nothing to upgrade.
 
-For each registered alias, tell the user to run (from a Claude
-session attached to this MCP server, since the upgrade routes through
-the bootstrap leg which needs the operator's normal SSH access):
-
-> For each alias listed above, re-run `/sshgate:add <alias> <user@host>`
-> (without `--read-only`) using the SAME bootstrap credentials you
-> used originally. The `add_server` tool will detect the existing
-> restricted entry and push the new gate.pub idempotently.
-
-(If a real automation hook lands later — e.g. an `upgrade_server`
-MCP tool — surface that here instead.)
+> ⚠️ **In-place tier-1 → tier-2 upgrade is not yet wired to a command.**
+> Re-running `/sshgate:add <alias> <user@host>` on an already-registered
+> alias is currently **rejected** ("alias already registered; use
+> sshgate.revoke_server first") — it does NOT upgrade in place. The deploy
+> routine that pushes gate.pub and clears the read-only flag
+> (`UpgradeServerToSigning`) exists in the code but is not yet bound to any
+> MCP tool or slash command (tracked as a follow-up — see
+> `docs/decisions/2026-06-14-autonomous-run-log.md`). Until it is wired, a
+> server registered read-only stays read-only; deploy a signed-write
+> server by registering it (with the signer already set up) rather than
+> upgrading an existing read-only entry.
 
 ### T2.7 — Final summary
 

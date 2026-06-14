@@ -484,6 +484,16 @@ func TestPhase3UpgradeServerToSigning(t *testing.T) {
 	if !strings.Contains(string(probe), "PRESENT") {
 		t.Errorf("gate.pub still absent after upgrade (stdout=%q)", probe)
 	}
+
+	// And the registry's read-only flag must be CLEARED by the upgrade —
+	// otherwise the run/run_batch short-circuit keeps refusing signed writes
+	// after a successful upgrade (the false-green the 2026-06-14 triple
+	// review caught: this test previously asserted only gate.pub presence).
+	if e, ok := servers.Get("upgrade-target"); !ok {
+		t.Fatal("entry vanished after upgrade")
+	} else if e.ReadOnly {
+		t.Error("ReadOnly still true after UpgradeServerToSigning; want cleared")
+	}
 }
 
 func TestPhase3AddServer_NoGoroutineLeaks(t *testing.T) {

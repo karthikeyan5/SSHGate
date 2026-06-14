@@ -712,6 +712,16 @@ func TestUpgradeServerToSigning_HappyPath(t *testing.T) {
 	if ssh.calls != 1 {
 		t.Errorf("verify probe ran %d times; want 1", ssh.calls)
 	}
+	// The upgrade must CLEAR the registry's read-only flag — otherwise the
+	// run/run_batch read-only short-circuit keeps refusing writes after a
+	// successful upgrade (the false-green the 2026-06-14 triple review caught).
+	if e, ok := reg.Get("live"); !ok {
+		t.Fatal("entry vanished after upgrade")
+	} else if e.ReadOnly {
+		t.Error("ReadOnly still true after UpgradeServerToSigning; want cleared")
+	} else if e.Host != "h.example.com" || e.Port != 2200 || e.User != "u" {
+		t.Errorf("upgrade clobbered entry fields: %+v", e)
+	}
 }
 
 // newRegistryWithEntry is a white-box (package tools) helper mirroring the

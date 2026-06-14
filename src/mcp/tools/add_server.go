@@ -542,6 +542,16 @@ func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, boots
 		}
 		return fmt.Errorf("tools: verify probe did not return SSHGATE_OK (got %q)", string(probe))
 	}
+
+	// gate.pub is now on the host, so writes are signed-and-verified. Clear
+	// the registry's read-only flag by re-adding the entry with
+	// ReadOnly=false (preserving Host/Port/User/AddedAt) — Servers.Add
+	// overwrites in place. Without this, the run/run_batch read-only
+	// short-circuit would keep refusing writes after a successful upgrade.
+	entry.ReadOnly = false
+	if err := r.Servers.Add(alias, entry); err != nil {
+		return fmt.Errorf("tools: clear read-only flag for %q after upgrade: %w", alias, err)
+	}
 	return nil
 }
 

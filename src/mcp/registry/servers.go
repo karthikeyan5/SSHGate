@@ -23,8 +23,10 @@ type Entry struct {
 	// mode (no gate.pub pushed, no signer). Writes to a ReadOnly
 	// server are denied at the gate, so the run/run_batch paths
 	// short-circuit before soliciting a wasted Telegram approval.
-	// Cleared (implicitly) once UpgradeServerToSigning re-adds the
-	// entry as signed-write.
+	// Cleared by UpgradeServerToSigning, which re-adds the entry with
+	// ReadOnly=false after pushing gate.pub. NOTE: that routine is not yet
+	// bound to a user-facing MCP tool / slash command (a flagged follow-up),
+	// so a read-only entry stays read-only in practice until it is wired.
 	ReadOnly bool `json:"read_only,omitempty"`
 }
 
