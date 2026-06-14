@@ -52,10 +52,14 @@ import (
 // threading it through every call site.
 var sessionSalt [32]byte
 
-// redactRules is the compiled-in v1.2 ruleset (sshgate-native +
-// gitleaks-vendored). Loaded by run() at startup. Daemon guideline 1.6
-// keeps this out of init() so test imports of the package don't pay
-// the cost.
+// redactRules, when non-nil, is a test-injected redaction ruleset.
+// Production leaves it nil and compiles the real v1.2 ruleset
+// (redactrules.Combined() — sshgate-native + gitleaks-vendored)
+// LAZILY in execChild: only the execute path needs it, so a per-command
+// gate spawn that denies a write, fails signature verification, or
+// answers the install probe never pays the ~1 MB regex-compile cost.
+// Kept out of init() (daemon guideline 1.6) so test imports don't pay
+// it either.
 var redactRules []redact.Rule
 
 // Exit codes (BSD sysexits subset).
@@ -79,9 +83,6 @@ func run() int {
 	if _, err := rand.Read(sessionSalt[:]); err != nil {
 		logf("crypto/rand: %v", err)
 		return exitSoftware
-	}
-	if redactRules == nil {
-		redactRules = redactrules.Combined()
 	}
 
 	raw := os.Getenv("SSH_ORIGINAL_COMMAND")
@@ -177,9 +178,16 @@ func run() int {
 func execChild(cmd string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	// Compile the redaction ruleset lazily — only this execute path needs
+	// it. A test may inject redactRules beforehand (the package-var seam);
+	// honour that and compile the real ruleset only when it is unset.
+	rules := redactRules
+	if rules == nil {
+		rules = redactrules.Combined()
+	}
 	exit, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
 		SessionSalt: sessionSalt,
-		Rules:       redactRules,
+		Rules:       rules,
 	})
 	if err != nil {
 		logf("%v", err)
