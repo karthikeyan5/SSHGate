@@ -75,6 +75,21 @@ func TestDaemon_RejectsBadRequests(t *testing.T) {
 			wantErrSubstr: "exceeds max",
 		},
 		{
+			// Regression: a ttl past the int64-nanosecond overflow point
+			// (~9.2e9s). The pre-fix clamp did time.Duration(ttl)*Second,
+			// which overflowed NEGATIVE and let this slip past the cap to
+			// the un-armed mock — hanging until the package timeout. The
+			// fixed clamp compares in int64 seconds, so it rejects here.
+			name:          "ttl past int64-nanosecond overflow point",
+			req:           `{"kind":"sign","request_id":"r1","commands":[{"server":"p","cmd":"ls","ttl_seconds":9300000000}]}`,
+			wantErrSubstr: "exceeds max",
+		},
+		{
+			name:          "ttl at MaxInt64",
+			req:           `{"kind":"sign","request_id":"r1","commands":[{"server":"p","cmd":"ls","ttl_seconds":9223372036854775807}]}`,
+			wantErrSubstr: "exceeds max",
+		},
+		{
 			name:          "unknown extra json field",
 			req:           `{"kind":"sign","request_id":"r1","commands":[{"server":"p","cmd":"ls","ttl_seconds":60}],"bogus":true}`,
 			wantErrSubstr: "malformed",

@@ -231,3 +231,75 @@ func TestVerifySigned(t *testing.T) {
 		}
 	})
 }
+
+// TestVerifySigned_ValidityOverflow pins the int64-overflow class of TTL
+// bypass at the gate. The pre-fix gate computed the window as
+// time.Duration(exp-ts)*time.Second and compared against MaxSigValidity.
+// time.Duration is int64 NANOSECONDS, so a window beyond ~9.2e9 seconds
+// overflowed NEGATIVE and sailed under the cap — letting a single signed
+// (or signer-minted) envelope live for ~290 billion years. The gate is the
+// authoritative cap, so it MUST reject these regardless of what the signer
+// produced. Each row asserts refusal (never a returned inner cmd).
+func TestVerifySigned_ValidityOverflow(t *testing.T) {
+	pub, priv := genKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	nowUnix := now.Unix()
+
+	const maxInt64 = int64(9223372036854775807)
+
+	cases := []struct {
+		name    string
+		ts, exp int64
+		wantErr error
+	}{
+		{
+			// window 9.3e9s: Duration(exp-ts)*Second overflows int64-ns
+			// negative; pre-fix this was ACCEPTED.
+			name: "window just past the int64-nanosecond overflow point",
+			ts:   nowUnix, exp: nowUnix + 9_300_000_000,
+			wantErr: gate.ErrValidityTooLong,
+		},
+		{
+			name: "exp pinned at MaxInt64",
+			ts:   nowUnix, exp: maxInt64,
+			wantErr: gate.ErrValidityTooLong,
+		},
+		{
+			// huge gap AND a negative ts — the subtraction itself would
+			// overflow if the ts<=0 guard didn't fire first.
+			name: "negative ts widening the window",
+			ts:   -100, exp: maxInt64,
+			wantErr: gate.ErrBadFormat,
+		},
+		{
+			name: "ts zero",
+			ts:   0, exp: nowUnix + 60,
+			wantErr: gate.ErrBadFormat,
+		},
+		{
+			name: "exp not greater than ts (zero window)",
+			ts:   nowUnix, exp: nowUnix,
+			wantErr: gate.ErrBadFormat,
+		},
+		{
+			name: "exp less than ts (negative window)",
+			ts:   nowUnix, exp: nowUnix - 100,
+			wantErr: gate.ErrBadFormat,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			p := sigwire.SigPayload{Cmd: "rm -rf /data", TS: tc.ts, Exp: tc.exp, Nonce: "n-overflow"}
+			line := signedLine(t, priv, p)
+			inner, err := gate.VerifySigned(line, pub, now)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("VerifySigned err = %v; want %v", err, tc.wantErr)
+			}
+			if inner != "" {
+				t.Errorf("inner cmd = %q; want empty string on rejection (no command may leak through)", inner)
+			}
+		})
+	}
+}

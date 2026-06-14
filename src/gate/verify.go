@@ -47,14 +47,25 @@ func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time) (innerCm
 		return "", ErrBadSig
 	}
 
-	// Time bounds. The spec requires now < exp; we enforce now >= exp
-	// as expired. Use Unix seconds for parity with the payload fields.
+	// Time bounds. The gate is the AUTHORITATIVE validity cap, independent
+	// of the signer — so a buggy, leaked, or hostile signer can never mint
+	// an over-long or never-expiring token. Reject malformed timestamps
+	// BEFORE any arithmetic: this both rejects nonsense (ts/exp <= 0, or a
+	// non-positive window) and guarantees 0 < TS < Exp so the Exp-TS
+	// subtraction below cannot overflow.
 	nowUnix := now.Unix()
+	if payload.TS <= 0 || payload.Exp <= 0 || payload.Exp <= payload.TS {
+		return "", ErrBadFormat
+	}
 	if nowUnix >= payload.Exp {
 		return "", ErrExpired
 	}
-	validity := time.Duration(payload.Exp-payload.TS) * time.Second
-	if validity > sigwire.MaxSigValidity {
+	// Compare the window in int64 SECONDS. Multiplying an attacker-controlled
+	// seconds value into an int64-ns time.Duration (Duration(exp-ts)*Second)
+	// overflows NEGATIVE for windows > ~9.2e9s, so a `> MaxSigValidity` check
+	// silently ACCEPTS a ~290-billion-year token. The guards above keep both
+	// operands positive with Exp > TS, so this subtraction stays in range.
+	if payload.Exp-payload.TS > int64(sigwire.MaxSigValidity/time.Second) {
 		return "", ErrValidityTooLong
 	}
 	return payload.Cmd, nil

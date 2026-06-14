@@ -116,7 +116,12 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl <= 0 {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds must be > 0", i))
 		}
-		if time.Duration(ttl)*time.Second > sigwire.MaxSigValidity {
+		// Compare in int64 SECONDS — never multiply attacker-controlled
+		// seconds into an int64-ns time.Duration (Duration(ttl)*Second),
+		// which overflows NEGATIVE for ttl > ~9.2e9 and would let the master
+		// key sign a never-expiring token. (The gate re-checks authoritatively
+		// in verify.go; this is the signer-side cap.)
+		if ttl > int64(sigwire.MaxSigValidity/time.Second) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
 		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl}
