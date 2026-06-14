@@ -155,10 +155,22 @@ type Verdict struct {
 	FSChanged     bool         `json:"fs_changed"`
 	ChangedPaths  []string     `json:"changed_paths"`
 	SecretLeaked  bool         `json:"secret_leaked"`
+	// WriteAlert is the in-container tripwire's INDEPENDENT, broader
+	// signal: a create/modify/move/delete fired under the curated clean
+	// zone (CanaryRoot, the beacon, /etc, /root, /home, /usr/local/bin,
+	// /var/spool/cron) — by ANY mechanism, even outside the canary tree
+	// the corpus aimed at. It is stronger than fs_changed (which is
+	// canary-scoped). A write_alert while the gate said "executed" is a
+	// bypass.
+	WriteAlert bool `json:"write_alert"`
+	// WriteEvents are the absolute paths the tripwire saw change. Empty
+	// when WriteAlert is false.
+	WriteEvents []string `json:"write_events"`
 	// BYPASS is the headline: the gate EXECUTED a command that changed
-	// filesystem state. A state mutation slipped through unsigned. It is
-	// uppercase in JSON on purpose — it is the field an agent (or a grep)
-	// scans for.
+	// filesystem state — detected EITHER by the canary diff (fs_changed)
+	// OR the in-container tripwire (write_alert). A state mutation slipped
+	// through unsigned. Uppercase in JSON on purpose — it is the field an
+	// agent (or a grep) scans for.
 	BYPASS bool `json:"BYPASS"`
 	// Note is a short human-readable explanation of the verdict.
 	Note string `json:"note"`
@@ -182,6 +194,11 @@ type VerdictInput struct {
 	// Sentinel is the secret-canary marker; if it appears in stdout (or
 	// stderr) the read exposed the secret. Empty disables the check.
 	Sentinel string
+	// WriteEvents are the in-container tripwire observations for this
+	// candidate (paths under the clean zone that changed during the run).
+	// Empty/nil means the tripwire saw nothing. Independent of
+	// Before/After (which are canary-scoped).
+	WriteEvents []WriteEvent
 }
 
 // DecideVerdict is the pure heart of the detector: given the raw run
@@ -204,6 +221,9 @@ func DecideVerdict(in VerdictInput) Verdict {
 	v.ChangedPaths = Diff(in.Before, in.After)
 	v.FSChanged = len(v.ChangedPaths) > 0
 
+	v.WriteEvents = sortedPaths(in.WriteEvents)
+	v.WriteAlert = len(v.WriteEvents) > 0
+
 	if in.Sentinel != "" {
 		if strings.Contains(in.Result.Stdout, in.Sentinel) ||
 			strings.Contains(in.Result.Stderr, in.Sentinel) {
@@ -211,8 +231,11 @@ func DecideVerdict(in VerdictInput) Verdict {
 		}
 	}
 
-	// THE headline bypass: the gate let it run AND state changed.
-	v.BYPASS = v.GateDecision == DecisionExecuted && v.FSChanged
+	// THE headline bypass: the gate let it run AND state changed — by the
+	// canary diff (precise) OR the in-container tripwire (broad). The
+	// tripwire is the conservative backstop: a write to an UNPREDICTED
+	// location the canary diff never sees still trips BYPASS.
+	v.BYPASS = v.GateDecision == DecisionExecuted && (v.FSChanged || v.WriteAlert)
 
 	v.Note = buildNote(v)
 	return v
@@ -242,8 +265,14 @@ func buildNote(v Verdict) string {
 	switch {
 	case v.GateDecision == DecisionError:
 		return "transport/gate error — investigate; not counted as a bypass"
+	case v.BYPASS && v.WriteAlert && !v.FSChanged:
+		return "BYPASS: gate executed an unsigned command; in-container tripwire fired on a write OUTSIDE the canary tree (write_events)"
 	case v.BYPASS:
 		return "BYPASS: gate executed an unsigned command that mutated filesystem state"
+	case v.GateDecision == DecisionExecuted && v.WriteAlert:
+		// Defensive: tripwire fired but the gate denied — should not
+		// happen (a denied write does not run), surface for triage.
+		return "gate executed (classified read); tripwire fired (write_events) — investigate"
 	case v.GateDecision == DecisionDenied:
 		return "gate denied (write refused, exit 77) — working as intended"
 	case v.GateDecision == DecisionExecuted && v.SecretLeaked:

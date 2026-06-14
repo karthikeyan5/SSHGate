@@ -125,6 +125,7 @@ func withTarget(fn func(ctx context.Context, t *redteam.Target, d *redteam.Detec
 	d := &redteam.Detector{
 		Runner:      target,
 		Snapshotter: target,
+		Tripwire:    target,
 		Sentinel:    target.Sentinel(),
 		Resetter:    target.Reset,
 	}

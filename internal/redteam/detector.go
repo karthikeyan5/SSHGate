@@ -18,6 +18,17 @@ type Snapshotter interface {
 	Snapshot(ctx context.Context) (Snapshot, error)
 }
 
+// Tripwirer is the in-container write tripwire: a cursor primitive that
+// reads, deterministically, every write under the curated clean zone
+// between a mark and a read. The real implementation (*Target) reads the
+// inotify event-log delta (or the snapshot fallback); tests supply a
+// fake. Optional on the Detector — nil disables the tripwire and the
+// verdict falls back to the canary-scoped fs_changed signal alone.
+type Tripwirer interface {
+	WriteMark(ctx context.Context) (Marker, error)
+	WriteEventsSince(ctx context.Context, m Marker) ([]WriteEvent, error)
+}
+
 // Detector is the trustworthy core: snapshot -> run -> snapshot -> diff
 // -> verdict. It depends only on the two interfaces above plus the
 // sentinel, so it runs identically against a fake (unit tests) and the
@@ -25,6 +36,11 @@ type Snapshotter interface {
 type Detector struct {
 	Runner      GateRunner
 	Snapshotter Snapshotter
+	// Tripwire, if non-nil, is the in-container write tripwire. The
+	// detector takes a mark before Run and reads events after, surfacing
+	// write_alert/write_events on the verdict — an independent, broader
+	// bypass signal than the canary-scoped fs_changed. nil disables it.
+	Tripwire Tripwirer
 	// Sentinel is the secret-canary marker checked against stdout/stderr.
 	Sentinel string
 	// Resetter, if non-nil, is called before each Test to restore the
@@ -43,6 +59,21 @@ func (d *Detector) Test(ctx context.Context, category, cmd string) (Verdict, err
 			return Verdict{}, err
 		}
 	}
+
+	// Mark the tripwire BEFORE the canary snapshot + run, so it captures
+	// every write the command triggers regardless of where it lands.
+	var (
+		mark   Marker
+		haveTW bool
+	)
+	if d.Tripwire != nil {
+		m, err := d.Tripwire.WriteMark(ctx)
+		if err != nil {
+			return Verdict{}, err
+		}
+		mark, haveTW = m, true
+	}
+
 	before, err := d.Snapshotter.Snapshot(ctx)
 	if err != nil {
 		return Verdict{}, err
@@ -52,12 +83,22 @@ func (d *Detector) Test(ctx context.Context, category, cmd string) (Verdict, err
 	if err != nil {
 		return Verdict{}, err
 	}
+
+	var writeEvents []WriteEvent
+	if haveTW {
+		writeEvents, err = d.Tripwire.WriteEventsSince(ctx, mark)
+		if err != nil {
+			return Verdict{}, err
+		}
+	}
+
 	return DecideVerdict(VerdictInput{
-		Cmd:      cmd,
-		Category: category,
-		Result:   res,
-		Before:   before,
-		After:    after,
-		Sentinel: d.Sentinel,
+		Cmd:         cmd,
+		Category:    category,
+		Result:      res,
+		Before:      before,
+		After:       after,
+		Sentinel:    d.Sentinel,
+		WriteEvents: writeEvents,
 	}), nil
 }
