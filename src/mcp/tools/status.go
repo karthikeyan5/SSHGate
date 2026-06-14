@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"sort"
@@ -29,6 +30,11 @@ type SignerStatus struct {
 	// false and an unreachable signer is the NORMAL, expected state —
 	// not something to debug. Audit M4.
 	Configured bool   `json:"configured"`
+	// Permission is true when the socket file EXISTS but the dial was
+	// refused with a permission error — the MCP process is not in the
+	// sshgatesigner group (membership inactive until a fresh login + Claude
+	// Code relaunch). This is NOT a dead daemon; it has a different fix.
+	Permission bool   `json:"permission,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
 
@@ -191,6 +197,13 @@ func probeSignerSocket(ctx context.Context, path string) SignerStatus {
 	conn, err := d.DialContext(dialCtx, "unix", path)
 	if err != nil {
 		s.Error = err.Error()
+		// EACCES/EPERM on a socket that EXISTS means the process is not in
+		// the sshgatesigner group (membership inactive until re-login +
+		// relaunch), not a dead daemon — flag it so status gives the right
+		// remediation instead of "unreachable, debug systemd".
+		if s.Configured && errors.Is(err, fs.ErrPermission) {
+			s.Permission = true
+		}
 		return s
 	}
 	_ = conn.Close()

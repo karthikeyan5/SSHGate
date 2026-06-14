@@ -370,6 +370,11 @@ func formatStatusSummary(out tools.StatusOutput) string {
 		// Tier 1: no signer daemon installed. This is the expected
 		// read-only state, not a failure to debug (audit M4).
 		fmt.Fprintf(&b, "signer: not configured (%s) — read-only / Tier 1; writes are denied at the gate. Run /sshgate:setup to add a Telegram signer.", out.SignerSocket.Path)
+	case out.SignerSocket.Permission:
+		// Socket present but the dial was permission-denied: the MCP
+		// process is not in the sshgatesigner group. NOT a dead daemon —
+		// the fix is a fresh login + Claude Code relaunch, not systemctl.
+		fmt.Fprintf(&b, "signer: socket present but NOT ACCESSIBLE (%s) — permission denied; your shell/session is not in the sshgatesigner group. Log out and back in, relaunch Claude Code (a side-terminal newgrp is not enough), then run /mcp to confirm. This is NOT a dead daemon.", out.SignerSocket.Path)
 	default:
 		// Configured (socket file present) but the dial failed — a real
 		// Tier-2 daemon problem worth surfacing.
