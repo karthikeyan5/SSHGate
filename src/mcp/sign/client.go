@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -24,6 +25,15 @@ var ErrTimeout = errors.New("sign: approval timed out")
 // is missing, refusing connections, or unreachable for some other
 // transport-layer reason.
 var ErrUnreachable = errors.New("sign: signer unreachable")
+
+// ErrSignerPermission is returned by Sign when the signer socket file
+// is present but the dial is refused with a permission error (EACCES /
+// EPERM). The socket is mode 0660 owned by the sshgatesigner group; a
+// shell/session that has not yet picked up that group membership hits
+// this — the daemon is alive, the caller just lacks access. Distinct
+// from ErrUnreachable so the user gets "log out and back in" guidance
+// instead of "the daemon is dead".
+var ErrSignerPermission = errors.New("sign: signer socket permission denied")
 
 // Client is the signer socket client. SocketPath is the absolute
 // path to the Unix socket; Timeout is the total per-request budget
@@ -82,7 +92,8 @@ type signResponse struct {
 
 // Sign sends a sign request for cmds and returns the signed wire
 // strings on approval, or one of {ErrDenied, ErrTimeout,
-// ErrUnreachable, fmt.Errorf("...")} on any other outcome.
+// ErrUnreachable, ErrSignerPermission, fmt.Errorf("...")} on any other
+// outcome.
 //
 // The request body is constructed locally (so the daemon never has
 // to trust the wire-level shape from the MCP).
@@ -194,10 +205,15 @@ func dialWithCtx(ctx context.Context, path string) (net.Conn, error) {
 	return d.DialContext(ctx, "unix", path)
 }
 
-// classifyDialError maps a dial failure to ErrUnreachable when the
-// socket file is missing or the kernel returned "connection refused".
-// Any other error (e.g. ctx cancellation, permission denied) is
-// wrapped without the sentinel.
+// classifyDialError maps a dial failure to a sentinel:
+//   - ErrUnreachable when the socket file is missing or the kernel
+//     returned "connection refused" (no daemon listening);
+//   - ErrSignerPermission when the dial is refused with a permission
+//     error (EACCES / EPERM) — the socket is present but the caller's
+//     session is not yet in the sshgatesigner group.
+//
+// Any other error (e.g. ctx cancellation) is wrapped without a
+// sentinel.
 func classifyDialError(err error) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("%w: socket missing: %v", ErrUnreachable, err)
@@ -208,6 +224,16 @@ func classifyDialError(err error) error {
 	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, fs.ErrNotExist) {
 		return fmt.Errorf("%w: socket missing: %v", ErrUnreachable, err)
 	}
+	// Permission denied on the 0660 socket: the daemon is alive but the
+	// caller's session has not picked up the sshgatesigner group yet.
+	// This must be detected BEFORE the *net.OpError catch-all below,
+	// because an EACCES dial also surfaces as an *net.OpError — without
+	// this branch it would be mis-reported as "unreachable" (a dead
+	// daemon). We match both the portable fs.ErrPermission and an
+	// unwrapped syscall.Errno of EACCES/EPERM.
+	if errors.Is(err, fs.ErrPermission) || isPermErrno(err) {
+		return fmt.Errorf("%w: %v", ErrSignerPermission, err)
+	}
 	// ECONNREFUSED indicates the socket file exists but no process
 	// is listening — classify as unreachable.
 	var opErr *net.OpError
@@ -215,4 +241,16 @@ func classifyDialError(err error) error {
 		return fmt.Errorf("%w: dial: %v", ErrUnreachable, err)
 	}
 	return fmt.Errorf("sign: dial: %w", err)
+}
+
+// isPermErrno unwraps err to a syscall.Errno and reports whether it is
+// EACCES or EPERM. fs.ErrPermission does not always match an EACCES
+// that arrives wrapped in *net.OpError → *os.SyscallError, so we check
+// the raw errno as a belt-and-braces fallback.
+func isPermErrno(err error) bool {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EACCES || errno == syscall.EPERM
+	}
+	return false
 }

@@ -43,6 +43,14 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     exit 77
 fi
 
+# systemd guard: the signer runs as a systemd unit. Fail clean up front
+# (before any filesystem/user changes) rather than half-installing on a
+# host without systemd.
+if ! command -v systemctl >/dev/null 2>&1; then
+    printf '[install] ERROR: systemctl not found; SSHGate'\''s signer requires systemd. Aborting before making changes.\n' >&2
+    exit 78
+fi
+
 # Resolve repo root from this script's location so the operator can
 # invoke install.sh from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,9 +83,17 @@ if getent passwd sshgatesigner >/dev/null 2>&1; then
     log "user sshgatesigner exists; skipping useradd"
 else
     log "creating system user sshgatesigner"
+    # Probe for nologin — its path varies across distros (Debian/RedHat
+    # use /usr/sbin, others /sbin or /usr/bin). Fall back to /bin/false
+    # so useradd never fails on a missing nologin.
+    NOLOGIN="$(command -v nologin || true)"
+    for c in /usr/sbin/nologin /sbin/nologin /usr/bin/nologin; do
+        [ -x "$c" ] && NOLOGIN="$c" && break
+    done
+    [ -n "$NOLOGIN" ] || NOLOGIN=/bin/false
     useradd \
         --system \
-        --shell /usr/sbin/nologin \
+        --shell "$NOLOGIN" \
         --home-dir "$SIGNER_HOME" \
         --create-home \
         sshgatesigner
@@ -266,10 +282,45 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "$PUBKEY_SRC" ]
         # (sudo scrubs XDG_CONFIG_HOME, so install.sh cannot see it).
         # add_server's read-only fallback fails safe if the path mismatches.
         DISTRIB_DIR="$USER_HOME/.config/sshgate/pubkey-distrib"
+        # Derive the user's real primary group — it is NOT always a
+        # per-user group named after the user (that's a Debian/RedHat
+        # convention; on Arch the primary group is `users`), so `-g
+        # "$SUDO_USER"` fails "install: invalid group" there.
+        USER_GROUP="$(id -gn "$SUDO_USER")"
         log "staging gate.pub -> $DISTRIB_DIR/gate.pub (owner $SUDO_USER)"
-        install -d -m 0755 -o "$SUDO_USER" -g "$SUDO_USER" "$DISTRIB_DIR"
-        install -m 0644 -o "$SUDO_USER" -g "$SUDO_USER" "$PUBKEY_SRC" "$DISTRIB_DIR/gate.pub"
+        # Non-fatal: a staging hiccup must never abort an already-successful
+        # daemon install. Warn and continue (the operator can copy it by hand).
+        install -d -m 0755 -o "$SUDO_USER" -g "$USER_GROUP" "$DISTRIB_DIR" \
+            || log "WARN: could not stage gate.pub to $DISTRIB_DIR; copy it manually (see docs)"
+        install -m 0644 -o "$SUDO_USER" -g "$USER_GROUP" "$PUBKEY_SRC" "$DISTRIB_DIR/gate.pub" \
+            || log "WARN: could not stage gate.pub to $DISTRIB_DIR; copy it manually (see docs)"
+        # Normalize ownership of the user-owned sshgate subtree with the
+        # corrected group. Guarded to ONLY the sshgate subtree — never the
+        # whole ~/.config.
+        chown "$SUDO_USER:$USER_GROUP" "$USER_HOME/.config/sshgate" "$DISTRIB_DIR" 2>/dev/null || true
     fi
 fi
 
 log "done"
+
+# Final, unmissable banner: usermod -aG above does NOT activate the new
+# group for the user's already-running shell or Claude Code session. The
+# running MCP server inherited the stale group set, so every write will
+# fail with permission denied on the signer socket until the user logs
+# out and back in AND relaunches Claude Code. `newgrp` in a side terminal
+# is NOT enough — it doesn't touch the already-running Claude Code process.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    printf '\n' >&2
+    printf '========================================================================\n' >&2
+    printf '  ACTION REQUIRED before writes will work:\n' >&2
+    printf '\n' >&2
+    printf '    1. LOG OUT and LOG BACK IN  (a new login shell, not `newgrp`)\n' >&2
+    printf '    2. RELAUNCH Claude Code\n' >&2
+    printf '\n' >&2
+    printf '  Why: %s was added to the sshgatesigner group, but the\n' "$SUDO_USER" >&2
+    printf '  currently-running shell and Claude Code (and its MCP server) still\n' >&2
+    printf '  hold the OLD group set. Until you re-login AND relaunch Claude Code,\n' >&2
+    printf '  EVERY write will fail with "permission denied" on the signer socket.\n' >&2
+    printf '  `newgrp sshgatesigner` in a side terminal is NOT enough.\n' >&2
+    printf '========================================================================\n' >&2
+fi

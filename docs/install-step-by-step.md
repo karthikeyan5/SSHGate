@@ -216,10 +216,15 @@ One idempotent pass does all of the following:
 - Creates the `sshgatesigner` system user (no shell, no login).
 - Creates `/var/lib/sshgatesigner/{keys,tokens,config,log,bin}` with the
   right ownership and modes.
-- Adds your account (`$SUDO_USER`) to the `sshgatesigner` group so you
-  can stat the runtime dir and read the audit log without sudo. You
-  may need `newgrp sshgatesigner` (or a fresh shell) for membership to
-  take effect.
+- Adds your account (`$SUDO_USER`) to the `sshgatesigner` group. This is
+  REQUIRED for the MCP server to work: the signer's Unix socket is mode
+  `0660`, owned by `sshgatesigner`, and the MCP server runs as you — so
+  without this group membership active in the session, every write is
+  permission-denied at the socket. (Being able to stat the runtime dir and
+  read the audit log without sudo is a secondary convenience of the same
+  group.) Membership only activates in a NEW login session — `newgrp
+  sshgatesigner` in a side terminal does NOT help an already-running Claude
+  Code. You must log out and back in and relaunch Claude Code (see step 6).
 - Copies `bin/sshgate-signer-telegram` to `/usr/local/bin/sshgate-signer-telegram` and
   `bin/sshgate-gate-linux-amd64` to `/usr/local/share/sshgate/`.
 - Writes `/etc/systemd/system/sshgate-signer-telegram.service` with hardened
@@ -379,10 +384,37 @@ credentials you used originally. The tool detects the existing
 restricted entry in `authorized_keys` and pushes the new
 `gate.pub` idempotently — no rewrites, no rollback risk.
 
-### 5b. (Optional) LLM command explainer
+### 6. Activate the sshgatesigner group, relaunch Claude Code (REQUIRED before writes)
 
-> **You can skip this step.** Tier 2 is fully functional after step 5
-> — the approval messages list every command verbatim. This step
+This is a mandatory happy-path step, not troubleshooting. `scripts/install.sh`
+added your account to the `sshgatesigner` group, but a Unix group only
+activates in a NEW login session. The MCP server inherited its group set from
+the session Claude Code was launched in, so it does not yet have
+`sshgatesigner` active — and the signer socket is `0660 sshgatesigner`, so
+every write is permission-denied until the group is active. `newgrp
+sshgatesigner` in a side terminal does NOT fix the already-running Claude
+Code.
+
+You must:
+
+1. **Log out and back in** (or restart your login session) so `sshgatesigner`
+   joins your active group set.
+2. **Relaunch Claude Code** from that fresh login session.
+
+Then confirm the group is active:
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx sshgatesigner && echo 'group:active' || echo 'group:INACTIVE — log out/in and relaunch Claude Code before writes'
+```
+
+Tier 2 is ready for writes only once this prints `group:active`. Until then,
+reads work but every write returns permission-denied at the signer socket.
+
+### 6b. (Optional) LLM command explainer
+
+> **You can skip this step.** Tier 2 is fully functional once the
+> `sshgatesigner` group is active (step 6) — the approval messages list every
+> command verbatim. This step
 > only adds a one-line plain-English gloss beneath each command in
 > the Telegram approval message, drawn from an OpenAI-compatible LLM.
 > It's a quality-of-life add-on; if you don't want a third-party LLM

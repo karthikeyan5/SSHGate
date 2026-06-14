@@ -246,6 +246,12 @@ func formatRunBatchSummary(out tools.RunBatchOutput) string {
 		if r.Skipped {
 			fmt.Fprintf(&b, " (skipped)")
 		}
+		// A gate deny (exit 77/65) on a write annotates the result's
+		// Stderr with remediation; echo it into the fallback summary so
+		// the model sees it even without structured-content support.
+		if note := gateDenyNoteFor(r); note != "" {
+			fmt.Fprintf(&b, "\n     %s", note)
+		}
 	}
 	return b.String()
 }
@@ -255,6 +261,26 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n[...truncated]"
+}
+
+// gateDenyNoteFor returns a short remediation line for a write command
+// result whose exit code is a well-known gate deny (77 = missing sig /
+// read-only, 65 = bad/expired sig), or "" otherwise. Reads never carry
+// these codes, so the annotation is write-only. The run_batch layer
+// already folds the full note into the result's Stderr; this keeps the
+// fallback TextContent summary actionable too.
+func gateDenyNoteFor(r tools.CommandResult) string {
+	if r.Kind != "write" {
+		return ""
+	}
+	switch r.ExitCode {
+	case 77:
+		return "gate denied (exit 77): no signer pubkey (read-only / Tier-1) or missing signature — run /sshgate:setup then /sshgate:add to upgrade."
+	case 65:
+		return "gate rejected the signature (exit 65): expired or invalid — usually clock skew or a stale approval; retry."
+	default:
+		return ""
+	}
 }
 
 // revokeServerHandler is the typed handler for sshgate.revoke_server.

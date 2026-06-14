@@ -19,6 +19,13 @@ type Entry struct {
 	Port    int       `json:"port"`
 	User    string    `json:"user"`
 	AddedAt time.Time `json:"added_at"`
+	// ReadOnly records that the alias was added in tier-1 read-only
+	// mode (no gate.pub pushed, no signer). Writes to a ReadOnly
+	// server are denied at the gate, so the run/run_batch paths
+	// short-circuit before soliciting a wasted Telegram approval.
+	// Cleared (implicitly) once UpgradeServerToSigning re-adds the
+	// entry as signed-write.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // Servers is the alias → Entry map backed by the file at Path. All

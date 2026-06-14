@@ -47,5 +47,21 @@ with that. If the tool itself errors (denied, timeout, sshgate-signer-telegram
 unreachable, unknown alias), surface the error verbatim — do not
 re-interpret it.
 
+## Recognizing gate exit codes
+
+Two exit codes come from the gate itself (not the remote command) and have
+specific meanings — call them out instead of treating them as a generic
+command failure:
+
+- **77 — gate denied the write.** No signer pubkey is configured on the
+  remote (read-only / Tier 1), or the write arrived without a signature.
+  Check `/sshgate:status`; if the signer is `not configured`, the server is
+  read-only — run `/sshgate:setup` to add a signer, then re-run
+  `/sshgate:add <alias> <user@host>` (without `--read-only`) to push the new
+  `gate.pub`. Re-run the command after the upgrade.
+- **65 — signature rejected.** The signature was present but invalid or
+  expired — usually clock skew between laptop and remote, or a stale approval.
+  Retry the command; if it persists, check the clocks on both ends.
+
 Do not run a follow-up command on your own. Stop after one
 invocation.

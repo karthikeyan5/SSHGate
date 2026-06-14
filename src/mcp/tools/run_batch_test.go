@@ -307,6 +307,9 @@ func TestRunBatch_WriteUnreachable(t *testing.T) {
 	r := newRegistryForBatch(t)
 	sign := &batchSign{err: signpkg.ErrUnreachable}
 	ssh := &batchSSH{}
+	// No SignerSockPath set → the socket is absent on disk, so an
+	// unreachable error is the Tier-1 "no signer configured" case and
+	// the Reason carries the actionable upgrade path (audit item D).
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
 	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
@@ -316,8 +319,8 @@ func TestRunBatch_WriteUnreachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBatch: %v", err)
 	}
-	if out.Reason != "unreachable" {
-		t.Errorf("Reason=%q; want unreachable", out.Reason)
+	if !strings.Contains(out.Reason, "no signer configured") || !strings.Contains(out.Reason, "/sshgate:setup") {
+		t.Errorf("Reason=%q; want the Tier-1 'no signer configured … /sshgate:setup' guidance", out.Reason)
 	}
 	if !out.Denied {
 		t.Error("Denied=false; want true on unreachable")

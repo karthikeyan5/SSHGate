@@ -97,6 +97,13 @@ if [ ! -d /var/lib/sshgatesigner ] && getent passwd sshgatesigner >/dev/null 2>&
         y|Y|yes|YES)
             log "removing sshgatesigner user"
             userdel sshgatesigner || true
+            # Belt-and-braces (both non-fatal): userdel usually removes the
+            # primary group, but on some hosts the group lingers, and the
+            # invoking user may still carry a stale supplementary membership.
+            getent group sshgatesigner >/dev/null 2>&1 && groupdel sshgatesigner 2>/dev/null || true
+            if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+                gpasswd -d "$SUDO_USER" sshgatesigner 2>/dev/null || true
+            fi
             ;;
         *)
             log "keeping sshgatesigner user"

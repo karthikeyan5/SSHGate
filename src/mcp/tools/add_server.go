@@ -250,6 +250,16 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	defer cancel()
 	bootClient, hostFingerprint, err := dialBootstrap(dialCtx, in.Host, port, bootCfg)
 	if err != nil {
+		// An "unable to authenticate" handshake failure means the
+		// offered bootstrap key is not authorized on the host (wrong
+		// default key, or a passphrase-protected key not loaded into
+		// the agent). Point the operator at the fix rather than
+		// surfacing the bare SSH error.
+		if strings.Contains(err.Error(), "unable to authenticate") {
+			return AddServerOutput{}, fmt.Errorf(
+				"tools: bootstrap SSH auth to %s@%s failed — the key offered is not authorized on the host (wrong default key, or a passphrase-protected key not loaded). Run `ssh-add <the key that reaches %s>`, then re-run /sshgate:add: %w",
+				in.User, in.Host, in.Host, err)
+		}
 		return AddServerOutput{}, fmt.Errorf("tools: bootstrap dial: %w", err)
 	}
 	defer bootClient.Close()
@@ -287,10 +297,11 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 
 	// Step 9 — register.
 	if err := r.Servers.Add(in.Alias, registry.Entry{
-		Host:    in.Host,
-		Port:    port,
-		User:    in.User,
-		AddedAt: time.Now().UTC(),
+		Host:     in.Host,
+		Port:     port,
+		User:     in.User,
+		AddedAt:  time.Now().UTC(),
+		ReadOnly: in.ReadOnly,
 	}); err != nil {
 		// Roll back the remote — registry was the last step.
 		if !idempotent {

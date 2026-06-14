@@ -176,6 +176,19 @@ func (r *Runner) checkKeyReady() error {
 }
 
 func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string) (RunOutput, error) {
+	// Read-only servers have no signer pubkey on the host, so the gate
+	// rejects every write (exit 77). Soliciting an approval first would
+	// waste a real Telegram tap on a guaranteed no-op — short-circuit
+	// with an actionable upgrade path instead.
+	if e.ReadOnly {
+		return RunOutput{Kind: "write"}, readOnlyWriteErr(alias)
+	}
+	// A write before /sshgate:setup cannot succeed (no key, no signer):
+	// surface the same actionable "run /sshgate:setup" guidance the read
+	// path uses rather than a deeper, opaque failure.
+	if err := r.checkKeyReady(); err != nil {
+		return RunOutput{Kind: "write"}, err
+	}
 	ttl := r.WriteTTLSec
 	if ttl <= 0 {
 		ttl = DefaultWriteTTLSec
@@ -190,8 +203,10 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// changes and matches the format the audit-log examples use.
 	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl}})
 	if err != nil {
-		// Preserve the sentinel for the MCP layer.
-		return RunOutput{Kind: "write"}, fmt.Errorf("tools: sign: %w", err)
+		// Preserve the sentinel for the MCP layer, but enrich the
+		// message with actionable remediation (permission vs Tier-1 vs
+		// dead daemon). r.remediateSignErr keeps errors.Is intact.
+		return RunOutput{Kind: "write"}, r.remediateSignErr(err)
 	}
 	if len(signed) != 1 {
 		return RunOutput{Kind: "write"}, fmt.Errorf("tools: expected 1 signature; got %d", len(signed))
@@ -203,6 +218,13 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true},
 			fmt.Errorf("ssh exec: %w", err)
 	}
+	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
+	// the well-known gate codes so the model gets remediation rather than
+	// a bare "exit 77/65".
+	if note := gateDenyNote(exit); note != "" {
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true},
+			fmt.Errorf("tools: %s", note)
+	}
 	return RunOutput{
 		Stdout:   string(stdout),
 		Stderr:   string(stderr),
@@ -210,6 +232,83 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		Kind:     "write",
 		Approved: true,
 	}, nil
+}
+
+// readOnlyWriteErr is the actionable error for a write aimed at a
+// server registered read-only (tier-1, no signer pubkey on the host).
+func readOnlyWriteErr(alias string) error {
+	return fmt.Errorf(
+		"tools: server %q is registered read-only — writes are denied at the gate (no signer pubkey was pushed). Run /sshgate:setup to add a Telegram signer, then re-run /sshgate:add %s <user@host> to upgrade it to signed-write.",
+		alias, alias)
+}
+
+// remediateSignErr enriches a sign-layer error with actionable
+// remediation while preserving the underlying sentinel so the MCP layer
+// (and tests) can still errors.Is() it. The signer socket path is
+// stat'd to distinguish a never-configured Tier-1 install from a
+// present-but-dead daemon.
+func (r *Runner) remediateSignErr(err error) error {
+	switch {
+	case errors.Is(err, signpkg.ErrSignerPermission):
+		return fmt.Errorf(
+			"tools: signer socket %s is present but not accessible (permission denied) — your shell/session is not yet in the sshgatesigner group. Log out and back in, then relaunch Claude Code, before writes will work: %w",
+			r.SignerSockPath, err)
+	case errors.Is(err, signpkg.ErrUnreachable):
+		if r.signerSocketPresent() {
+			return fmt.Errorf(
+				"tools: signer socket %s is present but not accepting connections — check `systemctl status sshgate-signer-telegram` and `journalctl -u sshgate-signer-telegram -n 50`: %w",
+				r.SignerSockPath, err)
+		}
+		return fmt.Errorf(
+			"tools: no signer configured (Tier-1 read-only). Writes need a Telegram signer; run /sshgate:setup, then re-run /sshgate:add to upgrade your servers: %w",
+			err)
+	default:
+		// Denials, timeouts, daemon errors: wrap once, preserve sentinel.
+		return fmt.Errorf("tools: sign: %w", err)
+	}
+}
+
+// signerSocketPresent reports whether the signer socket file exists on
+// disk. An empty SignerSockPath (tests / legacy callers) reports false
+// so the Tier-1 message is used.
+func (r *Runner) signerSocketPresent() bool {
+	if r.SignerSockPath == "" {
+		return false
+	}
+	_, err := os.Stat(r.SignerSockPath)
+	return err == nil
+}
+
+// gateDenyNote returns a remediation string for the well-known gate
+// deny exit codes, or "" for any other exit. The gate returns these on
+// a WRITE with err=nil and a raw non-zero exit:
+//   - 77: missing signature / read-only (no signer pubkey on host).
+//   - 65: bad / expired signature (clock skew or stale approval).
+//
+// The string carries no package prefix so callers can embed it in an
+// error ("tools: <note>") or in a result's Stderr verbatim.
+func gateDenyNote(exit int) string {
+	switch exit {
+	case 77:
+		return "gate denied this write (exit 77): the server has no signer pubkey (read-only / Tier-1) OR the signature was missing. Check sshgate.status; if signer is not configured, run /sshgate:setup then re-run /sshgate:add to upgrade the server."
+	case 65:
+		return "gate rejected the signature (exit 65): expired or invalid — usually clock skew or a stale approval; retry."
+	default:
+		return ""
+	}
+}
+
+// appendNote joins a remediation note onto an existing stderr block,
+// inserting a newline separator only when stderr is non-empty so the
+// note is always on its own line.
+func appendNote(stderr, note string) string {
+	if stderr == "" {
+		return note
+	}
+	if strings.HasSuffix(stderr, "\n") {
+		return stderr + note
+	}
+	return stderr + "\n" + note
 }
 
 // newRequestID returns a short random identifier prefixed with "r_"

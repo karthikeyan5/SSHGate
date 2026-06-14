@@ -125,6 +125,19 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	// Slot per-position signatures so step 2 can look up by index.
 	signedByIdx := make(map[int]string)
 	if len(writeCmds) > 0 {
+		// Read-only servers have no signer pubkey on the host, so every
+		// write gate-rejects (exit 77). Refuse BEFORE soliciting an
+		// approval so we never waste a Telegram tap on a guaranteed
+		// no-op; surface the upgrade path instead.
+		if entry.ReadOnly {
+			return RunBatchOutput{}, readOnlyWriteErr(in.Alias)
+		}
+		// A write before /sshgate:setup cannot succeed (no key, no
+		// signer): surface the same actionable "run /sshgate:setup"
+		// guidance the read path uses.
+		if err := r.checkKeyReady(); err != nil {
+			return RunBatchOutput{}, err
+		}
 		reqID, err := newRequestID()
 		if err != nil {
 			return RunBatchOutput{}, fmt.Errorf("tools: request id: %w", err)
@@ -133,8 +146,9 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 		if err != nil {
 			// Map the sentinel to a short Reason; the tool layer
 			// returns the structured Denied result rather than a Go
-			// error so the model can read the reason cleanly.
-			out.Reason = classifySignErr(err)
+			// error so the model can read the reason cleanly. The
+			// human-facing remediation rides in out.Reason too.
+			out.Reason = r.classifySignErrReason(err)
 			out.Denied = true
 			return out, nil
 		}
@@ -177,6 +191,15 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			// sees the partial state plus the wrapped error.
 			return out, fmt.Errorf("ssh exec [%d]: %w", i, err)
 		}
+		// A gate deny (exit 77/65) comes back as err=nil with a raw
+		// non-zero exit. Annotate the well-known codes into the result's
+		// Stderr (write-only) so the model sees remediation, not a bare
+		// non-zero exit.
+		if kinds[i] == classify.KindWrite {
+			if note := gateDenyNote(exit); note != "" {
+				out.Results[i].Stderr = appendNote(out.Results[i].Stderr, note)
+			}
+		}
 		if exit != 0 && stopOnError {
 			aborted = true
 		}
@@ -185,17 +208,43 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 }
 
 // classifySignErr maps a sign-layer error to one of {"denied",
-// "timeout", "unreachable", "error"} for the structured output.
+// "timeout", "permission", "unreachable", "error"} for the structured
+// output.
 func classifySignErr(err error) string {
 	switch {
 	case errors.Is(err, signpkg.ErrDenied):
 		return "denied"
 	case errors.Is(err, signpkg.ErrTimeout):
 		return "timeout"
+	case errors.Is(err, signpkg.ErrSignerPermission):
+		return "permission"
 	case errors.Is(err, signpkg.ErrUnreachable):
 		return "unreachable"
 	default:
 		return "error"
+	}
+}
+
+// classifySignErrReason produces the Reason string carried in a denied
+// RunBatchOutput. For denial/timeout it keeps the short machine-readable
+// token; for the actionable cases (permission, Tier-1-vs-dead-daemon)
+// it returns the full remediation sentence the run path uses so the
+// model gets the same guidance regardless of which tool was called.
+func (r *Runner) classifySignErrReason(err error) string {
+	switch {
+	case errors.Is(err, signpkg.ErrSignerPermission):
+		return fmt.Sprintf(
+			"signer socket %s is present but not accessible (permission denied) — your shell/session is not yet in the sshgatesigner group. Log out and back in, then relaunch Claude Code, before writes will work.",
+			r.SignerSockPath)
+	case errors.Is(err, signpkg.ErrUnreachable):
+		if r.signerSocketPresent() {
+			return fmt.Sprintf(
+				"signer socket %s is present but not accepting connections — check `systemctl status sshgate-signer-telegram` and `journalctl -u sshgate-signer-telegram -n 50`.",
+				r.SignerSockPath)
+		}
+		return "no signer configured (Tier-1 read-only). Writes need a Telegram signer; run /sshgate:setup, then re-run /sshgate:add to upgrade your servers."
+	default:
+		return classifySignErr(err)
 	}
 }
 

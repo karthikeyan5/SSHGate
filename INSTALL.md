@@ -6,8 +6,12 @@
 >
 > (or `follow /path/to/local/SSHGate/INSTALL.md` if you've cloned locally)
 >
-> The agent does everything below. You'll be asked for sudo (Tier 2 only) and
-> a Telegram bot token (Tier 2 only). Tier 1 is read-only and needs no sudo.
+> The agent walks you through everything below. A few steps are YOURS to run
+> personally because no agent can issue them: the interactive `/plugin
+> marketplace add` + `/plugin install` commands in the Claude Code UI, and the
+> QUIT+RELAUNCH of Claude Code that activates the MCP server (step 3). You'll
+> also be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only).
+> Tier 1 is read-only and needs no sudo.
 
 > **For Claude Code (or any) agent reading this:** you are installing SSHGate
 > for the user. Before any commands, **surface the Preamble section below
@@ -91,70 +95,132 @@ re-run. Stop.
 
 Tier 2 also needs `sudo` access on the local machine and a Telegram account
 (for the approval bot). Tier 1 needs neither — defer those checks until the
-user picks a tier in step 4.
+user picks a tier in step 5 (`/sshgate:setup`).
 
 The remote hosts must be Linux with SSH reachable. They get checked
 per-server later via `/sshgate:add`, not here.
 
-## 2. Clone the repo and add as a local marketplace
+## 2. Clone the repo, build binaries onto $PATH, persist the PATH
 
 Claude Code's `/plugin install` copies ONLY the plugin subtree
 (`.claude-plugin/`, `commands/`, `skills/`, `.mcp.json`) into a versioned
 cache — it strips `src/`, `scripts/`, `Makefile`, and `bin/`. So the MCP
 binary cannot live under the cache; it must be on your `$PATH`. The
-canonical install: clone the repo, build the binaries onto `$PATH` with
-`make install-local`, then register the clone as a local marketplace.
+canonical fresh-machine order is: install Go → clone → `make install-local`
+→ PERSIST `~/go/bin` to your LOGIN profile → confirm `command -v sshgate-mcp`
+→ THEN (re)launch Claude Code from a PATH-correct shell, before
+`/plugin install`.
 
-Tell the user:
+Tell the user, in order:
 
-> "Pick a directory to keep the SSHGate source (e.g. `~/src`), clone it, and
-> build the binaries onto your PATH:
+> "1. Pick a directory to keep the SSHGate source (e.g. `~/src`), clone it,
+>    and build the binaries onto your PATH:
 >
->     mkdir -p ~/src && cd ~/src && git clone https://github.com/karthikeyan5/SSHGate
->     cd ~/src/SSHGate && make install-local
+>        mkdir -p ~/src && cd ~/src && git clone https://github.com/karthikeyan5/SSHGate
+>        cd ~/src/SSHGate && make install-local
 >
-> `make install-local` puts `sshgate-mcp` and `sshgate-signer-telegram` in
-> `~/go/bin` and the remote gate binary in `~/.config/sshgate/bin/`. Confirm
-> `~/go/bin` is on your PATH:
+>    `make install-local` puts `sshgate-mcp` and `sshgate-signer-telegram` in
+>    `~/go/bin` and the remote gate binary in `~/.config/sshgate/bin/`.
 >
->     command -v sshgate-mcp || echo 'NOT ON PATH — add ~/go/bin (or `go env GOPATH`/bin) to your PATH and re-open the shell'
+> 2. PERSIST `~/go/bin` to your LOGIN profile — not just an interactive rc
+>    file. Claude Code spawns plugin MCP servers with its LAUNCH-time env, and
+>    GUI/login launches read the login profile, not `~/.zshrc`/`~/.bashrc`.
+>    Append the export to the file your login shell sources (`~/.zprofile`
+>    for zsh login, `~/.bash_profile` for bash login, or `~/.zshenv`):
 >
-> Then in this Claude Code session, run these three slash commands and tell
-> me when they're done:
+>        echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zprofile   # zsh; use ~/.bash_profile for bash
 >
->     /plugin marketplace add ~/src/SSHGate
->     /plugin install sshgate@sshgate
->     /reload-plugins
+> 3. Open a NEW login shell (or log out and back in) so the persisted PATH
+>    takes effect, then confirm the binary resolves:
 >
-> Replace `~/src/SSHGate` with wherever you cloned. The `/reload-plugins`
-> AFTER `make install-local` is what makes the MCP tool surface appear (the
-> server spawns the now-on-PATH `sshgate-mcp` binary). If `~/go/bin` was just
-> added to your PATH, fully **restart** Claude Code (quit and relaunch) — not
-> just `/reload-plugins` — so the `sshgate-mcp` server is spawned with the
-> updated PATH."
+>        command -v sshgate-mcp || echo 'NOT ON PATH — add ~/go/bin (or `go env GOPATH`/bin) to your LOGIN profile and re-open the shell'
+>
+>    A `command -v` pass in this terminal does NOT by itself guarantee the
+>    spawned MCP server will see `~/go/bin`: Claude Code inherits the PATH of
+>    the shell it was LAUNCHED from. That is why the PATH must be persisted to
+>    the login profile AND Claude Code launched from a shell where it resolves."
 
-Wait for the user to confirm completion and capture the clone path (we'll
-need it in step 3).
+Wait for the user to confirm `command -v sshgate-mcp` resolves and capture
+the clone path (we'll need it in step 3). Do NOT proceed to `/plugin install`
+until the binary is on PATH in a login shell.
 
-## 3. Verify the plugin loaded
+## 3. (RE)LAUNCH Claude Code, then install the plugin — YOU run these, not the agent
 
-After step 2's `/reload-plugins`, the SSHGate slash commands should be
-available and the MCP binary should be on `$PATH`. The cache does NOT
-contain `src/` or `go.mod` (that is expected and correct — the binaries
-live on `$PATH`, not under the cache). Probe the two things that actually
-matter:
+> **YOU — the human — must run these in the Claude Code UI. An agent cannot
+> issue them.** `/plugin marketplace add`, `/plugin install`, and the restart
+> below are interactive commands typed into the Claude Code client; the agent
+> driving this install has no way to invoke them. Run them yourself.
+
+First, (re)launch Claude Code FROM the login shell where `command -v
+sshgate-mcp` resolved in step 2. Claude Code spawns the `sshgate-mcp` MCP
+server with its own launch-time env, so it must start from a PATH-correct
+shell. Then, in the Claude Code UI, run:
+
+```
+/plugin marketplace add ~/src/SSHGate
+/plugin install sshgate@sshgate
+```
+
+Replace `~/src/SSHGate` with wherever you cloned.
+
+`sshgate@sshgate` parses as `<plugin-name>@<marketplace-name>` — both come
+from `.claude-plugin/marketplace.json` (the marketplace `name` and the
+plugin `name` happen to both be `sshgate`). Before installing, run `/plugin`
+and confirm the marketplace id that `add` registered, so `install` targets
+the right `@<marketplace-name>`.
+
+Then **fully QUIT and RELAUNCH Claude Code** (not `/reload-plugins`). This
+is the UNCONDITIONAL final step of plugin install, not a PATH edge-case:
+`/reload-plugins` activates the new slash-commands and skills, but a NEW
+plugin's stdio MCP server (`sshgate-mcp`) is only spawned on a fresh Claude
+Code start. Until you quit and relaunch, the slash commands appear but the
+`sshgate` MCP tools do not exist.
+
+## 4. Verify the plugin loaded — binary on PATH AND the MCP server live
+
+After the relaunch in step 3, two separate things must hold. Binary-on-PATH
+is necessary but NOT sufficient — the MCP server must actually be spawned and
+connected.
+
+First, confirm the binaries resolve (the cache does NOT contain `src/` or
+`go.mod` — that is expected and correct; the binaries live on `$PATH`):
 
 ```bash
-command -v sshgate-mcp >/dev/null 2>&1 && echo "mcp-bin: ok ($(command -v sshgate-mcp))" || echo "mcp-bin: MISSING — re-run 'make install-local' in your clone and ensure ~/go/bin is on PATH"
+command -v sshgate-mcp >/dev/null 2>&1 && echo "mcp-bin: ok ($(command -v sshgate-mcp))" || echo "mcp-bin: MISSING — re-run 'make install-local' in your clone and ensure ~/go/bin is on your LOGIN profile PATH"
 command -v sshgate-signer-telegram >/dev/null 2>&1 && echo "signer-bin: ok" || echo "signer-bin: MISSING (only needed for Tier 2) — re-run 'make install-local'"
 ```
 
-If `sshgate-mcp` is MISSING, the binary is not on `$PATH`: send the user
-back to step 2's `make install-local` and the PATH check. The MCP tool
-surface will be dead until `sshgate-mcp` resolves on `$PATH` and the
-session is reloaded.
+Then verify the MCP SERVER is live. In the Claude Code UI, run:
 
-## 4. Run /sshgate:setup
+```
+/mcp
+```
+
+Confirm an `sshgate` server appears and is **connected**. Treat the plugin
+as "loaded" ONLY once `/mcp` shows the `sshgate` server connected — the
+slash commands appearing is not enough.
+
+If `/mcp` does NOT list `sshgate`:
+
+1. Fully QUIT and RELAUNCH Claude Code (a stdio MCP server for a freshly
+   installed plugin only spawns on a clean start), then re-run `/mcp`.
+2. If it is still missing, run the server by hand in a shell to read its
+   startup error:
+
+   ```bash
+   sshgate-mcp </dev/null
+   ```
+
+   The most common cause is `sshgate-mcp` not resolving on the PATH Claude
+   Code was launched with — go back to step 2, persist `~/go/bin` to the
+   login profile, and relaunch Claude Code from that login shell.
+
+If `sshgate-mcp` is MISSING from `command -v`, the binary is not on `$PATH`:
+send the user back to step 2's `make install-local` and the login-profile
+PATH persistence. The MCP tool surface stays dead until `sshgate-mcp`
+resolves on `$PATH` AND Claude Code has been relaunched from that shell.
+
+## 5. Run /sshgate:setup
 
 `/sshgate:setup` is the tiered installer. It probes on-disk state, classifies
 the current tier (fresh, tier-1 present, tier-2 present, or partial), and
@@ -198,7 +264,7 @@ The agent driving this INSTALL.md script does NOT need to duplicate
 `/sshgate:setup`'s logic — just invoke it and let the user respond to its
 prompts. Surface errors verbatim if `/sshgate:setup` reports any.
 
-## 5. Verify
+## 6. Verify
 
 After `/sshgate:setup` reports completion, run:
 
@@ -229,7 +295,7 @@ output, and ask the user whether to keep debugging or roll back. On Tier 1
 a `not configured` signer is expected — do NOT debug a daemon that was
 never installed.
 
-## 6. Tell the user the install is complete
+## 7. Tell the user the install is complete
 
 > "Installation complete.
 >

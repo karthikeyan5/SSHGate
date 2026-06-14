@@ -97,12 +97,35 @@ If `mcp-bin:missing`, tell the user verbatim:
 >
 > 1. Clone if you haven't: `git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate`
 > 2. Build onto PATH: `cd ~/src/SSHGate && make install-local`
-> 3. Ensure `~/go/bin` (or `\`go env GOPATH\`/bin`) is on your PATH.
-> 4. `/reload-plugins`, then re-run `/sshgate:setup`."
+> 3. Persist `~/go/bin` (or `\`go env GOPATH\`/bin`) to your LOGIN profile
+>    (`~/.zprofile`/`~/.bash_profile`/`~/.zshenv`, not just `~/.zshrc`/`~/.bashrc`)
+>    — Claude Code spawns the MCP server with its launch-time env.
+> 4. QUIT and RELAUNCH Claude Code from a shell where `command -v sshgate-mcp`
+>    resolves, then re-run `/sshgate:setup`."
 
 If `clone:missing`, ask the user for the actual clone path and re-probe.
 Stop on either failure. Do not silently proceed. Remember the clone path as
 `$CLONE` — the build steps below run there, NOT in `${CLAUDE_PLUGIN_ROOT}`.
+
+Binary-on-PATH is necessary but NOT sufficient: the `sshgate-mcp` stdio MCP
+server must also be spawned and connected. A freshly `/plugin install`ed
+plugin's MCP server only spawns on a fresh Claude Code start — `/reload-plugins`
+activates the slash commands and skills but does NOT spawn the new MCP server.
+So a QUIT+RELAUNCH of Claude Code is the UNCONDITIONAL final step of plugin
+install, not a PATH edge-case. Tell the user to confirm the server is live:
+
+> "In the Claude Code UI, run `/mcp` and confirm an `sshgate` server appears
+> and is connected. Treat the plugin as loaded ONLY once `/mcp` shows
+> `sshgate` connected — the slash commands appearing is not enough.
+>
+> If `/mcp` does NOT list `sshgate`: fully quit and relaunch Claude Code, then
+> re-run `/mcp`. If it is still missing, run `sshgate-mcp </dev/null` in a
+> shell to see the startup error (usually `sshgate-mcp` not resolving on the
+> PATH Claude Code was launched with — persist `~/go/bin` to the login profile
+> and relaunch Claude Code from that login shell)."
+
+Do not proceed past Step -1 until the user confirms `/mcp` shows the `sshgate`
+server connected.
 
 ---
 
@@ -371,9 +394,20 @@ Expect `active`. If `failed`, run:
 journalctl -u sshgate-signer-telegram -n 30 --no-pager
 ```
 
-…surface the output and stop. The user may need `newgrp sshgatesigner`
-(or a fresh login) before subsequent commands can read
-`/var/lib/sshgatesigner/` without sudo.
+…surface the output and stop.
+
+`scripts/install.sh` adds the user's account to the `sshgatesigner` group.
+This is load-bearing: the signer's Unix socket is mode `0660`, owned by
+`sshgatesigner`, so the MCP server (which runs as the user) can connect to it
+ONLY if the user is in the `sshgatesigner` group AND that membership is ACTIVE
+in the session. Without an active group membership every write is
+permission-denied at the socket. (Reading the audit log under
+`/var/lib/sshgatesigner/` without sudo is a secondary convenience of the same
+group.) Group membership only activates in NEW login sessions — `newgrp
+sshgatesigner` in a side terminal does NOT help the already-running Claude
+Code, because the MCP server inherited the group set from the session Claude
+Code was launched in. The user must log out and back in AND relaunch Claude
+Code before writes work (enforced as a mandatory step after T2.7).
 
 ### T2.3 — Tier 2 — Telegram configure
 
@@ -539,6 +573,19 @@ MCP tool — surface that here instead.)
 
 ### T2.7 — Final summary
 
+First check whether the `sshgatesigner` group is ACTIVE in the session this
+Claude Code (and thus the MCP server) is running in:
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx sshgatesigner && echo 'group:active' || echo 'group:INACTIVE — log out/in and relaunch Claude Code before writes'
+```
+
+If this prints `group:INACTIVE`, the install is complete on disk but the MCP
+server CANNOT connect to the signer socket yet (socket is `0660
+sshgatesigner`; the user's group set was fixed when Claude Code was launched).
+Do NOT declare Tier 2 ready-for-writes. Print the group-activation step below
+and tell the user writes will be permission-denied until they complete it.
+
 Print verbatim:
 
 > SSHGate tier 2 (local Telegram signer) is installed.
@@ -553,6 +600,31 @@ Print verbatim:
 >
 > Re-run /sshgate:setup any time — it's idempotent and detects the
 > current tier.
+
+### T2.8 — MANDATORY: activate the sshgatesigner group (required before writes)
+
+This is a required happy-path step, not troubleshooting. `scripts/install.sh`
+added your account to the `sshgatesigner` group, but a Unix group only
+activates in NEW login sessions. The MCP server inherited its group set from
+the session Claude Code was launched in, so it does NOT yet have
+`sshgatesigner` active — and the signer socket is `0660 sshgatesigner`, so
+every write will be permission-denied until the group is active.
+
+`newgrp sshgatesigner` in a side terminal does NOT fix the already-running
+Claude Code. You MUST:
+
+1. **Log out and back in** (or fully restart your login session) so the
+   `sshgatesigner` group becomes part of your active group set.
+2. **Relaunch Claude Code** from that fresh login session.
+
+Then confirm the group is active:
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx sshgatesigner && echo 'group:active' || echo 'group:INACTIVE — log out/in and relaunch Claude Code before writes'
+```
+
+Only once this prints `group:active` is Tier 2 ready for writes. Until then,
+reads work but every write returns a permission-denied at the signer socket.
 
 ---
 
@@ -580,7 +652,11 @@ systemctl is-active sshgate-signer-telegram
 sudo test -f /var/lib/sshgatesigner/keys/gate.key && echo "key:yes" || echo "key:no"
 sudo test -f /var/lib/sshgatesigner/config/peer.json && echo "peer:yes" || echo "peer:no"
 sudo -u sshgatesigner /usr/local/bin/sshgate-signer-telegram --version
+id -nG | tr ' ' '\n' | grep -qx sshgatesigner && echo 'group:active' || echo 'group:INACTIVE — log out/in and relaunch Claude Code before writes'
 ```
 
 Report each line. Any failure tells the user which tier-2 piece is
-missing and points back at the relevant section.
+missing and points back at the relevant section. If the last line reports
+`group:INACTIVE`, do NOT declare Tier 2 ready-for-writes: the MCP server
+cannot reach the `0660 sshgatesigner` socket until the user logs out/in and
+relaunches Claude Code (T2.8) so the `sshgatesigner` group is active.
