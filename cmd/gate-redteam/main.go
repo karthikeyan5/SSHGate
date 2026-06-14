@@ -92,7 +92,26 @@ CAMPAIGN FLAGS:
   --seed N           fuzzer seed (default 1)
 
 COMMON FLAGS:
-  --state PATH       standing-target state file (default ./.gate-redteam-state.json)
+  --state PATH       standing-target state file
+                     (default ./.gate-redteam-state-<port>.json, per instance)
+  --port N           host SSH port selecting the instance (default 2222)
+  --instance NAME    short instance label (cosmetic)
+
+MULTI-INSTANCE (run several rigs concurrently, each on its own container):
+  Select an instance with the env vars (the contract; flags override them):
+    SSHGATE_REDTEAM_PORT      host SSH port (default 2222)
+    SSHGATE_REDTEAM_INSTANCE  short label (cosmetic)
+  Everything else is DERIVED from the port so instances never collide:
+    compose project + container = sshgate-redteam-<port>
+    state file = ./.gate-redteam-state-<port>.json
+    key dir    = ./.gate-redteam/<port>/
+  Example — two gates live at once:
+    SSHGATE_REDTEAM_PORT=2222 gate-redteam up
+    SSHGATE_REDTEAM_PORT=2223 gate-redteam up
+    SSHGATE_REDTEAM_PORT=2222 gate-redteam test "cat /etc/hostname"
+    SSHGATE_REDTEAM_PORT=2223 gate-redteam test "rm -rf /config/canary"
+    SSHGATE_REDTEAM_PORT=2222 gate-redteam down
+    SSHGATE_REDTEAM_PORT=2223 gate-redteam down
 
 EXIT CODES: 0 clean, 2 docker unavailable / usage error, 3 a BYPASS was found.
 
@@ -102,9 +121,40 @@ drive this with an agent.
 `)
 }
 
-// defaultStateFlag registers and returns a --state flag pointer.
-func defaultStateFlag(fs *flag.FlagSet) *string {
-	return fs.String("state", redteam.DefaultStateFile, "standing-target state file")
+// commonFlags are the instance-selection + state flags every subcommand
+// honours. The env vars SSHGATE_REDTEAM_PORT / SSHGATE_REDTEAM_INSTANCE are
+// the contract the hunters drive; the matching --port / --instance flags are
+// a convenience that, when set, override the env.
+type commonFlags struct {
+	state    *string
+	port     *int
+	instance *string
+}
+
+// registerCommonFlags wires --state / --port / --instance onto fs. Port
+// defaults to the env (or 2222) so an unset flag still respects the env.
+func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
+	envInst := redteam.InstanceFromEnv()
+	return &commonFlags{
+		state:    fs.String("state", "", "standing-target state file (default: per-instance .gate-redteam-state-<port>.json)"),
+		port:     fs.Int("port", envInst.Port, "host SSH port selecting the instance (env SSHGATE_REDTEAM_PORT)"),
+		instance: fs.String("instance", envInst.Label, "short instance label (env SSHGATE_REDTEAM_INSTANCE)"),
+	}
+}
+
+// resolve pins this process to the selected instance (flags override env)
+// and returns the resolved instance plus the state-file path to use. It MUST
+// be called after fs.Parse. The state path is, in priority order:
+//  1. an explicit --state PATH,
+//  2. else the per-instance default .gate-redteam-state-<port>.json.
+func (c *commonFlags) resolve(fs *flag.FlagSet) (redteam.Instance, string) {
+	inst := redteam.InstanceForPort(*c.port, *c.instance)
+	redteam.SetInstance(inst)
+	statePath := *c.state
+	if statePath == "" {
+		statePath = redteam.InstanceStateFile(inst)
+	}
+	return inst, statePath
 }
 
 // withTarget runs fn with a ready Detector. If a HEALTHY standing target
@@ -182,36 +232,41 @@ func newDetector(target *redteam.Target) *redteam.Detector {
 // guard: refuses if a healthy target is already up.
 func cmdUp(args []string) int {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	statePath := defaultStateFlag(fs)
+	cf := registerCommonFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	inst, statePath := cf.resolve(fs)
 	if !redteam.DockerAvailable() {
 		fmt.Fprintln(os.Stderr, "gate-redteam: docker daemon not reachable. Start Docker and retry.")
 		return 2
 	}
 
 	// Don't double-boot: if a healthy target is already up, say so.
-	if st, err := redteam.LoadState(*statePath); err == nil {
+	if st, err := redteam.LoadState(statePath); err == nil {
 		t := redteam.LoadTarget(st)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		up := t.Reachable(ctx)
 		cancel()
 		if up {
-			fmt.Fprintf(os.Stderr, "gate-redteam: a standing target is already up (state=%s). Use `gate-redteam status` or `gate-redteam down`.\n", *statePath)
+			fmt.Fprintf(os.Stderr, "gate-redteam: a standing target is already up (state=%s). Use `gate-redteam status` or `gate-redteam down`.\n", statePath)
 			return 0
 		}
-		fmt.Fprintf(os.Stderr, "gate-redteam: stale state at %s (target unreachable); cleaning before bringing up a fresh one.\n", *statePath)
-		_, _ = redteam.DownTarget(*statePath)
+		fmt.Fprintf(os.Stderr, "gate-redteam: stale state at %s (target unreachable); cleaning before bringing up a fresh one.\n", statePath)
+		_, _ = redteam.DownTarget(statePath)
 	}
+	// resolve() pinned the instance, but DownTarget above pins the stale
+	// state's instance; re-pin ours before bringing up.
+	redteam.SetInstance(inst)
 
 	root, err := repoRoot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gate-redteam: locate repo root: %v\n", err)
 		return 1
 	}
-	// STABLE key dir (not MkdirTemp) so the key survives across commands.
-	keyDir := filepath.Join(filepath.Dir(absStatePath(*statePath)), redteam.DefaultKeyDir)
+	// STABLE per-instance key dir (not MkdirTemp) so the key survives across
+	// commands and never collides with another instance's key.
+	keyDir := filepath.Join(filepath.Dir(absStatePath(statePath)), redteam.InstanceKeyDir(inst))
 	if err := os.MkdirAll(keyDir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "gate-redteam: key dir: %v\n", err)
 		return 1
@@ -219,43 +274,58 @@ func cmdUp(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	fmt.Fprintln(os.Stderr, "gate-redteam: bringing up STANDING target (boot + deploy REAL gate read-only + seed + arm tripwire)...")
+	fmt.Fprintf(os.Stderr, "gate-redteam: bringing up STANDING target (instance=%s port=%d project=%s; boot + deploy REAL gate read-only + seed + arm tripwire)...\n",
+		instLabel(inst), inst.Port, inst.Project)
 	bootCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	target, st, err := redteam.NewStandingTarget(bootCtx, root, keyDir)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gate-redteam: bring up: %v\n", err)
 		// Best-effort cleanup of a half-built target.
-		_, _ = redteam.DownTarget(*statePath)
+		_, _ = redteam.DownTarget(statePath)
 		return 1
 	}
-	if err := redteam.SaveState(*statePath, st); err != nil {
+	if err := redteam.SaveState(statePath, st); err != nil {
 		fmt.Fprintf(os.Stderr, "gate-redteam: save state: %v\n", err)
 		return 1
 	}
 
 	fmt.Printf("standing target UP\n")
-	fmt.Printf("  state file:  %s\n", *statePath)
+	fmt.Printf("  instance:    %s (port %d)\n", instLabel(inst), inst.Port)
+	fmt.Printf("  project:     %s\n", inst.Project)
+	fmt.Printf("  container:   %s\n", inst.Container)
+	fmt.Printf("  state file:  %s\n", statePath)
 	fmt.Printf("  sentinel:    %s\n", st.Sentinel)
 	fmt.Printf("  canary root: %s\n", redteam.CanaryRoot)
 	fmt.Printf("  beacon dir:  %s\n", redteam.BeaconDir)
 	fmt.Printf("  tripwire:    %s (events: %s)\n", target.TripwireMode(), st.WatchLog)
-	fmt.Printf("  now run:     gate-redteam test \"cat /etc/hostname\"\n")
+	fmt.Printf("  now run:     SSHGATE_REDTEAM_PORT=%d gate-redteam test \"cat /etc/hostname\"\n", inst.Port)
 	return 0
+}
+
+// instLabel returns the human label or "(default)" when unset.
+func instLabel(inst redteam.Instance) string {
+	if inst.Label == "" {
+		return "(unlabeled)"
+	}
+	return inst.Label
 }
 
 // cmdDown tears a standing target down fully. Idempotent.
 func cmdDown(args []string) int {
 	fs := flag.NewFlagSet("down", flag.ContinueOnError)
-	statePath := defaultStateFlag(fs)
+	cf := registerCommonFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	inst, statePath := cf.resolve(fs)
 	if !redteam.DockerAvailable() {
 		// Still try to clean host-side state (key dir, state file).
 		fmt.Fprintln(os.Stderr, "gate-redteam: docker not reachable; cleaning host-side state only.")
 	}
-	actions, err := redteam.DownTarget(*statePath)
+	fmt.Fprintf(os.Stderr, "gate-redteam: tearing down instance=%s port=%d project=%s\n",
+		instLabel(inst), inst.Port, inst.Project)
+	actions, err := redteam.DownTarget(statePath)
 	for _, a := range actions {
 		fmt.Fprintf(os.Stderr, "gate-redteam: %s\n", a)
 	}
@@ -271,20 +341,22 @@ func cmdDown(args []string) int {
 // tripwire alive.
 func cmdStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	statePath := defaultStateFlag(fs)
+	cf := registerCommonFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	st, err := redteam.LoadState(*statePath)
+	inst, statePath := cf.resolve(fs)
+	st, err := redteam.LoadState(statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("standing target: DOWN (no state file at %s)\n", *statePath)
+			fmt.Printf("standing target: DOWN (no state file at %s; instance=%s port=%d)\n", statePath, instLabel(inst), inst.Port)
 			return 0
 		}
 		fmt.Fprintf(os.Stderr, "gate-redteam: read state: %v\n", err)
 		return 1
 	}
-	fmt.Printf("standing target: state file present (%s)\n", *statePath)
+	fmt.Printf("standing target: state file present (%s)\n", statePath)
+	fmt.Printf("  instance:    %s (port %d, project %s)\n", instLabel(inst), inst.Port, inst.Project)
 	fmt.Printf("  brought up:  %s\n", st.BroughtUp)
 	fmt.Printf("  sentinel:    %s\n", st.Sentinel)
 	if !redteam.DockerAvailable() {
@@ -327,16 +399,17 @@ func absStatePath(p string) string {
 
 func cmdTest(args []string) int {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	statePath := defaultStateFlag(fs)
+	cf := registerCommonFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 1 || strings.TrimSpace(fs.Arg(0)) == "" {
-		fmt.Fprintln(os.Stderr, `usage: gate-redteam test "<cmd>" [--state PATH]`)
+		fmt.Fprintln(os.Stderr, `usage: gate-redteam test "<cmd>" [--state PATH] [--port N] [--instance NAME]`)
 		return 2
 	}
+	_, statePath := cf.resolve(fs)
 	cmd := fs.Arg(0)
-	return withTarget(*statePath, func(ctx context.Context, t *redteam.Target, d *redteam.Detector) int {
+	return withTarget(statePath, func(ctx context.Context, t *redteam.Target, d *redteam.Detector) int {
 		v, err := d.Test(ctx, "adhoc", cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gate-redteam: test: %v\n", err)
@@ -356,15 +429,21 @@ func cmdCampaign(args []string) int {
 	iterations := fs.Int("iterations", 1, "number of passes over the corpus")
 	duration := fs.Duration("duration", 0, "wall-clock budget (overrides --iterations)")
 	fuzz := fs.Int("fuzz", 50, "fuzzer mutants per pass")
-	report := fs.String("report", "gate-redteam-report.jsonl", "append-only JSONL report path")
+	report := fs.String("report", "", "append-only JSONL report path (default ./gate-redteam-report-<port>.jsonl)")
 	resetEvery := fs.Int("reset-every", 25, "reset canaries every N candidates")
 	seed := fs.Int64("seed", 1, "fuzzer seed")
-	statePath := defaultStateFlag(fs)
+	cf := registerCommonFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	inst, statePath := cf.resolve(fs)
+	// Default the report per-instance so concurrent campaigns don't
+	// interleave into one append-only file.
+	if *report == "" {
+		*report = fmt.Sprintf("gate-redteam-report-%d.jsonl", inst.Port)
+	}
 
-	return withTarget(*statePath, func(ctx context.Context, t *redteam.Target, d *redteam.Detector) int {
+	return withTarget(statePath, func(ctx context.Context, t *redteam.Target, d *redteam.Detector) int {
 		// Campaign resets periodically itself; drop the per-test reset to
 		// avoid double work.
 		d.Resetter = nil
@@ -397,14 +476,15 @@ func cmdCampaign(args []string) int {
 func cmdBatch(args []string) int {
 	fs := flag.NewFlagSet("batch", flag.ContinueOnError)
 	report := fs.String("report", "", "optional append-only JSONL report path")
-	statePath := defaultStateFlag(fs)
+	cf := registerCommonFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: gate-redteam batch <file> [--report PATH] [--state PATH]")
+		fmt.Fprintln(os.Stderr, "usage: gate-redteam batch <file> [--report PATH] [--state PATH] [--port N] [--instance NAME]")
 		return 2
 	}
+	_, statePath := cf.resolve(fs)
 	path := fs.Arg(0)
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -424,7 +504,7 @@ func cmdBatch(args []string) int {
 		return 2
 	}
 
-	return withTarget(*statePath, func(ctx context.Context, t *redteam.Target, d *redteam.Detector) int {
+	return withTarget(statePath, func(ctx context.Context, t *redteam.Target, d *redteam.Detector) int {
 		var rf *os.File
 		if *report != "" {
 			rf, err = os.OpenFile(*report, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
