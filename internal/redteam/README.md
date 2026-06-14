@@ -56,7 +56,7 @@ happen without a signature.** Reads are deliberately allowed.
 |---|-------|------------------------|
 | a | Fool a **WRITE** into classifying **READ** | gate `executed` + a watched path changed -> **BYPASS** |
 | b | Execute **arbitrary code** that in turn writes | same: any executed command whose side effect mutates state |
-| c | **Any** write **without a signature**, **anywhere** | the in-container **tripwire** (`write_alert`) fires on a write to ANY clean-zone path — even outside the canary tree |
+| c | **Any** write **without a signature**, **anywhere** | the in-container **tripwire** (`write_alert`) fires on a write to ANY clean-zone path — even outside the canary tree (incl. the SSH user's home `/config`, its `authorized_keys`, `/tmp`, and runtime `/etc/ssh/sshd_config.d` drop-ins) |
 | d | **Read obvious secrets** | `secret_leaked` — the secret sentinel appears in output (allowed by design, but **quantified**) |
 | e | **Any other harm** | raw exit code + stdout/stderr excerpts in the verdict for human triage |
 
@@ -79,9 +79,11 @@ mutation slipped through unsigned.
    every create/modify/move/delete under a curated **clean zone** to
    `/redteam-watch/events.log`. The detector takes a cursor mark before
    each run and reads the delta after. **Broad + mechanism-agnostic:** it
-   catches a write to a path the corpus never predicted (e.g.
-   `sort -o /tmp/pwned`, `touch /etc/cron.d/x`). This is the stronger,
-   conservative backstop — it errs toward FLAGGING a possible write.
+   catches a write to a path the corpus never predicted — e.g. a free-form
+   attack that drops `/config/.ssh/authorized_keys` (persistence), stages
+   in `/tmp`, plants a `/etc/ssh/sshd_config.d/99-evil.conf` drop-in, or
+   `touch /etc/cron.d/x`. This is the stronger, conservative backstop — it
+   errs toward FLAGGING a possible write.
 
 `BYPASS` trips if **either** detector sees a change while the gate
 executed.
@@ -94,27 +96,51 @@ executed.
 |------|-----|
 | `/config/canary` | the seeded canary tree (overlaps the snapshot; belt-and-braces) |
 | `/redteam-watch/beacon` | world-writable landing pad the corpus aims write payloads at |
-| `/etc` | cron.d, passwd/shadow, init configs — classic persistence targets |
+| `/config` | **the SSH user's REAL home** (testuser HOME is `/config`, not `/home`) — covers `/config/.ssh/authorized_keys` (persistence / self-escalation) and any drop elsewhere in the home |
+| `/tmp` | classic stage-and-pivot landing pad (`sort -o /tmp/pwned`, a planted script) |
+| `/etc` | cron.d, passwd/shadow, init configs, **ssh drop-ins** — classic persistence targets |
 | `/root` | root's home |
-| `/home` | user homes |
+| `/home` | other/future user homes (testuser lives in `/config`, but cover `/home` too) |
 | `/usr/local/bin` | a classic drop-target for a planted binary |
 | `/var/spool/cron` | crontab spool |
 
 These are directories a legitimate forced-command `sh -c <read>` **never**
 writes to, so any event there during an `executed` command is a strong,
-independent bypass signal.
+independent bypass signal. **`/config` and `/tmp` were added** so a
+free-form attack that writes the SSH user's home (most dangerously
+`/config/.ssh/authorized_keys`) or stages in `/tmp` — both INVISIBLE to
+the rig before — now trips `write_alert`.
 
-**Deliberately excluded** (via `inotifywait --exclude`, because they churn
-during NORMAL operation and would false-positive a read):
+**Deliberately excluded** (via `inotifywait --exclude`, because they are
+written at BOOT or by a LEGITIMATE read and would false-positive):
 `/redteam-watch/events.log` + the monitor's pidfile (the rig's own
-bookkeeping), `/etc/s6-overlay`, `/etc/services.d`, `/etc/cont-init.d`
-(linuxserver s6 supervision runtime), `/etc/ssh/ssh_host_*` +
-`/etc/ssh/sshd_config.d` (boot-time host keys / drop-ins),
-`/config/.cache`, `/config/logs`, `/config/.ssh/known_hosts`. We also
-simply **do not watch** `/tmp` or `/config/logs` (not in the watch roots)
-because they are inherently noisy. The exclusion set is verified
-empirically by `TestTripwire_SilentOnRead`: a plain `cat /etc/hostname`
-through the gate produces **zero** events.
+bookkeeping); `/etc/s6-overlay`, `/etc/services.d`, `/etc/cont-init.d`
+(linuxserver s6 supervision runtime), `/etc/ssh/ssh_host_*` (host keys);
+`/config/.cache` (tool caches); `/config/logs` (the sshd session log
+`/config/logs/openssh/current`, rewritten on every connection —
+**confirmed** runtime-noisy); `/config/.ssh/known_hosts` (TOFU churn);
+and `/tmp/sort*` (GNU sort 9.8 spills temp files to `/tmp` on a large
+`sort` read — **confirmed**; only the `sort` temp template is excluded,
+the rest of `/tmp` stays watched).
+
+**Not excluded, on purpose** (these were either hidden before or are the
+whole point of the expanded watch):
+- `/etc/ssh/sshd_config.d` — was a **blanket exclude** ("image entrypoint
+  writes drop-ins"), but that dir is **empty on this image and never
+  written at runtime**. A RUNTIME drop-in there (e.g.
+  `/etc/ssh/sshd_config.d/99-evil.conf`) is real sshd persistence and now
+  **fires**. (Boot writes, if any, are already in the past: the monitor
+  is launched from `NewTarget` AFTER boot+deploy+seed, so no boot-time
+  exclude is needed — verified by a clean `TestTripwire_SilentOnRead`.)
+- `/config/.ssh` (only `known_hosts` within it is excluded) — `authorized_keys`
+  is the prime persistence target and stays watched.
+
+The exclusion set is verified empirically by `TestTripwire_SilentOnRead`:
+plain reads through the gate (`cat /etc/hostname`, `ls -la`,
+`ls -la /config`, `df -h`, `id`, `sort /etc/services`, `sort -n
+/etc/passwd`) produce **zero** events. The snapshot fallback applies the
+**same** exclusion set (see `excludedPath`) so it is never noisier than
+the live monitor.
 
 **Fallback:** if `apk`/`inotify-tools` is unavailable on the image, the
 tripwire degrades to a periodic **broad snapshot** of the same watch
@@ -315,6 +341,15 @@ that was fixed**, so a campaign dynamically re-proves the fixes hold:
   write payload aimed at the beacon dir, plus `classifier-read-control`
   read forms of the same tools that must stay `executed`.
 
+It also covers **free-form locations OUTSIDE the canary tree**
+(`freeform-location`) that the canary snapshot never sees but the
+EXPANDED tripwire now watches: the SSH user's real home `/config`, its
+`/config/.ssh/authorized_keys` (persistence / self-escalation), `/tmp`
+staging, and a runtime `/etc/ssh/sshd_config.d` drop-in. Against the
+fixed gate every one is `denied`; the value is the SAFETY NET — if the
+gate ever regressed and let one run, the tripwire (not the canary diff)
+would catch it and flag `BYPASS`.
+
 Against the fixed gate every WRITE form comes back `denied` (0 bypasses)
 and every READ control comes back `executed` with no `write_alert`.
 
@@ -340,20 +375,31 @@ parser) is unit-tested with **fakes** — no Docker, no sudo, in the normal
 - the campaign aggregates counts correctly and writes valid JSONL;
 - the standing-target state round-trips and `down` is idempotent.
 
-The live container path adds two guarded integration tests (skipped
+The live container path adds three guarded integration tests (skipped
 cleanly when Docker is absent): `TestTripwire_SilentOnRead` (no
-false-positive on a real read through the gate) and
-`TestTripwire_FiresOnOutOfBandWrite` (catches a direct out-of-band write
-to `/etc`). Run them with `go test ./internal/redteam/ -run Tripwire`.
+false-positive on real reads through the gate, incl. `ls -la /config`
+and `sort` which spills temp files), `TestTripwire_FiresOnOutOfBandWrite`
+(catches a direct out-of-band write to `/etc`), and
+`TestTripwire_FiresOnExpandedWatchSet` (catches out-of-band writes to the
+EXPANDED watch set: `/config/.ssh/authorized_keys`, a `/config` home
+file, `/tmp`, and a runtime `/etc/ssh/sshd_config.d` drop-in). Run them
+with `go test ./internal/redteam/ -run Tripwire`.
 
 ---
 
 ## Last live run against the post-fix gate
 
-A single-pass campaign (`--iterations 1 --fuzz 0`, 128 corpus candidates)
-against `main`'s current gate: **0 bypasses**, 106 denied, 22 executed
+A single-pass campaign (`--iterations 1 --fuzz 0`, 138 corpus candidates —
+now incl. the 10 `freeform-location` rows) against the current gate, with
+the EXPANDED watch set live: **0 bypasses**, 116 denied, 22 executed
 (all genuine reads — none changed the filesystem and none tripped the
 tripwire), 6 secret-reads (expected; reads allowed by design), 0 errors.
-All 16 `classifier-write-tools` WRITE rows came back `denied`; all 9
-`classifier-read-control` rows came back `executed` with no `write_alert`.
-No unsigned write got through.
+All 16 `classifier-write-tools` WRITE rows and all 10 `freeform-location`
+rows came back `denied`; all 9 `classifier-read-control` rows came back
+`executed` with no `write_alert`. No unsigned write got through.
+
+The expanded watch was also exercised directly out-of-band: between a
+`WriteMark` and `WriteEventsSince`, a `touch /config/.ssh/authorized_keys`
+recorded `ATTRIB /config/.ssh/authorized_keys` and an
+`echo pwned > /tmp/redteam_oob_probe` recorded `CREATE`+`MODIFY` — both
+INVISIBLE to the rig before this change.

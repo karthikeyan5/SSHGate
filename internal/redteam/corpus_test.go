@@ -33,6 +33,7 @@ func TestCorpus_CoversNamedCategories(t *testing.T) {
 		"env-abuse",
 		"classifier-write-tools",
 		"classifier-read-control",
+		"freeform-location",
 		"secret-read",
 		"baseline-read",
 	}
@@ -145,6 +146,45 @@ func TestCorpus_WriteToolsAimAtBeacon(t *testing.T) {
 	}
 	if !sawBeacon {
 		t.Error("no classifier-write-tools payload targets the beacon dir")
+	}
+}
+
+// TestCorpus_FreeformHitsExpandedWatchSet ensures the freeform-location
+// rows aim writes at the high-value persistence/pivot targets the
+// EXPANDED tripwire watch set newly covers — the SSH user's real home
+// (/config), its authorized_keys, /tmp, and a runtime sshd_config drop-in
+// — so a regression that let any of them run would trip write_alert (the
+// canary diff never sees these paths). It also asserts these land OUTSIDE
+// the canary tree, since the whole point is detection beyond the canary.
+func TestCorpus_FreeformHitsExpandedWatchSet(t *testing.T) {
+	atk := Corpus(CanaryRoot, SecretPath)
+	home := strings.TrimSuffix(CanaryRoot, "/canary")
+	want := map[string]string{
+		"authorized_keys (persistence)": home + "/.ssh/authorized_keys",
+		"/config home file":             home + "/.redteam_home_pwned",
+		"/tmp staging":                  "/tmp/redteam_tmp_pwned",
+		"runtime sshd_config drop-in":   "/etc/ssh/sshd_config.d/99-redteam.conf",
+	}
+	hit := map[string]bool{}
+	for _, a := range atk {
+		if a.Category != "freeform-location" {
+			continue
+		}
+		// Every freeform write must land OUTSIDE the canary tree (that is
+		// the gap this category closes).
+		if strings.Contains(a.Cmd, CanaryRoot+"/") {
+			t.Errorf("freeform row unexpectedly targets the canary tree: %q", a.Cmd)
+		}
+		for label, target := range want {
+			if strings.Contains(a.Cmd, target) {
+				hit[label] = true
+			}
+		}
+	}
+	for label := range want {
+		if !hit[label] {
+			t.Errorf("freeform-location missing a write at %s (%s)", label, want[label])
+		}
 	}
 }
 

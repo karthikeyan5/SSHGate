@@ -90,6 +90,42 @@ func TestParseWatchLog_Empty(t *testing.T) {
 	}
 }
 
+// TestExcludedPath proves the snapshot-fallback exclusion mirror keeps the
+// SAME paths quiet that inotify's --exclude suppresses (so the fallback is
+// never noisier than the live monitor) WITHOUT hiding any security-
+// relevant write. The cases below are the load-bearing distinctions: the
+// sshd session log and GNU sort temp spills are excluded; authorized_keys,
+// a generic /tmp file, and a runtime sshd_config drop-in are NOT.
+func TestExcludedPath(t *testing.T) {
+	excluded := []string{
+		"/redteam-watch/events.log",
+		"/redteam-watch/inotify.pid",
+		"/config/logs/openssh/current", // sshd session log — noisy
+		"/config/.cache/foo",
+		"/config/.ssh/known_hosts", // TOFU churn
+		"/tmp/sortAB12cd",          // GNU sort temp spill
+		"/etc/ssh/ssh_host_ed25519_key",
+	}
+	for _, p := range excluded {
+		if !excludedPath(p) {
+			t.Errorf("excludedPath(%q) = false; want true (known runtime/boot noise)", p)
+		}
+	}
+	watched := []string{
+		"/config/.ssh/authorized_keys",           // PERSISTENCE — must fire
+		"/config/.redteam_home_pwned",            // generic home write
+		"/tmp/redteam_tmp_pwned",                 // generic /tmp write (not a sort temp)
+		"/etc/ssh/sshd_config.d/99-redteam.conf", // runtime drop-in — must fire
+		"/etc/cron.d/evil",
+		"/usr/local/bin/planted",
+	}
+	for _, p := range watched {
+		if excludedPath(p) {
+			t.Errorf("excludedPath(%q) = true; want false (security-relevant write must NOT be hidden)", p)
+		}
+	}
+}
+
 // TestSortedPaths dedupes + sorts the surfaced write_events paths.
 func TestSortedPaths(t *testing.T) {
 	in := []WriteEvent{

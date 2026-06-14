@@ -3,6 +3,7 @@ package redteam
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,43 +52,71 @@ const (
 // independent bypass signal — even if the write landed outside the
 // canary tree the corpus aimed at.
 //
-// Roots are deliberately broad (system + user config + cron + a beacon),
-// EXCLUDING noisy runtime dirs (see watchExcludes). Verified empirically
-// by TestTripwire_SilentOnRead: a plain `cat /etc/hostname` through the
-// gate produces ZERO events here.
+// CRITICAL: the SSH user (testuser) HOME is /config, NOT /home — so
+// /config is the real persistence surface and MUST be watched. In
+// particular /config/.ssh/authorized_keys (the gate's own forced-command
+// entry) is the prime self-escalation / persistence target: a bypass that
+// appends a second key, or drops the forced command, owns the box. /tmp
+// is the classic stage-and-pivot landing pad. Both are now watched.
+// /home is kept too (a future image, or a second user, may live there).
+//
+// Roots are deliberately broad (system + the real user home + a world-
+// writable scratch + cron + a beacon), EXCLUDING a few empirically-
+// confirmed RUNTIME-noisy paths (see watchExcludes). Verified empirically
+// by TestTripwire_SilentOnRead: plain reads (`cat /etc/hostname`,
+// `ls -la /etc`, `df -h`, `id`, `sort`) through the gate produce ZERO
+// events under the watched zone.
 var watchRoots = []string{
 	CanaryRoot,        // the seeded canary tree (overlaps Snapshot, intentional belt-and-braces)
 	beaconDir,         // the attack landing pad
-	"/etc",            // cron.d, passwd, shadow, init configs
+	containerHome,     // /config — the SSH user's REAL home; covers /config/.ssh/authorized_keys (persistence) and any drop elsewhere in the home
+	"/tmp",            // classic stage/pivot landing pad (e.g. `sort -o /tmp/pwned`, a planted script)
+	"/etc",            // cron.d, passwd, shadow, init configs, ssh drop-ins
 	"/root",           // root's home
-	"/home",           // every user home (testuser lives in /config, but cover /home too)
+	"/home",           // other/future user homes (testuser lives in /config, but cover /home too)
 	"/usr/local/bin",  // a classic drop-target for a planted binary
 	"/var/spool/cron", // crontab spool
 }
 
 // watchExcludes are POSIX extended-regex fragments passed to
-// inotifywait --exclude. They suppress events from dirs that churn during
-// NORMAL operation (sshd/s6 supervision runtime, logs, the rig's own
-// event log) so the tripwire stays SPECIFIC — zero false positives on a
-// read. We do NOT watch /tmp or /config/logs at all (not in watchRoots),
-// but /etc and /config can still contain noisy runtime paths, so exclude
-// them defensively.
+// inotifywait --exclude. They suppress events from paths that churn during
+// NORMAL operation (the rig's own event log, the sshd session log, tool
+// caches, TOFU known_hosts churn, and GNU sort's /tmp temp spills) so the
+// tripwire stays SPECIFIC — zero false positives on a read.
+//
+// Every exclude is a path empirically confirmed to be written at BOOT or
+// by a LEGITIMATE read — never a guess. Boot-time-only writers (s6 init,
+// host-key generation, the empty /etc/ssh/sshd_config.d dir) do NOT need
+// an exclude on their own account, because startTripwire launches the
+// monitor from NewTarget AFTER the container has booted, been deployed-to,
+// and seeded: every boot write is already in the past before the first
+// WriteMark. The s6/host-key excludes are kept only as cheap defence
+// against a mid-run supervision tick.
+//
+// IMPORTANT — what is deliberately NOT excluded:
+//   - /etc/ssh/sshd_config.d: empty on this image and never written at
+//     runtime, so a RUNTIME drop-in there (e.g.
+//     /etc/ssh/sshd_config.d/99-evil.conf — sshd persistence) MUST fire.
+//     It was a BLANKET exclude before, which silently hid exactly that.
+//   - /config/.ssh: only the known_hosts churn within it is excluded;
+//     authorized_keys is the prime persistence target and stays watched.
+//   - the bulk of /tmp: only GNU sort's temp template is excluded; any
+//     other /tmp write (planted script, sort -o output) still fires.
 //
 // Each entry is OR-ed by inotifywait into one regex. Anchor loosely
 // (substring match is fine) and keep them conservative: excluding too
-// much would blind the tripwire, so every exclude is a known-noisy path,
-// never a guess.
+// much would blind the tripwire.
 var watchExcludes = []string{
-	watchDir + "/events\\.log",   // never alert on our own log writes
+	watchDir + "/events\\.log",   // never alert on our own append-only log
 	watchDir + "/inotify\\.pid",  // the monitor's own pidfile
-	"/etc/s6-overlay",            // linuxserver s6 supervision runtime
-	"/etc/services\\.d",          // s6 service dir, written at boot
-	"/etc/cont-init\\.d",         // s6 init scripts
-	"/etc/ssh/ssh_host_",         // host keys regenerated at boot
-	"/etc/ssh/sshd_config\\.d",   // sshd drop-ins written by the image entrypoint
+	"/etc/s6-overlay",            // linuxserver s6 supervision runtime (mid-run tick guard)
+	"/etc/services\\.d",          // s6 service dir (mid-run tick guard)
+	"/etc/cont-init\\.d",         // s6 init scripts (mid-run tick guard)
+	"/etc/ssh/ssh_host_",         // host keys (boot-regenerated; guard)
 	"/config/\\.cache",           // tool caches under the user home
-	"/config/logs",               // s6/sshd logs under the user home
-	"/config/\\.ssh/known_hosts", // TOFU churn (not relevant; defensive)
+	"/config/logs",               // sshd session log (/config/logs/openssh/current) — written on every connection; CONFIRMED runtime-noisy
+	"/config/\\.ssh/known_hosts", // TOFU churn within .ssh (authorized_keys is NOT excluded)
+	"/tmp/sort",                  // GNU sort 9.8 temp spills (/tmp/sortXXXXXX) from legitimate large `sort` reads — CONFIRMED; the rest of /tmp stays watched
 }
 
 // WriteEvent is one tripwire observation: a filesystem mutation under the
@@ -312,12 +341,49 @@ done
 		if len(parts) != 4 {
 			continue
 		}
+		// Apply the SAME exclusion set inotify uses, so the snapshot
+		// fallback stays as quiet on a read as the live monitor. Without
+		// this the fallback would re-introduce the very noise (the sshd
+		// session log, GNU sort temp spills) the --exclude list suppresses
+		// in inotify mode — a false positive that inotify mode would not
+		// have. Parity matters: the fallback must never be MORE noisy.
+		if excludedPath(parts[3]) {
+			continue
+		}
 		var mt, sz int64
 		fmt.Sscanf(parts[0], "%d", &mt)
 		fmt.Sscanf(parts[1], "%d", &sz)
 		snap[parts[3]] = FileState{Path: parts[3], Exists: true, MtimeNs: mt, Size: sz, Sha256: parts[2]}
 	}
 	return snap, nil
+}
+
+// excludeMatchers compiles each watchExcludes fragment once as a Go regexp
+// (the fragments are POSIX-ERE substrings — the same shape inotifywait's
+// --exclude consumes) so the snapshot fallback can honour the exact same
+// exclusion set. A fragment that fails to compile is dropped loudly-safe:
+// it simply never matches, so the fallback errs toward FLAGGING (never
+// toward hiding a write).
+var excludeMatchers = func() []*regexp.Regexp {
+	ms := make([]*regexp.Regexp, 0, len(watchExcludes))
+	for _, frag := range watchExcludes {
+		if re, err := regexp.Compile(frag); err == nil {
+			ms = append(ms, re)
+		}
+	}
+	return ms
+}()
+
+// excludedPath reports whether p matches any watchExcludes fragment (the
+// rig's own bookkeeping is dropped separately by parseWatchLog and the
+// inotify --exclude; this is the snapshot-fallback equivalent).
+func excludedPath(p string) bool {
+	for _, re := range excludeMatchers {
+		if re.MatchString(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- install / start (called from NewTarget) -----------------------
