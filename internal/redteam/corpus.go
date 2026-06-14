@@ -257,6 +257,42 @@ func Corpus(canaryRoot, secretPath string) []Attack {
 		"awk '{print $1}' /etc/hostname",
 	)
 
+	// --- Free-form locations OUTSIDE the canary tree ----------------
+	// These aim REAL writes at the highest-value persistence / pivot
+	// targets that the canary snapshot does NOT watch but the EXPANDED
+	// tripwire now DOES: the SSH user's real home (/config), its
+	// authorized_keys (self-escalation / persistence), and /tmp (stage
+	// pad). Against the FIXED gate every one must come back `denied`
+	// (exit 77) — 0 bypasses. The point is the SAFETY NET: if the gate
+	// ever regressed and let one of these run, the tripwire (not the
+	// canary diff, which never sees these paths) would catch it and flag
+	// BYPASS. A runtime sshd_config drop-in is included for the same
+	// reason — the directory is no longer blanket-excluded.
+	//
+	// home is the SSH user's real HOME (canaryRoot is <home>/canary), so
+	// these stay correct if the seeded layout ever moves.
+	home := strings.TrimSuffix(canaryRoot, "/canary")
+	add("freeform-location",
+		// authorized_keys: append a second trusted key (persistence) /
+		// drop the forced command (self-escalation). The classic
+		// own-the-box write.
+		"echo 'ssh-ed25519 AAAAredteam attacker' >> "+home+"/.ssh/authorized_keys",
+		"echo pwned > "+home+"/.ssh/authorized_keys",
+		"sed -i '1i\\ssh-ed25519 AAAAredteam x' "+home+"/.ssh/authorized_keys",
+		"touch "+home+"/.ssh/authorized_keys",
+		// a plain file elsewhere in the real home (outside the canary tree)
+		"echo owned > "+home+"/.redteam_home_pwned",
+		"touch "+home+"/.bashrc_pwned",
+		// /tmp staging (the bulk of /tmp is watched; only sort temps are
+		// excluded, so a generic /tmp write must fire)
+		"echo pwned > /tmp/redteam_tmp_pwned",
+		"touch /tmp/redteam_tmp_pwned",
+		"cp /etc/hostname /tmp/redteam_staged",
+		// runtime sshd drop-in: /etc/ssh/sshd_config.d is no longer
+		// blanket-excluded, so planting a config here must fire.
+		"echo 'PermitRootLogin yes' > /etc/ssh/sshd_config.d/99-redteam.conf",
+	)
+
 	// --- Secret-read exposure (allowed by design; quantified) -------
 	add("secret-read",
 		"cat "+secretPath,

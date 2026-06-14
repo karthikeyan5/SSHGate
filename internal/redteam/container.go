@@ -252,6 +252,21 @@ func (t *Target) Reset(ctx context.Context) error {
 	// (the dir always exists once the tripwire is armed).
 	_, _ = dockerExec(ctx, t.composeFile, nil,
 		fmt.Sprintf("find %s -mindepth 1 -delete 2>/dev/null || true", beaconDir))
+
+	// Clean up the freeform-location landing spots (see corpus.go
+	// "freeform-location"). Against the FIXED gate these are all DENIED so
+	// nothing is ever planted; this matters only if the gate REGRESSED and
+	// let one through — then the tripwire already recorded the BYPASS and
+	// this just stops the artifact from contaminating later candidates.
+	// We do NOT touch authorized_keys here: clobbering it is the very
+	// regression this rig must surface, and a broken key makes every
+	// subsequent candidate ERROR — a loud, correct signal, not one to mask.
+	cleanup := fmt.Sprintf(
+		"rm -f %[1]s/.redteam_home_pwned %[1]s/.bashrc_pwned "+
+			"/tmp/redteam_tmp_pwned /tmp/redteam_staged "+
+			"/etc/ssh/sshd_config.d/99-redteam.conf 2>/dev/null || true",
+		containerHome)
+	_, _ = dockerExec(ctx, t.composeFile, nil, cleanup)
 	return nil
 }
 

@@ -89,9 +89,12 @@ func TestTripwire_SilentOnRead(t *testing.T) {
 		t.Errorf("BYPASS = true on a plain read; want false")
 	}
 
-	// A couple more representative reads to harden the no-false-positive
-	// claim across different tools.
-	for _, rc := range []string{"ls -la /etc", "id", "df -h"} {
+	// A spread of representative reads to harden the no-false-positive
+	// claim across different tools — now that /config and /tmp are
+	// watched. `sort` is included on purpose: GNU sort spills temp files to
+	// /tmp on a large input, and the /tmp/sort exclude must keep that
+	// quiet. `ls -la /config` exercises the real home (the new root).
+	for _, rc := range []string{"ls -la /etc", "id", "df -h", "ls -la /config", "sort /etc/services", "sort -n /etc/passwd"} {
 		rv, err := d.Test(ctx, "live-read", rc)
 		if err != nil {
 			t.Fatalf("Test(%q): %v", rc, err)
@@ -144,5 +147,63 @@ func TestTripwire_FiresOnOutOfBandWrite(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("tripwire did NOT record the out-of-band write to %s; events=%v", probe, events)
+	}
+}
+
+// TestTripwire_FiresOnExpandedWatchSet proves the EXPANDED watch set
+// (/config — the SSH user's real home — and /tmp) is live: a direct
+// out-of-band write to each high-value persistence/pivot target the watch
+// set newly covers is recorded. Most importantly it pins
+// /config/.ssh/authorized_keys (self-escalation / persistence) and a
+// runtime /etc/ssh/sshd_config.d drop-in (no longer blanket-excluded) —
+// the writes that were INVISIBLE before this change. Each is a separate
+// mark/write/read so a failure names the exact unwatched location.
+func TestTripwire_FiresOnExpandedWatchSet(t *testing.T) {
+	target := newLiveTarget(t)
+	ctx := context.Background()
+
+	if target.tripwireFallback {
+		t.Log("tripwire running in snapshot-fallback mode (inotify-tools unavailable)")
+	}
+
+	cases := []struct {
+		name  string
+		probe string
+	}{
+		{"authorized_keys (persistence)", containerHome + "/.ssh/authorized_keys.redteam-probe"},
+		{"/config home file", containerHome + "/.redteam-home-probe"},
+		{"/tmp staging", "/tmp/redteam-tmp-probe"},
+		{"runtime sshd_config drop-in", "/etc/ssh/sshd_config.d/99-redteam-probe.conf"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mark, err := target.WriteMark(ctx)
+			if err != nil {
+				t.Fatalf("WriteMark: %v", err)
+			}
+			// Out-of-band write: straight docker exec, NOT through the gate.
+			if out, err := dockerExec(ctx, target.composeFile, nil, "touch "+tc.probe); err != nil {
+				t.Fatalf("out-of-band touch %s: %v\n%s", tc.probe, err, out)
+			}
+			if !target.tripwireFallback {
+				_, _ = dockerExec(ctx, target.composeFile, nil, "sleep 1")
+			}
+			events, err := target.WriteEventsSince(ctx, mark)
+			if err != nil {
+				t.Fatalf("WriteEventsSince: %v", err)
+			}
+			found := false
+			for _, e := range events {
+				if strings.HasPrefix(e.Path, tc.probe) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("tripwire did NOT record the out-of-band write to %s (expanded watch set); events=%v", tc.probe, events)
+			}
+			// Tidy up so the probe does not contaminate later cases (and so
+			// the authorized_keys neighbour file does not linger).
+			_, _ = dockerExec(ctx, target.composeFile, nil, "rm -f "+tc.probe)
+		})
 	}
 }

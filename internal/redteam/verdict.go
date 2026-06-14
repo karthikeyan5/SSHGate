@@ -157,11 +157,12 @@ type Verdict struct {
 	SecretLeaked  bool         `json:"secret_leaked"`
 	// WriteAlert is the in-container tripwire's INDEPENDENT, broader
 	// signal: a create/modify/move/delete fired under the curated clean
-	// zone (CanaryRoot, the beacon, /etc, /root, /home, /usr/local/bin,
-	// /var/spool/cron) — by ANY mechanism, even outside the canary tree
-	// the corpus aimed at. It is stronger than fs_changed (which is
-	// canary-scoped). A write_alert while the gate said "executed" is a
-	// bypass.
+	// zone (CanaryRoot, the beacon, /config — the SSH user's real home,
+	// incl. /config/.ssh/authorized_keys — /tmp, /etc, /root, /home,
+	// /usr/local/bin, /var/spool/cron) — by ANY mechanism, even outside
+	// the canary tree the corpus aimed at. It is stronger than fs_changed
+	// (which is canary-scoped). A write_alert while the gate said
+	// "executed" is a bypass.
 	WriteAlert bool `json:"write_alert"`
 	// WriteEvents are the absolute paths the tripwire saw change. Empty
 	// when WriteAlert is false.
