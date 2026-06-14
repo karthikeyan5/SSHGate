@@ -30,21 +30,11 @@ const (
 )
 
 // pemAccumulator is the state machine the writer uses while inside
-// a PEM block. Construction is via newPEMAccumulator; the writer
-// drives it one chunk at a time.
+// a PEM block. The writer constructs it inline (see processBuffer in
+// writer.go, which seeds buf by feed-ing the BEGIN-and-after bytes)
+// and drives it one chunk at a time via feed.
 type pemAccumulator struct {
 	buf []byte
-}
-
-// newPEMAccumulator returns an accumulator pre-seeded with the BEGIN
-// line bytes already observed by the scanner. start is the slice of
-// bytes from `-----BEGIN ` up to wherever the writer's current chunk
-// ends.
-func newPEMAccumulator(start []byte) *pemAccumulator {
-	// Defensive copy — the caller's slice may be reused.
-	a := &pemAccumulator{buf: make([]byte, 0, len(start)+512)}
-	a.buf = append(a.buf, start...)
-	return a
 }
 
 // pemFeedResult describes what the writer should do after feeding

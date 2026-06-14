@@ -580,7 +580,10 @@ func (r *Runner) resolveAddServerCfg() (addServerCfg, error) {
 		cfg.GateBinaryPath = p
 	}
 	if cfg.GatePubPath == "" {
-		if env := os.Getenv("SSHGATE_SSHGATE_PUB_PATH"); env != "" {
+		// NOTE: this env was previously the doubled-prefix typo
+		// SSHGATE_SSHGATE_PUB_PATH, so the override silently never fired.
+		// Corrected to mirror its sibling SSHGATE_SSH_PUBKEY_PATH below.
+		if env := os.Getenv("SSHGATE_GATE_PUB_PATH"); env != "" {
 			cfg.GatePubPath = env
 		} else {
 			root, err := configRoot()
