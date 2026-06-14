@@ -53,10 +53,12 @@ pass on a clean machine (or a throwaway user / container) and confirm the
 
 1. `go version` ≥ 1.25; `git clone`; `make install-local`; confirm
    `command -v sshgate-mcp` resolves on `$PATH`.
-2. `/plugin marketplace add <clone>`, `/plugin install sshgate@sshgate`,
-   `/reload-plugins` — confirm the `sshgate` tools appear (the MCP server must
-   come up even though no key exists yet; this is what `make smoke` guards
-   headlessly).
+2. `/plugin marketplace add <clone>`, `/plugin install sshgate@sshgate`, then
+   **fully quit and relaunch Claude Code** — `/reload-plugins` activates the
+   slash commands but does NOT spawn the stdio MCP server; only a fresh start
+   does. After relaunch, run `/mcp` and confirm the `sshgate` server is
+   connected and its tools appear (the MCP server must come up even though no
+   key exists yet — this is what `make smoke` guards headlessly).
 3. `/sshgate:setup` → Tier 1. Then `/sshgate:add <alias> <user@host>` against a
    reachable Linux box — confirm it deploys without a reload and a read
    (`run df -h`) streams back while a write is denied.

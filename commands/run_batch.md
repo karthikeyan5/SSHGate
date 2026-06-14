@@ -51,23 +51,31 @@ The tool classifies each command:
 ## Handling a denied batch
 
 When approval does not go through, the tool returns `out.Denied == true`, an
-empty `results`, and a machine-readable `out.Reason`. Surface the reason with
-its human meaning — do not re-interpret it as a command failure:
+empty `results`, and `out.Reason`. `Reason` is a SHORT machine-readable token
+(`denied` / `timeout`) for the simple cases, but for the two actionable cases
+(permission, signer-unreachable) it carries the FULL remediation sentence
+verbatim instead of a bare token — so match on a substring or just surface it,
+do NOT test `Reason == "permission"`. Surface the reason with its human
+meaning; do not re-interpret it as a command failure:
 
-- **`denied`** — the user tapped **Deny** on Telegram. Do NOT re-submit; ask
-  why and propose alternatives.
-- **`timeout`** — no tap landed inside the approval window. The request
-  expired; offer to re-run so a fresh prompt is sent.
-- **`unreachable`** — the signer daemon is down or not configured. On Tier 1
-  there is no signer at all (writes need a Telegram signer) — run
-  `/sshgate:setup`, then re-run `/sshgate:add` to upgrade. On Tier 2 the
-  daemon didn't answer — check `/sshgate:status` and
-  `systemctl status sshgate-signer-telegram`. After fixing, re-run.
-- **`permission`** — the signer socket is present but the session is not in
-  the `sshgatesigner` group (the socket is `0660 sshgatesigner`). The user
-  must log out and back in AND relaunch Claude Code so the group is active;
-  `newgrp` in a side terminal does NOT fix the already-running session. Re-run
-  after relaunch.
+- **`denied`** (exact token) — the user tapped **Deny** on Telegram. Do NOT
+  re-submit; ask why and propose alternatives.
+- **`timeout`** (exact token) — no tap landed inside the approval window. The
+  request expired; offer to re-run so a fresh prompt is sent.
+- **signer unreachable** (full sentence) — `Reason` is one of two shapes,
+  already disambiguated in the text: `no signer configured (Tier-1
+  read-only). …` → there is no signer at all; run `/sshgate:setup`, then
+  re-run `/sshgate:add` to upgrade. Or `signer socket … is present but not
+  accepting connections — check systemctl status …` → a real Tier-2 daemon
+  problem; check `/sshgate:status`,
+  `systemctl status sshgate-signer-telegram`, and the journal. After fixing,
+  re-run.
+- **signer permission** (full sentence) — `Reason` reads `signer socket … is
+  present but not accessible (permission denied) — your shell/session is not
+  yet in the sshgatesigner group. …`. The socket is `0660 sshgatesigner`; the
+  user must log out and back in AND relaunch Claude Code so the group is
+  active. `newgrp` in a side terminal does NOT fix the already-running
+  session. Re-run after relaunch.
 
 ## Rendering per-command results
 

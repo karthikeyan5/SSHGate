@@ -81,17 +81,64 @@ when it comes back. After a successful batch, run one more diagnostic
 read (`systemctl status nginx`, `nginx -t`, whatever proves the fix)
 to confirm.
 
-## Denial handling
+## Read-only (Tier-1) servers — writes refused before any tap
 
-If the user taps Deny (or the 60s window expires), the tool returns
-an error like `denied by operator` or `approval timed out`. **Do not
-loop.** Resubmitting the same batch the user just denied is rude.
-Instead:
+A server can be registered **read-only** (`/sshgate:add … --read-only`):
+the gate is installed but no signer pubkey was pushed, so it executes
+reads and denies every write locally. When you send a write to such a
+server, `sshgate.run` / `sshgate.run_batch` **refuse it before
+soliciting any Telegram approval** — no tap is wasted — and return an
+error like:
 
-1. Surface the denial verbatim.
-2. Ask why — there's usually context you don't have (wrong time,
-   wrong server, command needs a tweak).
-3. Propose an alternative or stop and wait for direction.
+```
+server "prod-db" is registered read-only — writes are denied at the
+gate (no signer pubkey was pushed). Run /sshgate:setup to add a
+Telegram signer, then re-run /sshgate:add prod-db <user@host> to
+upgrade it to signed-write.
+```
+
+Do NOT retry. Surface that upgrade path to the user and stop. Reads on
+the same server still work normally — keep diagnosing with `sshgate.run`.
+
+## Denial, timeout, and signer-access handling
+
+A failed write surfaces one of these. **Do not loop** on any of them —
+resubmitting the same batch is rude and (for the first three) hopeless.
+
+- **Denied** (`denied by operator`) — the user tapped Deny. Surface it
+  verbatim; ask why (wrong time, wrong server, command needs a tweak);
+  propose an alternative or wait for direction.
+- **Timeout** (`approval timed out`) — the approval window elapsed
+  (signer's default is ~60s). The user was probably away. Tell them and
+  offer to re-send when they're ready, but don't auto-resubmit.
+- **Signer permission denied** (`signer socket … is present but not
+  accessible (permission denied) — your shell/session is not yet in the
+  sshgatesigner group`) — the daemon is ALIVE; the current Claude Code
+  session just hasn't picked up `sshgatesigner` group membership. This
+  happens right after the first `/sshgate:setup`. STOP and tell the user
+  to **log out and back in, fully restart Claude Code, then run `/mcp`**
+  to confirm the `sshgate` server is live before retrying. Do not treat
+  this as "the daemon is dead."
+- **Unreachable** (`signer unreachable` / "not configured") — if
+  `sshgate.status` reports the socket `configured:false`, there is no
+  signer at all (Tier-1 read-only): writes need `/sshgate:setup`. If it
+  reports `configured:true` but UNREACHABLE, the daemon is installed but
+  down — escalate with `systemctl status sshgate-signer-telegram` and
+  `journalctl -u sshgate-signer-telegram -n 50`.
+
+### Gate deny exit codes (77 / 65)
+
+A write that reaches the gate but is rejected there comes back with a
+non-zero exit, now **annotated** with remediation: `sshgate.run`
+surfaces it as the tool error; `sshgate.run_batch` folds it into the
+failing command's stderr and the batch summary. You don't have to
+memorise the codes, but:
+
+- **exit 77** — missing signature OR the host has no signer pubkey
+  (read-only / Tier-1). Check `sshgate.status`; if the signer is not
+  configured, `/sshgate:setup` then re-`/sshgate:add` to upgrade.
+- **exit 65** — bad / expired signature: usually clock skew or a stale
+  approval. Retry once.
 
 ## Classification gotchas
 
@@ -107,14 +154,27 @@ it's a read. A few non-obvious cases:
   is a READ — no Telegram approval. A pipeline with *any* write
   segment (e.g. `cat /etc/foo | tee /tmp/bar`, or `cmd > /tmp/x |
   echo done`) is a WRITE.
+- **An unquoted newline is a command separator** (like `;`). The gate
+  execs via `sh -c`, so `ls\nrm -rf x` runs two commands — the
+  classifier splits on the newline and any write segment makes the
+  whole thing a WRITE. (This closed a read-only-gate bypass where a
+  read first line masked a write second line. Newlines *inside* quotes
+  do not split.)
 - **Redirects (`>`, `>>`)** are ALWAYS WRITE, regardless of what's on
   the left side.
 - **Command substitution `$(...)`** and **process substitution
   `<(...)`, `>(...)`** are ALWAYS WRITE (fail-safe: the classifier
   doesn't try to inspect the substituted command).
 - **`tee`, `sudo`, `find -delete / -exec / -fprint*`, `awk` with
-  `system()`, `sed` with `e`/`w`/`r` flags** — always WRITE
+  `system()`, `sed` with `e`/`w`/`r` script flags** — always WRITE
   (true-write triggers, no exceptions).
+- **`sed -i` / `--in-place`, including bundled short flags** — always
+  WRITE. The classifier catches the in-place flag even when it is
+  bundled onto other no-arg flags, e.g. `sed -ni`, `sed -Ei`,
+  `sed -ri`, `sed -si`, `sed -nri …`, and suffix forms like `-i.bak`.
+  (A bundled `-i` editing in place is a file mutation, not a read —
+  this closed a read-only-gate bypass.) Plain `sed 's/a/b/' file`
+  with no `-i` and no dangerous script flag is still a READ.
 - **`docker exec …`** — write (the inner command is opaque to the
   classifier).
 

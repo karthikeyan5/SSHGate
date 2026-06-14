@@ -26,11 +26,14 @@ Alias must match [a-z][a-z0-9-]{0,30}.
 
 Call `mcp__sshgate__run` with `{ "alias": "<alias>", "command": "<command>" }`.
 
-The tool classifies the command:
+The tool classifies the command (the result carries a top-level `kind`
+field, `"read"` or `"write"`):
 - Read → executes immediately, no approval.
 - Write → requests approval via the signer; the user gets a Telegram
-  prompt. Tell the user that's coming if `classification.kind == "write"`
-  is observable from the tool output; otherwise just wait.
+  prompt. The classification happens before the tap, so you cannot read
+  `kind` until the tool returns — if the command is plainly a write
+  (e.g. an edit/install/restart), tell the user a tap is coming;
+  otherwise just wait.
 
 Surface the tool's output structure:
 
@@ -43,9 +46,41 @@ stderr:
 ```
 
 Omit empty stdout/stderr sections. If `exit_code` is non-zero, lead
-with that. If the tool itself errors (denied, timeout, sshgate-signer-telegram
-unreachable, unknown alias), surface the error verbatim — do not
-re-interpret it.
+with that. If the tool itself errors, surface the error verbatim — do
+not re-interpret it.
+
+## Tool-level errors (write path)
+
+Unlike `run_batch`, `sshgate.run` does NOT return a structured
+`Denied` result — every non-success returns a plain tool error whose
+message already carries the remediation. Surface it verbatim; the
+common write-path cases are:
+
+- **Read-only server.** A write aimed at a server registered read-only
+  (Tier 1, no signer pubkey on the host) is REFUSED before any signing
+  or Telegram tap — the tool returns `server "<alias>" is registered
+  read-only — writes are denied at the gate …`. Do NOT retry. Run
+  `/sshgate:setup` to add a signer, then re-run `/sshgate:add <alias>
+  <user@host>` (without `--read-only`) to upgrade it. No phone tap was
+  spent.
+- **Signer not in group (permission).** `signer socket … is present but
+  not accessible (permission denied) — your shell/session is not yet in
+  the sshgatesigner group`. This is NOT a dead daemon. The user must log
+  out and back in AND relaunch Claude Code so the `sshgatesigner` group
+  is active in the session; `newgrp` in a side terminal does NOT fix the
+  already-running session. After relaunch, `/mcp` to confirm `sshgate`
+  is live, then retry.
+- **Signer unreachable.** Two shapes, already disambiguated in the
+  message: `no signer configured (Tier-1 read-only)` → run
+  `/sshgate:setup` then `/sshgate:add` to upgrade; or `signer socket …
+  is present but not accepting connections` → a real Tier-2 daemon
+  problem, check `systemctl status sshgate-signer-telegram` and
+  `journalctl -u sshgate-signer-telegram -n 50`.
+- **Denied / timed out.** The user tapped Deny, or no tap landed in the
+  approval window. Do NOT re-submit a denial; for a timeout, offer to
+  re-run so a fresh prompt is sent.
+- **Unknown alias.** Surface verbatim; suggest `/sshgate:status` or
+  `sshgate.list_servers` to see what is registered.
 
 ## Recognizing gate exit codes
 
