@@ -14,9 +14,10 @@ import (
 )
 
 // White-box unit tests for the unexported add_server bootstrap helpers.
-// They cover the SEAM-FREE pre-dial guards only: the full bootstrap flow
-// (dial + upload + rollback) needs a BootstrapDialer seam that is held as
-// a design call for Karthi and is deliberately NOT built here.
+// They cover the SEAM-FREE pre-dial guards (auth-method resolution,
+// known_hosts requirement, uploadFile metachar guard). The full bootstrap
+// flow (dial + upload + rollback) is covered separately in
+// add_server_bootstrap_test.go via the newBootstrapSession seam.
 
 // writeTestPrivKey writes a fresh, valid OpenSSH ed25519 private key to
 // dir/name with the given mode and returns its path. Used to exercise the

@@ -159,6 +159,69 @@ func validateUser(user string) error {
 // bootstrapDialTimeout bounds the bootstrap-leg dial + handshake.
 const bootstrapDialTimeout = 20 * time.Second
 
+// bootstrapSession is the minimal set of remote operations the
+// bootstrap pipeline performs over the operator's first-leg SSH
+// connection: run a command (capturing stdout/stderr/exit), upload a
+// file, and close the connection. It exists ONLY as a test seam — the
+// production implementation (sshBootstrapSession) is a thin wrapper that
+// delegates verbatim to the existing runSSH / uploadFile / *ssh.Client
+// logic, so behaviour is byte-for-byte unchanged. Tests substitute an
+// in-memory fake (via the newBootstrapSession var below) so the
+// dial-upload-rollback flow is reachable without a real sshd.
+//
+// The method set is deliberately matched to the current call sites and
+// nothing more:
+//   - Run mirrors runSSH(ctx, client, cmd) — used for the
+//     authorized_keys idempotency probe, mkdir, backup, and rollback.
+//   - Upload mirrors uploadFile(ctx, client, body, remotePath, mode) —
+//     used for the gate binary, gate.pub, and the rewritten
+//     authorized_keys.
+//   - Close mirrors *ssh.Client.Close — the deferred connection teardown.
+type bootstrapSession interface {
+	Run(ctx context.Context, cmd string) (stdout, stderr []byte, err error)
+	Upload(ctx context.Context, body []byte, remotePath, mode string) error
+	Close() error
+}
+
+// sshBootstrapSession is the production bootstrapSession: a thin wrapper
+// over a connected *ssh.Client. Run/Upload forward UNCHANGED to the
+// package functions runSSH / uploadFile (the same code paths AddServer
+// used before the seam was introduced); Close forwards to the client.
+// The only difference from the pre-seam code is the indirection — the
+// real ssh session construction in runSSH/uploadFile is identical.
+type sshBootstrapSession struct {
+	client *ssh.Client
+}
+
+func (s *sshBootstrapSession) Run(ctx context.Context, cmd string) ([]byte, []byte, error) {
+	return runSSH(ctx, s.client, cmd)
+}
+
+func (s *sshBootstrapSession) Upload(ctx context.Context, body []byte, remotePath, mode string) error {
+	return uploadFile(ctx, s.client, body, remotePath, mode)
+}
+
+func (s *sshBootstrapSession) Close() error {
+	return s.client.Close()
+}
+
+// newBootstrapSession dials the bootstrap leg and returns a live
+// bootstrapSession plus the captured host-key fingerprint. It is a
+// package-level var (mirroring the established `var dialWithCtx` seam in
+// src/mcp/sign and `var gateDirFn` in src/gate/cmd) SOLELY so in-package
+// tests can substitute an in-memory fake session and restore the
+// original via defer. Production always uses the default below, which
+// performs the real TCP dial + SSH handshake via dialBootstrap and wraps
+// the resulting *ssh.Client in sshBootstrapSession. No env var, no
+// exported API, no behaviour change.
+var newBootstrapSession = func(ctx context.Context, host string, port int, cfg *ssh.ClientConfig) (bootstrapSession, string, error) {
+	client, fingerprint, err := dialBootstrap(ctx, host, port, cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return &sshBootstrapSession{client: client}, fingerprint, nil
+}
+
 // AddServer registers a new server alias and installs gate on it
 // using the bootstrap credentials supplied in in. The flow is:
 //
@@ -202,7 +265,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 		port = 22
 	}
 	if _, exists := r.Servers.Get(in.Alias); exists {
-		return AddServerOutput{}, fmt.Errorf("tools: alias %q already registered; use sshgate.remove_server first", in.Alias)
+		return AddServerOutput{}, fmt.Errorf("tools: alias %q already registered; use sshgate.revoke_server first", in.Alias)
 	}
 	if in.BootstrapAgent == (in.BootstrapKeyPath != "") {
 		return AddServerOutput{}, errors.New("tools: must specify exactly one of bootstrap_key_path or bootstrap_agent=true")
@@ -248,7 +311,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
 	defer cancel()
-	bootClient, hostFingerprint, err := dialBootstrap(dialCtx, in.Host, port, bootCfg)
+	bootSess, hostFingerprint, err := newBootstrapSession(dialCtx, in.Host, port, bootCfg)
 	if err != nil {
 		// An "unable to authenticate" handshake failure means the
 		// offered bootstrap key is not authorized on the host (wrong
@@ -262,11 +325,11 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 		}
 		return AddServerOutput{}, fmt.Errorf("tools: bootstrap dial: %w", err)
 	}
-	defer bootClient.Close()
+	defer bootSess.Close()
 
 	// Check whether authorized_keys already has the canonical
 	// restricted entry for our pubkey. If so, skip the rewrite.
-	existing, _, err := runSSH(ctx, bootClient, "cat "+remoteAuthKeys+" 2>/dev/null || true")
+	existing, _, err := bootSess.Run(ctx, "cat "+remoteAuthKeys+" 2>/dev/null || true")
 	if err != nil {
 		return AddServerOutput{}, fmt.Errorf("tools: read authorized_keys: %w", err)
 	}
@@ -274,7 +337,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 
 	if !idempotent {
 		// Run the full auto-setup, with rollback on any failure.
-		if err := r.runAutoSetup(ctx, bootClient, gateBin, gatePubBytes,
+		if err := r.runAutoSetup(ctx, bootSess, gateBin, gatePubBytes,
 			sshgatePub, existing); err != nil {
 			return AddServerOutput{}, err
 		}
@@ -287,7 +350,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 		// Roll back if we just made changes; idempotent re-use never
 		// modified anything, so skip rollback in that case.
 		if !idempotent {
-			r.rollback(ctx, bootClient, existing != nil)
+			r.rollback(ctx, bootSess, existing != nil)
 		}
 		if err != nil {
 			return AddServerOutput{}, fmt.Errorf("tools: verify probe: %w (stdout=%q)", err, string(probe))
@@ -305,7 +368,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	}); err != nil {
 		// Roll back the remote — registry was the last step.
 		if !idempotent {
-			r.rollback(ctx, bootClient, existing != nil)
+			r.rollback(ctx, bootSess, existing != nil)
 		}
 		return AddServerOutput{}, fmt.Errorf("tools: registry add: %w", err)
 	}
@@ -332,51 +395,51 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 // treats missing pubkey as "no signer configured"; reads execute,
 // writes are denied at the gate).
 func (r *Runner) runAutoSetup(
-	ctx context.Context, bootClient *ssh.Client,
+	ctx context.Context, bootSess bootstrapSession,
 	gateBin, gatePubBytes []byte,
 	sshgatePub ssh.PublicKey, existingAuthKeys []byte,
 ) error {
 	// Step 1: ensure ~/.sshgate-gate/ exists with the right perms.
-	if _, _, err := runSSH(ctx, bootClient,
+	if _, _, err := bootSess.Run(ctx,
 		"mkdir -p "+remoteGateDir+" && chmod 700 "+remoteGateDir,
 	); err != nil {
 		return fmt.Errorf("tools: mkdir .gate: %w", err)
 	}
 
 	// Step 2: upload gate binary.
-	if err := uploadFile(ctx, bootClient, gateBin, remoteGateBin, "755"); err != nil {
-		r.rollbackPartial(ctx, bootClient, existingAuthKeys, false /* authKeysRewritten */)
+	if err := bootSess.Upload(ctx, gateBin, remoteGateBin, "755"); err != nil {
+		r.rollbackPartial(ctx, bootSess, existingAuthKeys, false /* authKeysRewritten */)
 		return fmt.Errorf("tools: upload gate: %w", err)
 	}
 
 	// Step 3: upload gate.pub (skipped in tier-1 read-only mode).
 	if gatePubBytes != nil {
-		if err := uploadFile(ctx, bootClient, gatePubBytes, remoteGatePub, "644"); err != nil {
-			r.rollbackPartial(ctx, bootClient, existingAuthKeys, false)
+		if err := bootSess.Upload(ctx, gatePubBytes, remoteGatePub, "644"); err != nil {
+			r.rollbackPartial(ctx, bootSess, existingAuthKeys, false)
 			return fmt.Errorf("tools: upload gate.pub: %w", err)
 		}
 	}
 
 	// Step 4: backup authorized_keys (no-op if already exists).
-	if _, _, err := runSSH(ctx, bootClient,
+	if _, _, err := bootSess.Run(ctx,
 		// Use -n on cp via test; do not overwrite an existing backup
 		// (we want to preserve the ORIGINAL state, not the most recent
 		// pre-rewrite state, in case of repeated runs).
 		"mkdir -p ~/.ssh && touch "+remoteAuthKeys+
 			" && if [ ! -f "+remoteAuthKeysBackup+" ]; then cp "+remoteAuthKeys+" "+remoteAuthKeysBackup+"; fi",
 	); err != nil {
-		r.rollbackPartial(ctx, bootClient, existingAuthKeys, false)
+		r.rollbackPartial(ctx, bootSess, existingAuthKeys, false)
 		return fmt.Errorf("tools: backup authorized_keys: %w", err)
 	}
 
 	// Step 5: rewrite authorized_keys for the sshgate dedicated key.
 	rewritten, err := rewriteAuthorizedKeys(existingAuthKeys, sshgatePub, remoteGateBin)
 	if err != nil {
-		r.rollbackPartial(ctx, bootClient, existingAuthKeys, false)
+		r.rollbackPartial(ctx, bootSess, existingAuthKeys, false)
 		return fmt.Errorf("tools: build authorized_keys: %w", err)
 	}
-	if err := uploadFile(ctx, bootClient, rewritten, remoteAuthKeys, "600"); err != nil {
-		r.rollbackPartial(ctx, bootClient, existingAuthKeys, true)
+	if err := bootSess.Upload(ctx, rewritten, remoteAuthKeys, "600"); err != nil {
+		r.rollbackPartial(ctx, bootSess, existingAuthKeys, true)
 		return fmt.Errorf("tools: write authorized_keys: %w", err)
 	}
 	return nil
@@ -386,18 +449,18 @@ func (r *Runner) runAutoSetup(
 // indicates whether the rewrite finished (in which case the backup
 // must be restored to undo it). Errors here are logged-implicitly via
 // nil-discard; the caller already has a primary error to surface.
-func (r *Runner) rollbackPartial(ctx context.Context, c *ssh.Client, original []byte, authKeysRewritten bool) {
+func (r *Runner) rollbackPartial(ctx context.Context, c bootstrapSession, original []byte, authKeysRewritten bool) {
 	if authKeysRewritten {
 		// Try the backup first; if that fails for some reason, write
 		// the captured original directly.
-		_, _, _ = runSSH(ctx, c,
+		_, _, _ = c.Run(ctx,
 			"if [ -f "+remoteAuthKeysBackup+" ]; then cp "+remoteAuthKeysBackup+" "+remoteAuthKeys+
 				" && chmod 600 "+remoteAuthKeys+"; fi")
 		if original != nil {
-			_ = uploadFile(ctx, c, original, remoteAuthKeys, "600")
+			_ = c.Upload(ctx, original, remoteAuthKeys, "600")
 		}
 	}
-	_, _, _ = runSSH(ctx, c, "rm -rf "+remoteGateDir)
+	_, _, _ = c.Run(ctx, "rm -rf "+remoteGateDir)
 }
 
 // UpgradeServerToSigning pushes gate.pub to an already-registered
@@ -454,16 +517,16 @@ func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, boots
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
 	defer cancel()
-	bootClient, _, err := dialBootstrap(dialCtx, entry.Host, entry.Port, bootCfg)
+	bootSess, _, err := newBootstrapSession(dialCtx, entry.Host, entry.Port, bootCfg)
 	if err != nil {
 		return fmt.Errorf("tools: bootstrap dial: %w", err)
 	}
-	defer bootClient.Close()
+	defer bootSess.Close()
 
 	// Push gate.pub. The remote directory already exists (gate
 	// itself is in there), so we skip the mkdir; uploadFile sets the
 	// final mode deterministically.
-	if err := uploadFile(ctx, bootClient, gatePubBytes, remoteGatePub, "644"); err != nil {
+	if err := bootSess.Upload(ctx, gatePubBytes, remoteGatePub, "644"); err != nil {
 		return fmt.Errorf("tools: upload gate.pub: %w", err)
 	}
 
@@ -487,12 +550,12 @@ func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, boots
 // the backup and remove ~/.sshgate-gate/. The hadOriginal flag is reserved
 // for future granularity (e.g. distinguishing "no original file" from
 // "original was empty") — today both cases collapse to restore-or-noop.
-func (r *Runner) rollback(ctx context.Context, c *ssh.Client, hadOriginal bool) {
+func (r *Runner) rollback(ctx context.Context, c bootstrapSession, hadOriginal bool) {
 	_ = hadOriginal
-	_, _, _ = runSSH(ctx, c,
+	_, _, _ = c.Run(ctx,
 		"if [ -f "+remoteAuthKeysBackup+" ]; then cp "+remoteAuthKeysBackup+" "+remoteAuthKeys+
 			" && chmod 600 "+remoteAuthKeys+"; fi")
-	_, _, _ = runSSH(ctx, c, "rm -rf "+remoteGateDir)
+	_, _, _ = c.Run(ctx, "rm -rf "+remoteGateDir)
 }
 
 // resolveAddServerCfg fills in the default paths for the runner. Tests
@@ -636,6 +699,23 @@ func (r *Runner) buildBootstrapClientConfig(in AddServerInput) (*ssh.ClientConfi
 	}, nil
 }
 
+// dialAgentSock dials the ssh-agent Unix socket at $SSH_AUTH_SOCK. It is
+// a package-level var SOLELY as an in-package test seam (same rationale
+// as newBootstrapSession): tests point it at a controlled net.Conn so
+// the agent-auth branch is reachable without a live ssh-agent. Production
+// always uses net.Dial("unix", sock); no env var, no exported API, no
+// behaviour change.
+var dialAgentSock = func(sock string) (net.Conn, error) {
+	return net.Dial("unix", sock)
+}
+
+// parsePrivateKey parses an OpenSSH private key into a Signer. It is a
+// package-level var for the same in-package test-seam reason as above —
+// the parse-success branch can be exercised with a key that is known to
+// parse, and tests may inject a deterministic Signer. Production always
+// uses ssh.ParsePrivateKey verbatim.
+var parsePrivateKey = ssh.ParsePrivateKey
+
 // bootstrapAuthMethod returns the AuthMethod implied by in's bootstrap
 // fields. Caller has already validated that exactly one path is set.
 func bootstrapAuthMethod(in AddServerInput) (ssh.AuthMethod, error) {
@@ -644,7 +724,7 @@ func bootstrapAuthMethod(in AddServerInput) (ssh.AuthMethod, error) {
 		if sock == "" {
 			return nil, errors.New("tools: bootstrap_agent=true but $SSH_AUTH_SOCK is empty")
 		}
-		conn, err := net.Dial("unix", sock)
+		conn, err := dialAgentSock(sock)
 		if err != nil {
 			return nil, fmt.Errorf("dial ssh-agent: %w", err)
 		}
@@ -667,7 +747,7 @@ func bootstrapAuthMethod(in AddServerInput) (ssh.AuthMethod, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read bootstrap key: %w", err)
 		}
-		signer, err := ssh.ParsePrivateKey(body)
+		signer, err := parsePrivateKey(body)
 		if err != nil {
 			return nil, fmt.Errorf("parse bootstrap key: %w", err)
 		}

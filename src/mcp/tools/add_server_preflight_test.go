@@ -18,9 +18,8 @@ import (
 
 // These tests exercise AddServer's SEAM-FREE pre-flight guards — every
 // case here returns BEFORE any network dial. The full bootstrap flow
-// (happy / rollback / idempotent / upgrade) needs a BootstrapDialer seam
-// that is held as a design call for Karthi and is intentionally NOT built;
-// those cases are skipped (see the run report).
+// (happy / rollback / idempotent / upgrade) is covered as white-box tests
+// in add_server_bootstrap_test.go via the newBootstrapSession seam.
 
 // addServerMaterials writes the three local files AddServer reads up front
 // (gate binary, gate.pub, sshgate dedicated SSH pubkey) into a temp dir and
@@ -136,7 +135,7 @@ func TestAddServer_BootstrapMethodExactlyOne(t *testing.T) {
 }
 
 // TestAddServer_AliasAlreadyRegistered asserts a duplicate alias is
-// rejected with an actionable "remove_server first" message before any
+// rejected with an actionable "revoke_server first" message before any
 // dial.
 func TestAddServer_AliasAlreadyRegistered(t *testing.T) {
 	t.Parallel()
