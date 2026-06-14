@@ -106,3 +106,16 @@ The mandated triple review (correctness / adversarial / threat-model, three inde
 **Final verification on main (all green):** `make preflight` (vet + full `-race` incl. the redteam live Docker tests + gitleaks + build) = "safe to push"; `make test-integration` = PASS (44s — the real gate over SSH: read/write/signed/redaction/upgrade/revoke/add-server flows). Nothing pushed (held for Karthi).
 
 **🚩 SYSTEMIC finding for Karthi (a DESIGN call, NOT patched):** the read-only gate execs reads via `/bin/sh -c <raw>` unsigned, so the classifier is a heuristic forever racing the real shell — three bypass rounds now. Durable fix = exec reads via parsed `argv` (no shell), so the classifier's view == the exec's view and the whole shell-parse-mismatch class (escapes/quotes/separators/substitution/redirects, incl. the residual awk `print>var`) disappears — at the cost of read pipelines needing a safe mini-executor or signing. Options + trade-offs saved to memory (`sshgate_classifier_arms_race`). Until then the heuristic stays hardened with the rig as the regression net.
+
+## 3-model parallel rig hunt (2026-06-14, Karthi-requested)
+
+Karthi asked to run the red-team rig as background sub-agents on ALL THREE models — Opus, Sonnet, Haiku — in parallel, ~1 hour each, looping fresh bypass ideas. Prerequisite built first: the rig is now **multi-instance** (`78ed743` merged — `SSHGATE_REDTEAM_PORT`/`--port` selects a per-instance project/container/port/state, defaults unchanged → `make test-integration` byte-for-byte the same; two gates proven live at once). Three hunters ran in isolated worktrees on ports 2222/2223/2224.
+
+**Result — the hunt earned its keep (a FOURTH bypass round):**
+- **Haiku** — 0 bypasses (448 candidates, 20 rounds). The hardened gate held.
+- **Opus** — DEFEATED it: `uniq INPUT OUTPUT` (nil-rule output-file positional → overwrote `/config/.ssh/authorized_keys` unsigned) + `awk` redirect/pipe to a VARIABLE (`print x > f` / `| c` — the harden2 residual).
+- **Sonnet** — DEFEATED it: the same `awk`-variable hole, plus two MORE — `curl` write-file flags (`--trace`/`-D`/`--dump-header`/`-c`/`--cookie-jar`/`--stderr`/`--libcurl`) and `sed 'ADDR w FILE'` with whitespace before the command (`1 w f`, `/re/ w f`).
+
+**All four FIXED (`e245810`)** + 93-case-style regression suite (`TestClassify_ReadOnlyBypassRegressions4`): `uniqRule` (>=2 positionals → WRITE; comm/diff audited clean); `awkProgHasPrintRedirect` (paren-depth-aware print-statement scanner — top-level `>`/`|` is a redirect, `$3>100` / `print ($3>100)` stay READ); curl write-flags added; sed whitespace-before-command (with `/` counting as an address-close only when whitespace-separated, so `/re/d` regexes stay READ). **Dynamically re-confirmed:** brought the live rig back up and replayed the hunters' exact bypass commands — 9/9 now `denied`, a normal read still `executed`. `make preflight` + `make test-integration` green; 35 commits ahead of origin, nothing pushed.
+
+This is the fourth hardening round (analysis → triple review → 3-model hunt) to find more bypasses — the strongest evidence yet for the argv-exec architectural fix above. Asked Karthi whether to run another hunt round on the freshly-patched gate or pause.
