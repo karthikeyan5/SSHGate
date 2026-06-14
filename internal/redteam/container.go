@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	sshlib "golang.org/x/crypto/ssh"
@@ -27,6 +28,10 @@ const (
 	sshContainerPort = 2222
 	containerHome    = "/config"
 	remoteUser       = "testuser"
+	// composeContainerName mirrors container_name in
+	// tests/integration/docker-compose.yml. Used for best-effort teardown
+	// when the state file is missing/corrupt.
+	composeContainerName = "sshgate-test-sshd"
 
 	// CanaryRoot is the write-canary tree inside the container. The
 	// detector watches every file under it; any change while the gate
@@ -49,6 +54,19 @@ type Target struct {
 	knownHosts  string // host path to the TOFU known_hosts file
 	sentinel    string // the secret-canary marker
 	cli         *sshpkg.Client
+
+	// tripwireFallback is true when inotify-tools could not be installed
+	// and the tripwire is running in coarse periodic-snapshot mode. It is
+	// NEVER silently false-positive: the rig logs the fallback loudly at
+	// NewTarget and status reports the active mode.
+	tripwireFallback bool
+
+	// Fallback-only state: keyed snapshots captured at WriteMark time,
+	// guarded by fallbackMu because WriteMark/WriteEventsSince may be
+	// called from the campaign goroutine.
+	fallbackMu     sync.Mutex
+	fallbackSnaps  map[int]Snapshot
+	fallbackNextID int
 }
 
 // DockerAvailable reports whether a usable docker daemon is reachable.
@@ -124,11 +142,25 @@ func NewTarget(ctx context.Context, repoRoot, keyDir string) (*Target, func(), e
 		return nil, nil, err
 	}
 
+	// 5. Arm the in-container write tripwire (background inotify monitor,
+	//    or the snapshot fallback). The tripwire fires on ANY write under
+	//    the curated clean zone, independent of where the corpus aimed.
+	mode, err := startTripwire(ctx, composeFile)
+	if err != nil {
+		teardown()
+		return nil, nil, fmt.Errorf("tripwire: %w", err)
+	}
+	if mode == "snapshot" {
+		// LOUD: never silently degrade write detection.
+		fmt.Fprintln(os.Stderr, "gate-redteam: WARNING — inotify-tools unavailable; tripwire running in COARSE SNAPSHOT fallback mode (still deterministic, but no mid-run transient detection).")
+	}
+
 	t := &Target{
-		composeFile: composeFile,
-		keyPath:     keyPath,
-		knownHosts:  filepath.Join(keyDir, "known_hosts"),
-		sentinel:    sentinel,
+		composeFile:      composeFile,
+		keyPath:          keyPath,
+		knownHosts:       filepath.Join(keyDir, "known_hosts"),
+		sentinel:         sentinel,
+		tripwireFallback: mode == "snapshot",
 		cli: &sshpkg.Client{
 			KeyPath:        keyPath,
 			KnownHostsPath: filepath.Join(keyDir, "known_hosts"),
@@ -213,6 +245,13 @@ func (t *Target) Reset(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reset canaries: %w\n%s", err, out)
 	}
+	// Also clear any beacon files a let-through write may have planted so
+	// the beacon dir stays a clean landing pad across candidates. The
+	// tripwire is mark-cursor based and already saw the event, so this
+	// does not hide anything; it just keeps the baseline tidy. Best-effort
+	// (the dir always exists once the tripwire is armed).
+	_, _ = dockerExec(ctx, t.composeFile, nil,
+		fmt.Sprintf("find %s -mindepth 1 -delete 2>/dev/null || true", beaconDir))
 	return nil
 }
 
@@ -238,6 +277,17 @@ func composeDown(file string) error {
 	cmd := dockerCompose(file, "down", "-v")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// composeDownByName is a best-effort teardown by container name, used when
+// the state file (and thus the compose path) is unavailable. Ignores
+// errors — the container may already be gone.
+func composeDownByName(name string) error {
+	cmd := exec.Command("docker", "rm", "-f", name)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
 	return cmd.Run()
 }
 

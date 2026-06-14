@@ -31,6 +31,8 @@ func TestCorpus_CoversNamedCategories(t *testing.T) {
 		"git-write",
 		"interpreter",
 		"env-abuse",
+		"classifier-write-tools",
+		"classifier-read-control",
 		"secret-read",
 		"baseline-read",
 	}
@@ -85,6 +87,64 @@ func TestCorpus_IncludesFixedHoleExamples(t *testing.T) {
 	// command substitution inside double quotes
 	if !strings.Contains(joined, `cat "$(touch`) {
 		t.Error("missing double-quoted command-substitution hole")
+	}
+}
+
+// TestCorpus_ExercisesAll6FixedClassifierClasses pins one WRITE form for
+// each of the 6 read-only-gate classifier classes fixed on 2026-06-14, so
+// a campaign dynamically re-proves each fix holds (every one must come
+// back `denied`). Mirrors src/classify/classifier_bypass2_test.go.
+func TestCorpus_ExercisesAll6FixedClassifierClasses(t *testing.T) {
+	atk := Corpus(CanaryRoot, SecretPath)
+	joined := "\x00"
+	writeRows := 0
+	for _, a := range atk {
+		joined += a.Cmd + "\x00"
+		if a.Category == "classifier-write-tools" {
+			writeRows++
+		}
+	}
+	// One representative WRITE form per fixed class.
+	needles := map[string]string{
+		"sort -o":          "sort -o " + beaconDir + "/sort_pwned /etc/hostname",
+		"date -s":          "date -s '2020-01-01 00:00:00'",
+		"ip add":           "ip addr add 10.99.0.1/24 dev lo",
+		"ifconfig set":     "ifconfig lo 127.0.0.2",
+		"awk -f opaque":    "awk -f /etc/hostname /etc/hostname",
+		"sed e exec":       "sed 'e touch " + beaconDir + "/sed_e_pwned' /etc/hostname",
+		"sed s///e altdel": "sed 's|x|touch " + beaconDir + "/sed_se_pwned|e' /etc/hostname",
+		"sed $w write":     "sed '$w " + beaconDir + "/sed_w_pwned' /etc/hostname",
+	}
+	for label, n := range needles {
+		if !strings.Contains(joined, "\x00"+n+"\x00") {
+			t.Errorf("classifier-write-tools missing %s payload: %q", label, n)
+		}
+	}
+	if writeRows < 6 {
+		t.Errorf("classifier-write-tools has %d rows; want >=6 (one per fixed class)", writeRows)
+	}
+	// READ controls must reference the same tools so the fix's
+	// non-regression is also exercised dynamically.
+	for _, ctrl := range []string{"sort /etc/hostname", "date +%s", "ip addr show", "ifconfig -a", "awk '{print $1}' /etc/hostname"} {
+		if !strings.Contains(joined, "\x00"+ctrl+"\x00") {
+			t.Errorf("classifier-read-control missing %q", ctrl)
+		}
+	}
+}
+
+// TestCorpus_WriteToolsAimAtBeacon ensures the file-creating
+// classifier-write-tools payloads land in the tripwire's beacon dir, so a
+// let-through write trips BOTH the snapshot-of-beacon and the tripwire.
+func TestCorpus_WriteToolsAimAtBeacon(t *testing.T) {
+	atk := Corpus(CanaryRoot, SecretPath)
+	sawBeacon := false
+	for _, a := range atk {
+		if a.Category == "classifier-write-tools" && strings.Contains(a.Cmd, beaconDir+"/") {
+			sawBeacon = true
+		}
+	}
+	if !sawBeacon {
+		t.Error("no classifier-write-tools payload targets the beacon dir")
 	}
 }
 
