@@ -105,6 +105,16 @@ func containsSubstitution(s string) bool {
 	var inSingle, inDouble bool
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		// A backslash escapes the next byte EVERYWHERE except inside single
+		// quotes (in sh, inside '...' a backslash is literal). An escaped
+		// quote/$/` is a literal data byte — it must NOT toggle quote state
+		// or trigger substitution. Without this, `stat f \'$(rm)` hid its
+		// `$(` behind a phantom single-quote and classified READ while
+		// /bin/sh ran the substitution — an unsigned-exec bypass.
+		if c == '\\' && !inSingle {
+			i++ // skip the escaped byte
+			continue
+		}
 		switch {
 		case inSingle:
 			if c == '\'' {
@@ -153,6 +163,13 @@ func hasTopLevelRedirect(s string) bool {
 	var quote byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		// Backslash escapes the next byte unless inside single quotes — an
+		// escaped `>` is a literal, not a redirect (and `\"` must not open a
+		// phantom quote that hides a real `>`).
+		if c == '\\' && quote != '\'' {
+			i++
+			continue
+		}
 		if quote != 0 {
 			if c == quote {
 				quote = 0
@@ -185,6 +202,15 @@ func splitSegments(s string) []string {
 	i := 0
 	for i < len(s) {
 		c := s[i]
+		// Backslash escapes the next byte unless inside single quotes — an
+		// escaped separator (`\;`, `\&`, `\|`, escaped newline) is literal
+		// and must NOT split, and an escaped quote must NOT open a phantom
+		// quote that swallows a real separator (`ls \' && rm` => the `&&`
+		// and the `rm` segment must still be seen).
+		if c == '\\' && quote != '\'' {
+			i += 2
+			continue
+		}
 		if quote != 0 {
 			if c == quote {
 				quote = 0
@@ -289,6 +315,16 @@ func tokenize(s string) []string {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		// Backslash escapes the next byte unless inside single quotes; the
+		// escaped char is literal token data, so `\ ` does not split the
+		// token and `\'`/`\"` do not toggle quote state.
+		if c == '\\' && quote != '\'' {
+			if i+1 < len(s) {
+				cur.WriteByte(s[i+1])
+				i++
+			}
+			continue
+		}
 		if quote != 0 {
 			if c == quote {
 				quote = 0
