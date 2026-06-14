@@ -177,7 +177,13 @@ func splitSegments(s string) []string {
 		case '\'', '"':
 			quote = c
 			i++
-		case ';':
+		case ';', '\n':
+			// ';' and an unquoted newline are both top-level command
+			// separators for /bin/sh, and the gate execs via `sh -c`, so a
+			// newline runs a second command. Splitting on it closes a
+			// read-only-gate bypass: `ls\nrm -rf x` must NOT classify READ
+			// just because the first line reads. (Newlines inside quotes are
+			// skipped above, so only an unquoted newline splits.)
 			flush(i)
 			start = i + 1
 			i++
@@ -625,9 +631,22 @@ func sedRule(args []string) Kind {
 		if a == "-i" || strings.HasPrefix(a, "--in") {
 			return KindWrite
 		}
-		// -i.bak, -iE etc. (combined short flag form).
-		if len(a) >= 2 && a[0] == '-' && a[1] == 'i' && !strings.HasPrefix(a, "--") {
-			return KindWrite
+		// Combined short-flag form: -i.bak, -iE, AND -i bundled AFTER other
+		// no-arg flags like -n/-s/-E/-r/-z (`-ni`, `-Ei`, `-nri`, ...).
+		// The old check looked only at a[1], so `-ni` (an in-place edit =
+		// WRITE) was misread as READ — a read-only-gate bypass. Scan the
+		// whole short-flag bundle for an `i`, stopping at the first flag
+		// that consumes the rest of the arg as its argument (-e SCRIPT,
+		// -f FILE, -l N), since chars after those are an argument, not flags.
+		if len(a) >= 2 && a[0] == '-' && a[1] != '-' {
+			for j := 1; j < len(a); j++ {
+				if a[j] == 'i' {
+					return KindWrite
+				}
+				if a[j] == 'e' || a[j] == 'f' || a[j] == 'l' {
+					break
+				}
+			}
 		}
 	}
 	for _, s := range scripts {
