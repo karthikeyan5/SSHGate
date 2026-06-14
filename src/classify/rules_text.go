@@ -179,11 +179,30 @@ func sedScriptIsDangerous(script string) bool {
 		if c != 'r' && c != 'R' && c != 'w' && c != 'W' && c != 'e' {
 			continue
 		}
-		if i == 0 {
+		// GNU sed allows whitespace between an address and its command
+		// (`1 w f`, `$ w f`, `1,$ w f`, `/re/ w f`), which the old
+		// direct-predecessor check missed (a 2026-06-14 red-team bypass).
+		// Skip back over that whitespace to the effective preceding char.
+		k := i - 1
+		spaced := false
+		for k >= 0 && (script[k] == ' ' || script[k] == '\t') {
+			k--
+			spaced = true
+		}
+		if k < 0 {
+			return true // command letter at start (after optional whitespace)
+		}
+		p := script[k]
+		if (p >= '0' && p <= '9') || p == ';' || p == '}' || p == '{' || p == '$' {
 			return true
 		}
-		p := script[i-1]
-		if (p >= '0' && p <= '9') || p == ';' || p == '}' || p == '{' || p == '$' {
+		// A `/` counts as an address-close ONLY when whitespace separated it
+		// from the command letter (`/re/ w f`). A `/` glued directly to the
+		// letter is a regex-OPEN delimiter (`/re/d`, `/end/p`, `/warn/d`), NOT
+		// an address close — including it there would false-positive every
+		// regex starting with r/w/e. (The glued write form `/re/w file` stays
+		// covered by the `/w ` substring check above.)
+		if spaced && p == '/' {
 			return true
 		}
 	}
@@ -304,7 +323,149 @@ func awkProgIsDangerous(prog string) bool {
 	if redirectsToFileOrPipe(prog) {
 		return true
 	}
+	// A print/printf statement with a TOP-LEVEL redirect (`>`/`>>`) or pipe
+	// (`|`) whose target is reached through a VARIABLE — `print x > f`,
+	// `print x | c` — writes/execs, but has no literal `"`/`(` after the
+	// operator, so redirectsToFileOrPipe misses it. (Found by the 2026-06-14
+	// red-team; substring checks cannot see the indirection.)
+	if awkProgHasPrintRedirect(prog) {
+		return true
+	}
 	return false
+}
+
+// awkProgHasPrintRedirect reports whether prog has a print/printf statement
+// with a TOP-LEVEL output redirect (`>`/`>>`) or pipe (`|`) — awk's file-write
+// and command-exec primitives — INCLUDING a target reached through a variable
+// (`print x > f`, `print x | c`). It matches awk's own grammar: an
+// unparenthesized `>`/`|` in a print statement IS a redirect, while the same
+// operator inside parens (`print ($3 > 100)`) or outside any print (`$3>100`)
+// is a comparison / logical-or and stays READ. String literals are skipped so
+// a `>` inside a printed string is not mistaken for a redirect.
+func awkProgHasPrintRedirect(prog string) bool {
+	for i := 0; i < len(prog); i++ {
+		if prog[i] == '"' {
+			i = awkSkipString(prog, i)
+			continue
+		}
+		kwLen := 0
+		if awkWordAt(prog, i, "printf") {
+			kwLen = 6
+		} else if awkWordAt(prog, i, "print") {
+			kwLen = 5
+		}
+		if kwLen == 0 {
+			continue
+		}
+		found, end := awkPrintStmtRedirects(prog, i+kwLen)
+		if found {
+			return true
+		}
+		i = end
+	}
+	return false
+}
+
+// awkPrintStmtRedirects scans a single print/printf statement starting just
+// past the keyword and reports whether it has a top-level (paren-depth 0)
+// redirect/pipe, plus the index where the statement ended.
+func awkPrintStmtRedirects(prog string, start int) (bool, int) {
+	depth := 0
+	for j := start; j < len(prog); j++ {
+		switch c := prog[j]; c {
+		case '"':
+			j = awkSkipString(prog, j)
+		case '(', '[', '{':
+			depth++
+		case ')', ']':
+			if depth > 0 {
+				depth--
+			}
+		case '}':
+			if depth > 0 {
+				depth--
+			} else {
+				return false, j // the enclosing block ends the statement
+			}
+		case ';', '\n':
+			if depth == 0 {
+				return false, j
+			}
+		case '>':
+			// `>` / `>>` redirect, but NOT `>=` (comparison).
+			if depth == 0 && (j+1 >= len(prog) || prog[j+1] != '=') {
+				return true, j
+			}
+		case '|':
+			// single `|` pipe-to-command, but NOT `||` (logical or).
+			if depth == 0 &&
+				(j == 0 || prog[j-1] != '|') &&
+				(j+1 >= len(prog) || prog[j+1] != '|') {
+				return true, j
+			}
+		}
+	}
+	return false, len(prog)
+}
+
+// awkSkipString returns the index of the closing quote of the string literal
+// opening at i (prog[i] == '"'), honoring backslash escapes, or the last
+// index if unterminated.
+func awkSkipString(prog string, i int) int {
+	for j := i + 1; j < len(prog); j++ {
+		if prog[j] == '\\' {
+			j++
+			continue
+		}
+		if prog[j] == '"' {
+			return j
+		}
+	}
+	return len(prog) - 1
+}
+
+// awkWordAt reports whether word sits at prog[i] on awk identifier boundaries
+// (so `print` matches the keyword but not the `print` in `sprintf`/`printable`).
+func awkWordAt(prog string, i int, word string) bool {
+	if i+len(word) > len(prog) || prog[i:i+len(word)] != word {
+		return false
+	}
+	if i > 0 && isAwkIdentChar(prog[i-1]) {
+		return false
+	}
+	if i+len(word) < len(prog) && isAwkIdentChar(prog[i+len(word)]) {
+		return false
+	}
+	return true
+}
+
+// uniqRule: GNU `uniq [OPTION]... [INPUT [OUTPUT]]` writes its SECOND
+// positional as an OUTPUT FILE — `uniq in out` clobbers `out`. uniq was a
+// nil (always-READ) allowlist entry, so that write ran unsigned on a
+// read-only server (same class as `sort -o`, but via a bare positional;
+// found by the 2026-06-14 red-team). READ for 0 or 1 positional; WRITE for
+// >= 2. Value-taking short flags (-f/-s/-w + long forms) consume the next arg
+// in separate form so it is not miscounted; `-` (stdin) IS a positional.
+func uniqRule(args []string) Kind {
+	positionals := 0
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) == 0 {
+			continue
+		}
+		if a[0] == '-' && a != "-" {
+			switch a {
+			case "-f", "--skip-fields", "-s", "--skip-chars", "-w", "--check-chars":
+				i++ // separate-form value belongs to the flag, not a positional
+			}
+			continue
+		}
+		positionals++ // a real positional (a filename, or `-` for stdin)
+	}
+	if positionals >= 2 {
+		return KindWrite
+	}
+	return KindRead
 }
 
 // containsGetline reports whether prog uses the `getline` keyword at a word

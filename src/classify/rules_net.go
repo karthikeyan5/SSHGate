@@ -35,6 +35,32 @@ func curlRule(args []string) Kind {
 		case "-O", "--remote-name", "--remote-name-all":
 			// `-O` saves to a filename derived from the URL.
 			return KindWrite
+		case "-D", "--dump-header", "--trace", "--trace-ascii",
+			"-c", "--cookie-jar", "--stderr", "--libcurl":
+			// curl writes a local FILE in many more modes than -o/-O: the
+			// response headers (-D), a full/ascii debug trace (--trace*), the
+			// cookie jar (-c), its own stderr (--stderr), or generated libcurl
+			// C source (--libcurl). `<flag> -` writes to a stdout/stderr stream
+			// (not a disk file) and stays read. Found by the 2026-06-14
+			// red-team — these were missing from the write-flag set.
+			if i+1 < len(args) && args[i+1] != "-" {
+				return KindWrite
+			}
+		}
+		// `=VALUE` long forms of the file-writing flags above.
+		for _, pfx := range []string{"--dump-header=", "--trace=", "--trace-ascii=",
+			"--cookie-jar=", "--stderr=", "--libcurl="} {
+			if strings.HasPrefix(a, pfx) {
+				if strings.TrimPrefix(a, pfx) != "-" {
+					return KindWrite
+				}
+			}
+		}
+		// Bundled short forms `-DFILE` / `-cFILE`.
+		if (strings.HasPrefix(a, "-D") || strings.HasPrefix(a, "-c")) && len(a) > 2 {
+			if a[2:] != "-" {
+				return KindWrite
+			}
 		}
 		if strings.HasPrefix(a, "--data=") || strings.HasPrefix(a, "--data-raw=") ||
 			strings.HasPrefix(a, "--data-binary=") || strings.HasPrefix(a, "--data-urlencode=") ||

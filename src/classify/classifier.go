@@ -397,7 +397,7 @@ var readAllowlist = map[string]argRule{
 	"awk":   awkRule,
 	"sed":   sedRule,
 	"sort":  sortRule,
-	"uniq":  nil,
+	"uniq":  uniqRule,
 	"diff":  nil,
 	"comm":  nil,
 
