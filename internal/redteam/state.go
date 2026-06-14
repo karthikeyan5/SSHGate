@@ -41,15 +41,61 @@ type State struct {
 	TripwireFallback bool `json:"tripwire_fallback"`
 	// BroughtUp is when `up` completed, for human status display.
 	BroughtUp string `json:"brought_up"`
+
+	// Instance identity (multi-instance). Port is the host SSH port this
+	// standing target listens on; Label is the cosmetic SSHGATE_REDTEAM_INSTANCE;
+	// Project/Container are derived (sshgate-redteam-<port>) and recorded so
+	// `down`/`status` address the right compose project + container even if
+	// the env differs at down-time. Omitted (zero) in pre-multi-instance
+	// state files; LoadTarget back-fills the default (port 2222) for those.
+	Port      int    `json:"port,omitempty"`
+	Label     string `json:"label,omitempty"`
+	Project   string `json:"project,omitempty"`
+	Container string `json:"container,omitempty"`
 }
 
-// DefaultStateFile is the default standing-target state file (in the cwd,
-// gitignored).
+// instance reconstructs the Instance from a State, back-filling the default
+// (port 2222) for pre-multi-instance state files that carry no port.
+func (s State) instance() Instance {
+	if s.Port == 0 {
+		return DefaultInstance()
+	}
+	inst := InstanceForPort(s.Port, s.Label)
+	// Honour explicitly-recorded project/container if present (future-proof
+	// against a derivation change); otherwise the derived values stand.
+	if s.Project != "" {
+		inst.Project = s.Project
+	}
+	if s.Container != "" {
+		inst.Container = s.Container
+	}
+	return inst
+}
+
+// DefaultStateFile is the legacy single-instance state file name. New code
+// uses InstanceStateFile so concurrent instances never share one file; this
+// remains only for back-compat / docs.
 const DefaultStateFile = ".gate-redteam-state.json"
 
-// DefaultKeyDir is the STABLE key dir a standing target uses (NOT
-// os.MkdirTemp, which gets removed). Lives in the cwd, gitignored.
+// DefaultKeyDir is the legacy single-instance key-dir name. New code uses
+// InstanceKeyDir so concurrent instances never share keys. Kept for
+// back-compat / docs.
 const DefaultKeyDir = ".gate-redteam/keys"
+
+// InstanceStateFile is the per-instance standing-target state file in the
+// cwd (gitignored by /.gate-redteam*): .gate-redteam-state-<port>.json. Two
+// instances on different ports get different files, so their standing-target
+// state never collides.
+func InstanceStateFile(inst Instance) string {
+	return fmt.Sprintf(".gate-redteam-state-%d.json", inst.Port)
+}
+
+// InstanceKeyDir is the per-instance STABLE key dir in the cwd (gitignored):
+// .gate-redteam/<port>/. Each instance owns its dedicated SSH key + TOFU
+// known_hosts here, so concurrent instances never clobber each other's keys.
+func InstanceKeyDir(inst Instance) string {
+	return filepath.Join(".gate-redteam", fmt.Sprintf("%d", inst.Port))
+}
 
 // SaveState persists s to path (0600 — it points at a private key path,
 // though it holds no secret itself). Parent dirs are created.
@@ -98,6 +144,10 @@ func NewStandingTarget(ctx context.Context, repoRoot, keyDir string) (*Target, S
 		WatchLog:         watchLog,
 		TripwireFallback: t.tripwireFallback,
 		BroughtUp:        time.Now().UTC().Format(time.RFC3339),
+		Port:             t.inst.Port,
+		Label:            t.inst.Label,
+		Project:          t.inst.Project,
+		Container:        t.inst.Container,
 	}
 	return t, st, nil
 }
@@ -107,7 +157,13 @@ func NewStandingTarget(ctx context.Context, repoRoot, keyDir string) (*Target, S
 // The container, gate, canaries, and tripwire are assumed already up
 // (verify with Reachable first).
 func LoadTarget(s State) *Target {
+	inst := s.instance()
+	// Pin the process to this target's instance so the bare compose helpers
+	// (and tripwire.go's Target methods) address the right project. Safe:
+	// one gate-redteam process targets exactly one instance.
+	SetInstance(inst)
 	return &Target{
+		inst:             inst,
 		composeFile:      s.ComposeFile,
 		keyPath:          s.KeyPath,
 		knownHosts:       s.KnownHosts,
@@ -168,15 +224,24 @@ func DownTarget(stateFile string) ([]string, error) {
 	}
 
 	if s.ComposeFile != "" {
+		// Pin the process to THIS state's instance so `compose down -v` tears
+		// down the right project/container — and ONLY that instance's, never
+		// a sibling instance running concurrently.
+		SetInstance(s.instance())
 		if derr := composeDown(s.ComposeFile); derr != nil {
 			actions = append(actions, fmt.Sprintf("compose down warning: %v", derr))
 		} else {
 			actions = append(actions, "compose down -v: container + volumes removed")
 		}
 	} else {
-		// Best-effort by container name (covers a corrupt state file).
-		_ = composeDownByName(composeContainerName)
-		actions = append(actions, "best-effort container removal by name")
+		// Best-effort by container name (covers a corrupt state file). Use
+		// the recorded instance's container if we have one, else the default.
+		name := DefaultContainerName
+		if s.Container != "" {
+			name = s.Container
+		}
+		_ = composeDownByName(name)
+		actions = append(actions, "best-effort container removal by name ("+name+")")
 	}
 
 	if s.FixturesPub != "" {

@@ -24,14 +24,17 @@ import (
 // normal package, so we re-implement the deploy via os/exec docker
 // compose rather than importing the _test.go helpers.
 const (
-	composeService   = "sshd"
-	sshContainerPort = 2222
-	containerHome    = "/config"
-	remoteUser       = "testuser"
-	// composeContainerName mirrors container_name in
+	composeService = "sshd"
+	// DefaultPort is the host SSH port the rig dials by default — TODAY's
+	// exact behaviour, so `make test-integration` and existing usage are
+	// unchanged when no instance override is set.
+	DefaultPort   = 2222
+	containerHome = "/config"
+	remoteUser    = "testuser"
+	// DefaultContainerName mirrors the default container_name in
 	// tests/integration/docker-compose.yml. Used for best-effort teardown
-	// when the state file is missing/corrupt.
-	composeContainerName = "sshgate-test-sshd"
+	// when the state file is missing/corrupt and carries no instance.
+	DefaultContainerName = "sshgate-test-sshd"
 
 	// CanaryRoot is the write-canary tree inside the container. The
 	// detector watches every file under it; any change while the gate
@@ -40,7 +43,85 @@ const (
 	// SecretPath is the secret-canary file; its sentinel is what a read
 	// attack tries to exfiltrate.
 	SecretPath = containerHome + "/canary-secret.txt"
+
+	// Env-var contract the model-driven hunters use to pick an instance.
+	// SSHGATE_REDTEAM_PORT selects the host SSH port (default 2222);
+	// SSHGATE_REDTEAM_INSTANCE is a short human label carried into status
+	// output. Everything else (compose project, container name, host state
+	// file, key dir) is DERIVED from the port so two instances never
+	// collide. The compose file itself reads SSHGATE_REDTEAM_HOST_PORT and
+	// SSHGATE_REDTEAM_CONTAINER, which `up` exports from the chosen port.
+	EnvPort     = "SSHGATE_REDTEAM_PORT"
+	EnvInstance = "SSHGATE_REDTEAM_INSTANCE"
+	// envHostPort / envContainer are the names the docker-compose.yml
+	// templates read; composeUp exports them so the right port is published
+	// and the right container_name is used.
+	envHostPort  = "SSHGATE_REDTEAM_HOST_PORT"
+	envContainer = "SSHGATE_REDTEAM_CONTAINER"
 )
+
+// Instance identifies one independent rig against its own disposable gate
+// container. Several rig processes can run concurrently, each pinned to a
+// distinct port, so their compose projects, container names, host SSH
+// ports, state files, and key dirs never collide.
+//
+// Everything but Label is derived from Port, so an instance is fully
+// determined by its port. The zero value is NOT valid; build one with
+// InstanceFromEnv or InstanceForPort.
+type Instance struct {
+	Port      int    // host SSH port (dial 127.0.0.1:Port; published by compose)
+	Label     string // short human label (SSHGATE_REDTEAM_INSTANCE); cosmetic
+	Project   string // docker compose -p <project>, isolates networks/resources
+	Container string // container_name the compose template uses
+}
+
+// InstanceForPort builds the instance for a host SSH port. Compose project
+// and container name are both "sshgate-redteam-<port>" — unique per port so
+// two instances cannot fight over a fixed name or the default-project
+// basename ("integration", shared across worktrees).
+func InstanceForPort(port int, label string) Instance {
+	name := fmt.Sprintf("sshgate-redteam-%d", port)
+	return Instance{Port: port, Label: label, Project: name, Container: name}
+}
+
+// DefaultInstance is TODAY's behaviour: port 2222, project/container
+// "sshgate-redteam-2222". The compose template still defaults
+// container_name to "sshgate-test-sshd" and the port to 2222 when the env
+// is unset, so `make test-integration` (which sets no env) is untouched.
+func DefaultInstance() Instance { return InstanceForPort(DefaultPort, "") }
+
+// InstanceFromEnv resolves the instance from SSHGATE_REDTEAM_PORT /
+// SSHGATE_REDTEAM_INSTANCE, falling back to DefaultInstance() when unset or
+// malformed. This is the contract the hunters drive: set the two env vars,
+// everything else is derived.
+func InstanceFromEnv() Instance {
+	port := DefaultPort
+	if v := strings.TrimSpace(os.Getenv(EnvPort)); v != "" {
+		var p int
+		if _, err := fmt.Sscanf(v, "%d", &p); err == nil && p > 0 && p < 65536 {
+			port = p
+		}
+	}
+	return InstanceForPort(port, strings.TrimSpace(os.Getenv(EnvInstance)))
+}
+
+// currentInstance is the process-global instance the bare compose helpers
+// (dockerCompose/dockerExec/composeUp/composeDown, also called from
+// tripwire.go) consult to inject `-p <project>`. Each gate-redteam process
+// targets exactly ONE instance, so a process-global set once at startup is
+// correct and concurrency-safe: distinct instances are distinct OS
+// processes. It defaults to DefaultInstance() so tests and integration that
+// never call SetInstance keep TODAY's behaviour.
+var currentInstance = DefaultInstance()
+
+// SetInstance pins this process to inst. Call it once, before any compose
+// operation (main.go does this from the resolved env/flags; NewTarget and
+// LoadTarget also pin from the instance they carry, so a direct library
+// caller need not).
+func SetInstance(inst Instance) { currentInstance = inst }
+
+// CurrentInstance returns the instance this process is pinned to.
+func CurrentInstance() Instance { return currentInstance }
 
 // Target is a live disposable SSH container with the REAL gate deployed
 // in READ-ONLY mode (no gate.pub). It owns the dedicated SSH key the
@@ -49,6 +130,7 @@ const (
 // EVERYTHING a Target does runs INSIDE the throwaway container. The host
 // is never touched beyond the docker CLI and a temp dir for the SSH key.
 type Target struct {
+	inst        Instance // which rig instance this target belongs to (port/project/container)
 	composeFile string
 	keyPath     string // host path to the dedicated SSH private key
 	knownHosts  string // host path to the TOFU known_hosts file
@@ -83,6 +165,19 @@ func DockerAvailable() bool {
 // the detector can flag stdout that exfiltrates it.
 func (t *Target) Sentinel() string { return t.sentinel }
 
+// Instance returns the rig instance this target belongs to.
+func (t *Target) Instance() Instance { return t.inst }
+
+// pin re-asserts this target's instance as the process global so the bare
+// compose helpers (and tripwire.go's Target methods) address the right
+// compose project. A no-op in the normal single-instance-per-process case;
+// it just makes a target self-consistent if two were ever held at once.
+func (t *Target) pin() {
+	if t.inst.Project != "" {
+		SetInstance(t.inst)
+	}
+}
+
 // NewTarget brings the container up, generates a dedicated SSH key,
 // installs the REAL gate binary in READ-ONLY mode (no gate.pub) behind a
 // forced-command authorized_keys entry, and seeds the canaries. It
@@ -92,6 +187,13 @@ func (t *Target) Sentinel() string { return t.sentinel }
 // to cross-compile the gate). keyDir is a host scratch dir for the key +
 // known_hosts (typically os.MkdirTemp).
 func NewTarget(ctx context.Context, repoRoot, keyDir string) (*Target, func(), error) {
+	// The instance is whatever this process is pinned to (main.go pins it
+	// from the env/flags before calling; a direct library caller gets the
+	// process global, which defaults to DefaultInstance()). Pin it again so
+	// the bare compose helpers and tripwire.go all agree on the project.
+	inst := CurrentInstance()
+	SetInstance(inst)
+
 	composeFile := filepath.Join(repoRoot, "tests", "integration", "docker-compose.yml")
 	if _, err := os.Stat(composeFile); err != nil {
 		return nil, nil, fmt.Errorf("compose file: %w", err)
@@ -124,7 +226,7 @@ func NewTarget(ctx context.Context, repoRoot, keyDir string) (*Target, func(), e
 		_ = os.Remove(fixturesPub)
 	}
 
-	if err := waitForBanner("127.0.0.1", sshContainerPort, 60*time.Second); err != nil {
+	if err := waitForBanner("127.0.0.1", inst.Port, 60*time.Second); err != nil {
 		teardown()
 		return nil, nil, fmt.Errorf("ssh banner: %w", err)
 	}
@@ -156,6 +258,7 @@ func NewTarget(ctx context.Context, repoRoot, keyDir string) (*Target, func(), e
 	}
 
 	t := &Target{
+		inst:             inst,
 		composeFile:      composeFile,
 		keyPath:          keyPath,
 		knownHosts:       filepath.Join(keyDir, "known_hosts"),
@@ -174,7 +277,8 @@ func NewTarget(ctx context.Context, repoRoot, keyDir string) (*Target, func(), e
 // key (the forced-command path) and returns the raw RunResult. It
 // satisfies GateRunner.
 func (t *Target) Run(ctx context.Context, cmd string) RunResult {
-	stdout, stderr, exit, err := t.cli.Run(ctx, "127.0.0.1", remoteUser, sshContainerPort, cmd)
+	t.pin()
+	stdout, stderr, exit, err := t.cli.Run(ctx, "127.0.0.1", remoteUser, t.inst.Port, cmd)
 	return RunResult{
 		ExitCode: exit,
 		Stdout:   string(stdout),
@@ -189,6 +293,7 @@ func (t *Target) Run(ctx context.Context, cmd string) RunResult {
 // container via a single sh script (one docker exec) so a snapshot is
 // cheap even for a long campaign.
 func (t *Target) Snapshot(ctx context.Context) (Snapshot, error) {
+	t.pin()
 	// For each regular file under the watched roots, print:
 	//   <mtime_ns>\t<size>\t<sha256>\t<path>
 	// Missing roots are tolerated (the canary dir may have been rm'd by
@@ -241,6 +346,7 @@ done
 // candidates do not contaminate each other. Cheap enough to call
 // periodically in a campaign.
 func (t *Target) Reset(ctx context.Context) error {
+	t.pin()
 	out, err := dockerExec(ctx, t.composeFile, nil, canarySetupScript(t.sentinel))
 	if err != nil {
 		return fmt.Errorf("reset canaries: %w\n%s", err, out)
@@ -272,13 +378,29 @@ func (t *Target) Reset(ctx context.Context) error {
 
 // ---- container helpers (os/exec docker compose) --------------------
 
+// dockerCompose builds `docker compose -p <project> -f <file> <args...>`.
+// The `-p <project>` is REQUIRED on every call (up/down/exec): the default
+// project basename is the compose dir ("integration"), identical across all
+// worktrees, so without it two instances — or two worktrees — would share
+// one project and clobber each other's networks/containers. The project is
+// the process-global instance's (CurrentInstance), so tripwire.go's bare
+// `dockerExec(ctx, t.composeFile, ...)` calls land in the right project
+// without having to thread the instance through every helper.
 func dockerCompose(file string, args ...string) *exec.Cmd {
-	full := append([]string{"compose", "-f", file}, args...)
+	full := append([]string{"compose", "-p", currentInstance.Project, "-f", file}, args...)
 	return exec.Command("docker", full...)
 }
 
 func composeUp(ctx context.Context, file string) error {
 	cmd := dockerCompose(file, "up", "-d", "--force-recreate", "--remove-orphans")
+	// Tell the compose template which host port to publish and which
+	// container_name to use for THIS instance. Defaults in the template
+	// (2222 / sshgate-test-sshd) keep `make test-integration` unchanged when
+	// these are unset, but the rig always sets them explicitly.
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("%s=%d", envHostPort, currentInstance.Port),
+		fmt.Sprintf("%s=%s", envContainer, currentInstance.Container),
+	)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
