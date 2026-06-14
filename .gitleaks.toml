@@ -19,3 +19,13 @@ paths = [
   '''src/redact/rules/.*\.go$''',
   '''testdata/redact/.*''',
 ]
+# The gate red-team rig (internal/redteam) references the SSH key FIXTURE
+# PATH "sshgate_ed25519.pub" — a filename, not a credential — which trips the
+# generic-api-key entropy rule. The rig holds no real secrets: its canary
+# sentinel is generated at runtime via crypto/rand, and the throwaway SSH
+# private key is written to a temp dir, never committed. Allowlist the
+# fixture-key token specifically (NOT the whole package) so a real secret in
+# the rig would still be caught.
+regexes = [
+  '''sshgate_ed25519\.pub''',
+]
