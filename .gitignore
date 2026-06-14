@@ -11,3 +11,9 @@ audits/*.log
 # NEVER commit them — this repo mirrors to public GitHub. Keep only .gitkeep.
 /tests/integration/fixtures/keys/*
 !/tests/integration/fixtures/keys/.gitkeep
+
+# gate-redteam standing-target artifacts (state file, stable key dir) and
+# campaign reports. Generated at runtime; never commit (the key dir holds a
+# live SSH private key, the report can be large).
+/.gate-redteam*
+gate-redteam-report.jsonl

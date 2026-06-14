@@ -30,10 +30,12 @@ const (
 	watchDir = "/redteam-watch"
 	// watchLog is the append-only event log inotifywait writes to.
 	watchLog = watchDir + "/events.log"
-	// beaconDir is a world-writable dir nothing but attacks write to.
+	// BeaconDir is a world-writable dir nothing but attacks write to.
 	// The classifier-write-tools corpus aims here so a let-through write
-	// lands somewhere the tripwire is guaranteed to be watching.
-	beaconDir = watchDir + "/beacon"
+	// lands somewhere the tripwire is guaranteed to be watching. Exported
+	// so the command can print it at `up` time.
+	BeaconDir = watchDir + "/beacon"
+	beaconDir = BeaconDir
 	// watchPID is where the monitor records its inotifywait PID so
 	// status/teardown can check liveness.
 	watchPID = watchDir + "/inotify.pid"

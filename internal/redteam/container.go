@@ -28,6 +28,10 @@ const (
 	sshContainerPort = 2222
 	containerHome    = "/config"
 	remoteUser       = "testuser"
+	// composeContainerName mirrors container_name in
+	// tests/integration/docker-compose.yml. Used for best-effort teardown
+	// when the state file is missing/corrupt.
+	composeContainerName = "sshgate-test-sshd"
 
 	// CanaryRoot is the write-canary tree inside the container. The
 	// detector watches every file under it; any change while the gate
@@ -273,6 +277,17 @@ func composeDown(file string) error {
 	cmd := dockerCompose(file, "down", "-v")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// composeDownByName is a best-effort teardown by container name, used when
+// the state file (and thus the compose path) is unavailable. Ignores
+// errors — the container may already be gone.
+func composeDownByName(name string) error {
+	cmd := exec.Command("docker", "rm", "-f", name)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
 	return cmd.Run()
 }
 
