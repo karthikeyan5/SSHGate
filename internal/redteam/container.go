@@ -241,6 +241,13 @@ func (t *Target) Reset(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reset canaries: %w\n%s", err, out)
 	}
+	// Also clear any beacon files a let-through write may have planted so
+	// the beacon dir stays a clean landing pad across candidates. The
+	// tripwire is mark-cursor based and already saw the event, so this
+	// does not hide anything; it just keeps the baseline tidy. Best-effort
+	// (the dir always exists once the tripwire is armed).
+	_, _ = dockerExec(ctx, t.composeFile, nil,
+		fmt.Sprintf("find %s -mindepth 1 -delete 2>/dev/null || true", beaconDir))
 	return nil
 }
 

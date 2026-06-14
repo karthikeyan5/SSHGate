@@ -204,6 +204,59 @@ func Corpus(canaryRoot, secretPath string) []Attack {
 		"PAGER='touch "+probe+"' git log",
 	)
 
+	// --- The 6 classifier write/exec classes fixed 2026-06-14 -------
+	// Each WRITE form below was, pre-fix, mapped to an always-READ rule
+	// and so ran unsigned on a Tier-1 gate. They aim REAL write payloads
+	// at the beacon dir (under the tripwire's clean zone) so BOTH the
+	// canary snapshot and the tripwire would see the write IF the gate
+	// let it through. Against the FIXED gate every WRITE row must come
+	// back `denied` (exit 77) — 0 bypasses is the dynamic proof the
+	// classifier fix holds. Each class also gets a READ control that must
+	// stay `executed` with no write_alert.
+	//
+	// beaconWrite is a write payload landing in the beacon dir; we use a
+	// distinct filename per class so a leak is attributable.
+	bw := func(name string) string { return beaconDir + "/" + name }
+	add("classifier-write-tools",
+		// 1. sort -o / --output writes a file
+		"sort -o "+bw("sort_pwned")+" /etc/hostname",
+		"sort --output="+bw("sort_pwned2")+" /etc/hostname",
+		// 2. date -s / --set / positional set the system clock (state
+		//    mutation; no beacon file, but a denied verdict is the proof).
+		"date -s '2020-01-01 00:00:00'",
+		"date --set=@1",
+		"date 010100002020",
+		// 3. ip OBJECT {add|set|del|flush} reconfigures the host
+		"ip addr add 10.99.0.1/24 dev lo",
+		"ip link set lo down",
+		"ip route add 10.99.0.0/24 dev lo",
+		"ip addr del 10.99.0.1/24 dev lo",
+		// 4. ifconfig <iface> <config> reconfigures an interface
+		"ifconfig lo 127.0.0.2",
+		"ifconfig lo netmask 255.0.0.0",
+		// 5. awk -f opaque program FILE (can system()/redirect)
+		"awk -f /etc/hostname /etc/hostname",
+		"awk --file=/etc/hostname /etc/hostname",
+		// 6. sed exec / write primitives (e command, s///e with alt
+		//    delimiters, $-addressed w) aimed at the beacon
+		"sed 'e touch "+bw("sed_e_pwned")+"' /etc/hostname",
+		"sed 's|x|touch "+bw("sed_se_pwned")+"|e' /etc/hostname",
+		"sed '$w "+bw("sed_w_pwned")+"' /etc/hostname",
+	)
+	// READ controls for the same tools: these are legitimate diagnostics
+	// the fix must NOT deny — they must come back `executed`, no write.
+	add("classifier-read-control",
+		"sort /etc/hostname",
+		"sort -n -r /etc/hostname",
+		"date",
+		"date +%s",
+		"date -u",
+		"ip addr show",
+		"ip route list",
+		"ifconfig -a",
+		"awk '{print $1}' /etc/hostname",
+	)
+
 	// --- Secret-read exposure (allowed by design; quantified) -------
 	add("secret-read",
 		"cat "+secretPath,
