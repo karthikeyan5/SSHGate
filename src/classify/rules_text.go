@@ -164,19 +164,19 @@ func sedScriptIsDangerous(script string) bool {
 	// Command-position exec/write letters: e (execute a command), w/W (write
 	// pattern space to a file), r/R (read a file). A command letter is in
 	// command position when preceded by start-of-script, a numeric address,
-	// a last-line `$`, or a block brace/separator, and is followed by its
-	// argument (a space). `e` may also take NO argument (execute the pattern
-	// space), terminated by end-of-script, `;`, or `}`. The `/`-preceded
-	// (regex-addressed) forms are already covered by the substring checks
-	// above (`/e`, `/w `, ...), so `/` is intentionally not in the set here.
+	// a last-line `$`, or a block brace/separator (`;`, `}`, `{`).
+	//
+	// These commands glue their filename/command directly to the command
+	// letter with NO space — GNU sed reads `w/tmp/x`, `$w/tmp/x`, `1euname`
+	// the same as `w /tmp/x`. So once we know the letter is in command
+	// position, it IS the command regardless of what follows: we drop the
+	// "followed by a space" requirement that previously missed the glued
+	// forms (`sed '$w/tmp/x'`, `sed 'w/tmp/x'`, `sed '1euname'` all bypassed
+	// READ before this fix). The `/`-preceded (regex-addressed) forms remain
+	// covered by the substring checks above, so `/` is not in the set here.
 	for i := 0; i < len(script); i++ {
 		c := script[i]
 		if c != 'r' && c != 'R' && c != 'w' && c != 'W' && c != 'e' {
-			continue
-		}
-		hasSpaceArg := i+1 < len(script) && script[i+1] == ' '
-		noArgE := c == 'e' && (i+1 == len(script) || script[i+1] == ';' || script[i+1] == '}')
-		if !hasSpaceArg && !noArgE {
 			continue
 		}
 		if i == 0 {
@@ -248,9 +248,13 @@ func sedSCommandExecsOrWrites(script string) bool {
 //
 // Dangerous substrings:
 //   - "system"   — system("cmd") forks a shell
-//   - "getline " — pipe-or-file getline can exec or read arbitrary files
+//   - "getline"  at a word boundary — pipe-or-file getline can exec or read
+//     arbitrary files (incl. the no-space form `"cmd"|getline}`)
 //   - `| "` / `|"` — pipe to a shell command
-//   - `> "` / `>"` / `>>` — redirect to a file
+//   - `>` followed (after any whitespace) by a `"` or `(` — redirect to a
+//     file or a parenthesized filename; `>>` (append) is always a redirect.
+//     A bare `>` between expressions (`$3>100`, `$3 > 100`) is a COMPARISON
+//     and must stay READ, so a `>` followed by a digit/identifier is ignored.
 func awkRule(args []string) Kind {
 	for _, a := range args {
 		// `-f FILE` / `-fFILE` / `--file FILE` / `--file=FILE` loads the awk
@@ -276,31 +280,121 @@ func awkProgIsDangerous(prog string) bool {
 	if strings.Contains(prog, "system") {
 		return true
 	}
-	if strings.Contains(prog, "getline ") {
+	// `getline` at a word boundary: the next char must NOT be an awk
+	// identifier char, so `getline x`, `getline}`, `getline)`, `getline<`
+	// and bare `getline` at end-of-program all match, but a longer
+	// identifier like `getlines` (a user variable) does not. The old
+	// `"getline "` (trailing-space) check missed `"cmd"|getline}` — a
+	// redirect-into-getline exec primitive. Cited by the 2026-06-14 review.
+	if containsGetline(prog) {
 		return true
 	}
 	if strings.Contains(prog, `| "`) || strings.Contains(prog, `|"`) {
 		return true
 	}
-	if strings.Contains(prog, `> "`) || strings.Contains(prog, `>"`) {
-		return true
-	}
+	// `>>` (append) is always a file redirect.
 	if strings.Contains(prog, ">>") {
 		return true
 	}
+	// A single `>` is a file redirect when the next non-space char is a
+	// string literal (`"`) or a parenthesized filename expression (`(`).
+	// This catches `> "f"`, `>"f"`, `>  "f"` (multi-space) and `>("f")`
+	// while leaving a `>` comparison (`$3>100`, `$3 > 100`) — whose RHS
+	// starts with a digit/identifier/`$` — classified READ.
+	if redirectsToFileOrPipe(prog) {
+		return true
+	}
 	return false
+}
+
+// containsGetline reports whether prog uses the `getline` keyword at a word
+// boundary (preceding char, if any, is also not an identifier char, so it is
+// a keyword and not the tail of a longer identifier).
+func containsGetline(prog string) bool {
+	const kw = "getline"
+	for i := 0; i+len(kw) <= len(prog); i++ {
+		if prog[i:i+len(kw)] != kw {
+			continue
+		}
+		if i > 0 && isAwkIdentChar(prog[i-1]) {
+			continue // tail of a longer identifier, e.g. `mygetline`
+		}
+		if i+len(kw) < len(prog) && isAwkIdentChar(prog[i+len(kw)]) {
+			continue // head of a longer identifier, e.g. `getlines`
+		}
+		return true
+	}
+	return false
+}
+
+// redirectsToFileOrPipe reports whether prog contains a `>` output redirect
+// (as opposed to a `>` comparison operator). A `>` is a redirect when the
+// next non-whitespace byte is a `"` (string-literal filename) or `(` (a
+// parenthesized filename expression). `>=` is a comparison and is skipped.
+func redirectsToFileOrPipe(prog string) bool {
+	for i := 0; i < len(prog); i++ {
+		if prog[i] != '>' {
+			continue
+		}
+		j := i + 1
+		// `>=` is the comparison operator, never a redirect.
+		if j < len(prog) && prog[j] == '=' {
+			continue
+		}
+		for j < len(prog) && (prog[j] == ' ' || prog[j] == '\t') {
+			j++
+		}
+		if j < len(prog) && (prog[j] == '"' || prog[j] == '(') {
+			return true
+		}
+	}
+	return false
+}
+
+// isAwkIdentChar reports whether c can appear inside an awk identifier
+// (letters, digits, underscore).
+func isAwkIdentChar(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
 }
 
 // sortRule: `sort` is read unless it writes its output to a file via
 // `-o FILE` / `-oFILE` / `--output FILE` / `--output=FILE`. `sort` was
 // previously a nil (always-READ) allowlist entry, so `sort -o /etc/x in`
 // — a clobbering write — ran unsigned on a read-only server.
+//
+// GNU sort also accepts the output file bundled after argless short flags:
+// `sort -no OUT`, `-ro`, `-uo`, `-bo`, `-zo`, `-rno` all set the output file
+// and clobber OUT, yet classified READ because the old check only looked at
+// `-o`-prefixed args. We scan each `-...` short-flag bundle for an `o`,
+// mirroring sedRule's `i` scan, stopping at the first value-consuming short
+// flag (`o`, `k`, `t`, `S`, `T`) — those consume the rest of the bundle as
+// their VALUE, so a subsequent `o` is data (a key/separator/size), not the
+// output flag. `sort -ko2`, `-to`, `-So` therefore stay READ. Cited by the
+// 2026-06-14 adversarial review.
 func sortRule(args []string) Kind {
 	for _, a := range args {
 		if a == "-o" || a == "--output" ||
 			strings.HasPrefix(a, "--output=") ||
 			(strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-') {
 			return KindWrite
+		}
+		// Short-flag bundle scan: an `o` reached before any value-consuming
+		// flag means the output file follows (bundled or as the next arg).
+		if len(a) >= 2 && a[0] == '-' && a[1] != '-' {
+			for j := 1; j < len(a); j++ {
+				c := a[j]
+				if c == 'o' {
+					return KindWrite
+				}
+				// -o/-k/-t/-S/-T consume the rest of the arg as their value;
+				// any subsequent char is that value, not a flag letter.
+				if c == 'k' || c == 't' || c == 'S' || c == 'T' {
+					break
+				}
+			}
 		}
 	}
 	return KindRead
