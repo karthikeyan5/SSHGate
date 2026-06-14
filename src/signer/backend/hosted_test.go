@@ -35,6 +35,28 @@ type fakeServer struct {
 	// signatureCmd populates the "cmd" field of the approved
 	// signature so tests can assert end-to-end payload flow.
 	signatureCmd string
+
+	// --- knobs for the poll matrix / failure-injection tests ---
+
+	// signEmptyReqID makes /v1/sign return 202 with an empty
+	// request_id, exercising the client's "empty request_id" guard.
+	signEmptyReqID bool
+	// pollHTTPStatus, when non-zero, overrides the /v1/poll HTTP
+	// status (e.g. 404). A non-200 status is terminal for the client.
+	pollHTTPStatus int
+	// pollMalformed makes /v1/poll return a 200 body that is not valid
+	// JSON, exercising the unmarshal-error → StatusTimeout path.
+	pollMalformed bool
+	// pollRawStatus, when non-empty, is written verbatim as the
+	// "status" field (200 OK) — lets a test send an unknown status
+	// string the action switch above can't express.
+	pollRawStatus string
+	// pollConnErrFirst makes the FIRST /v1/poll hijack and abruptly
+	// close the connection (simulating a transient connect error). The
+	// client should back off and retry; subsequent polls follow
+	// pollAction (set to "approved" to assert retry-then-resolve).
+	pollConnErrFirst bool
+	pollHits         int
 }
 
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +65,9 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/sign" && r.Method == http.MethodPost:
 		f.mu.Lock()
 		rid := f.reqID
+		if f.signEmptyReqID {
+			rid = ""
+		}
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -51,10 +76,42 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		})
 	case strings.HasPrefix(r.URL.Path, "/v1/poll/") && r.Method == http.MethodGet:
 		f.mu.Lock()
+		f.pollHits++
+		hit := f.pollHits
 		action := f.pollAction
 		delay := f.pollDelay
 		sigCmd := f.signatureCmd
+		httpStatus := f.pollHTTPStatus
+		malformed := f.pollMalformed
+		rawStatus := f.pollRawStatus
+		connErrFirst := f.pollConnErrFirst
 		f.mu.Unlock()
+
+		// Transient transport error on the first poll: hijack and write a
+		// truncated HTTP response (Content-Length promises more bytes than
+		// we send), then close. The client receives response headers but
+		// io.ReadAll on the body fails with unexpected EOF — surfacing as
+		// a poll-iteration error the backend retries (it will NOT be
+		// transparently retried by the transport, since a response WAS
+		// received). This drives the backend's 500ms-backoff-then-retry
+		// path deterministically.
+		if connErrFirst && hit == 1 {
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, buf, err := hj.Hijack()
+				if err == nil {
+					// Promise 100 bytes, send 5, then close → unexpected EOF.
+					_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+					_ = buf.Flush()
+					_ = conn.Close()
+					return
+				}
+			}
+			// Hijack unsupported — fall through to a 500 as a weaker
+			// stand-in (still a retryable failure for the client).
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
 		if delay > 0 {
 			select {
 			case <-time.After(delay):
@@ -62,6 +119,29 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
+		// HTTP-status override (e.g. 404 unknown request_id) — terminal.
+		if httpStatus != 0 {
+			w.WriteHeader(httpStatus)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "scripted"})
+			return
+		}
+		// Malformed 200 body → client unmarshal error → StatusTimeout.
+		if malformed {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{not-json"))
+			return
+		}
+		// Unknown status string → client's defensive default → Timeout.
+		if rawStatus != "" {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"request_id": strings.TrimPrefix(r.URL.Path, "/v1/poll/"),
+				"status":     rawStatus,
+			})
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
 		switch action {
 		case "approved":

@@ -140,16 +140,28 @@ func (s *testServer) handleSession(ch sshlib.Channel, requests <-chan *sshlib.Re
 			if len(stderr) > 0 {
 				_, _ = ch.Stderr().Write(stderr)
 			}
-			status := struct {
-				Status uint32
-			}{Status: uint32(exit)}
-			_, _ = ch.SendRequest("exit-status", false, sshlib.Marshal(&status))
+			// Sentinel exitNoStatus: tear the session down cleanly WITHOUT
+			// sending an exit-status reply, so x/crypto/ssh surfaces an
+			// *ExitMissingError on the client side. Exercises the signal-
+			// terminated → exit=-1 mapping in Client.Run.
+			if exit != exitNoStatus {
+				status := struct {
+					Status uint32
+				}{Status: uint32(exit)}
+				_, _ = ch.SendRequest("exit-status", false, sshlib.Marshal(&status))
+			}
 			return
 		default:
 			_ = req.Reply(false, nil)
 		}
 	}
 }
+
+// exitNoStatus is a test-only sentinel handler return value: the test
+// server closes the session without sending an exit-status reply,
+// reproducing a signal-terminated remote (x/crypto/ssh then returns an
+// *ExitMissingError to the client).
+const exitNoStatus = -999
 
 // parseExecCmd parses the SSH "exec" request payload, which is a
 // big-endian uint32 length followed by the command string.

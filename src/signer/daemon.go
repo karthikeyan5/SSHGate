@@ -289,12 +289,19 @@ func (d *Daemon) now() time.Time {
 	return time.Now()
 }
 
+// randRead is the entropy source used by newNonce. It is a package-level
+// var (not a direct call to rand.Read) solely so in-package tests can
+// substitute a failing reader to exercise the nonce-error branch of
+// signAll. Production code never reassigns it; the default is the
+// crypto/rand reader and the attack surface is unchanged.
+var randRead = rand.Read
+
 // newNonce returns a 16-byte URL-safe-base64 random string. 128 bits
 // of entropy is plenty for replay-protection within the 5-minute
 // validity window.
 func newNonce() (string, error) {
 	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
+	if _, err := randRead(buf[:]); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf[:]), nil

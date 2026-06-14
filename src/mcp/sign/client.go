@@ -200,7 +200,15 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 
 // dialWithCtx wraps net.Dialer.DialContext with a "unix" network so
 // ctx cancellation aborts the dial.
-func dialWithCtx(ctx context.Context, path string) (net.Conn, error) {
+//
+// It is a package-level var (not a plain func) solely so in-package
+// tests can substitute a dialer that returns a controlled net.Conn —
+// e.g. one whose Write fails — to exercise transport error paths that
+// are not deterministically reproducible against a real socket. Tests
+// restore the original via defer. Production callers always use the
+// default below; no public API or env var is involved, so production
+// behaviour and attack surface are unchanged.
+var dialWithCtx = func(ctx context.Context, path string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "unix", path)
 }

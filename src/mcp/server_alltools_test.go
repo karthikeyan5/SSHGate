@@ -1,0 +1,225 @@
+package mcp_test
+
+import (
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"testing"
+	"time"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/karthikeyan5/sshgate/src/mcp"
+	"github.com/karthikeyan5/sshgate/src/mcp/registry"
+	"github.com/karthikeyan5/sshgate/src/mcp/tools"
+)
+
+// connectAllTools mirrors Server.Serve's full tool registration (all six
+// tools) over the SDK's in-memory transport. The existing
+// connectInProcess helper wires only run/run_batch; this one closes the
+// gap so add_server, list_servers, status, and revoke_server are also
+// exercised at the SDK boundary (request → handler → structured result).
+//
+// Handlers here are thin shims that call the same Runner methods the
+// production handlers in server.go call — no production behavior is
+// altered. We use shims (rather than reaching into server.go's
+// unexported handlers) because those handlers are methods bound at
+// registration time inside Serve, which we cannot drive without real
+// stdio.
+func connectAllTools(t *testing.T, server *mcp.Server) (*mcpsdk.ClientSession, func()) {
+	t.Helper()
+	ctx := context.Background()
+	clientT, serverT := mcpsdk.NewInMemoryTransports()
+
+	sdkServer := mcpsdk.NewServer(&mcpsdk.Implementation{
+		Name:    mcp.ServerName,
+		Version: mcp.Version,
+	}, nil)
+
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameAddServer,
+		Description: "Register a new server alias and install gate on it.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.AddServerInput) (*mcpsdk.CallToolResult, tools.AddServerOutput, error) {
+		out, err := server.Runner.AddServer(ctx, in)
+		if err != nil {
+			return nil, tools.AddServerOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameListServers,
+		Description: "List every registered SSHGate server.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.ListServersInput) (*mcpsdk.CallToolResult, tools.ListServersOutput, error) {
+		out, err := server.Runner.ListServers(ctx, in)
+		if err != nil {
+			return nil, tools.ListServersOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameStatus,
+		Description: "Report signer-socket and per-server reachability.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.StatusInput) (*mcpsdk.CallToolResult, tools.StatusOutput, error) {
+		out, err := server.Runner.Status(ctx, in)
+		if err != nil {
+			return nil, tools.StatusOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameRevokeServer,
+		Description: "Revoke a registered server.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RevokeServerInput) (*mcpsdk.CallToolResult, tools.RevokeServerOutput, error) {
+		out, err := server.Runner.RevokeServer(ctx, in)
+		if err != nil {
+			return nil, tools.RevokeServerOutput{}, err
+		}
+		return nil, out, nil
+	})
+
+	if _, err := sdkServer.Connect(ctx, serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
+	cs, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	return cs, func() { _ = cs.Close() }
+}
+
+// decodeStructured unmarshals an SDK CallTool result's structured
+// content into v. It tolerates both the json.RawMessage delivery (the
+// common case over the in-memory transport) and a pre-decoded any.
+func decodeStructured(t *testing.T, res *mcpsdk.CallToolResult, v any) {
+	t.Helper()
+	raw, ok := res.StructuredContent.(json.RawMessage)
+	if !ok {
+		b, err := json.Marshal(res.StructuredContent)
+		if err != nil {
+			t.Fatalf("structured content: %T (%v)", res.StructuredContent, res.StructuredContent)
+		}
+		raw = b
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		t.Fatalf("unmarshal structured content: %v (raw=%s)", err, string(raw))
+	}
+}
+
+func TestServer_ListServers_SDKBoundary(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "alpha", registry.Entry{Host: "10.0.0.1", Port: 22, User: "karthi", AddedAt: time.Now()})
+	if err := r.Add("bravo", registry.Entry{Host: "10.0.0.2", Port: 2222, User: "ops", AddedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameListServers,
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError=true: %+v", res.Content)
+	}
+	var out tools.ListServersOutput
+	decodeStructured(t, res, &out)
+	if out.Total != 2 {
+		t.Errorf("Total = %d; want 2", out.Total)
+	}
+	// Output is alphabetically sorted by alias.
+	if len(out.Servers) != 2 || out.Servers[0].Alias != "alpha" || out.Servers[1].Alias != "bravo" {
+		t.Errorf("servers not sorted alpha-first: %+v", out.Servers)
+	}
+	if out.Servers[1].Port != 2222 || out.Servers[1].User != "ops" {
+		t.Errorf("bravo row wrong: %+v", out.Servers[1])
+	}
+}
+
+func TestServer_Status_SDKBoundary(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	// fakeSSH returns SSHGATE_OK so the per-server probe reports reachable.
+	runner := &tools.Runner{
+		Servers:        r,
+		Sign:           &fakeSign{},
+		SSH:            &fakeSSH{stdout: []byte("SSHGATE_OK\n")},
+		SignerSockPath: filepath.Join(t.TempDir(), "absent.sock"),
+	}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameStatus,
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError=true: %+v", res.Content)
+	}
+	var out tools.StatusOutput
+	decodeStructured(t, res, &out)
+	// Socket file is absent → Tier-1 not-configured, not reachable.
+	if out.SignerSocket.Reachable || out.SignerSocket.Configured {
+		t.Errorf("signer status = %+v; want unreachable + not configured", out.SignerSocket)
+	}
+	if len(out.Servers) != 1 || !out.Servers[0].Reachable {
+		t.Errorf("server probe = %+v; want one reachable row", out.Servers)
+	}
+}
+
+func TestServer_AddServer_SDKBoundaryValidationError(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	// Invalid alias ("Bad" — uppercase) is rejected before any network
+	// I/O, so the no-sudo/no-network invariant holds while still
+	// exercising the add_server handler end-to-end through the SDK.
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: mcp.ToolNameAddServer,
+		Arguments: map[string]any{
+			"alias":             "Bad",
+			"host":              "example.com",
+			"user":              "ops",
+			"bootstrap_agent":   true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool returned protocol err: %v", err)
+	}
+	if !res.IsError {
+		t.Error("IsError = false; want true for invalid alias")
+	}
+}
+
+func TestServer_RevokeServer_SDKBoundaryUnknownAlias(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameRevokeServer,
+		Arguments: map[string]any{"alias": "ghost"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool returned protocol err: %v", err)
+	}
+	if !res.IsError {
+		t.Error("IsError = false; want true for unknown alias revoke")
+	}
+}

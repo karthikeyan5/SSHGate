@@ -37,6 +37,20 @@ type fakeTelegram struct {
 	getUpdatesCalled atomic.Int64
 	nextMessageID    int
 	getMeAlwaysFail  bool
+
+	// sendMessageFailCode, when non-zero, makes respondSendMessage
+	// return a Telegram API error envelope ({"ok":false,...}) carrying
+	// this error_code instead of a success body. Used to exercise the
+	// "telegram send" failure path in Request. The library inspects the
+	// JSON `ok` field (not the HTTP status), so we encode the failure in
+	// the body.
+	sendMessageFailCode int
+
+	// getUpdatesFailCodes is a FIFO queue of API error_codes that
+	// respondGetUpdates returns (as {"ok":false,...}) before falling back
+	// to normal long-poll behaviour. Each call to getUpdates consumes one
+	// entry. Lets a test script a 4xx → 5xx → success recovery sequence.
+	getUpdatesFailCodes []int
 }
 
 type fakeUpdate struct {
@@ -122,6 +136,20 @@ func (f *fakeTelegram) respondGetMe(w http.ResponseWriter) {
 
 func (f *fakeTelegram) respondGetUpdates(w http.ResponseWriter, r *http.Request) {
 	f.getUpdatesCalled.Add(1)
+
+	// Scripted failure sequence: pop one error_code per call and return
+	// an API error envelope. The library turns {"ok":false,...} into a
+	// *tgbotapi.Error carrying Code; classifyAndLog buckets it 4xx/5xx.
+	f.mu.Lock()
+	if len(f.getUpdatesFailCodes) > 0 {
+		code := f.getUpdatesFailCodes[0]
+		f.getUpdatesFailCodes = f.getUpdatesFailCodes[1:]
+		f.mu.Unlock()
+		writeAPIError(w, code, "scripted getUpdates failure")
+		return
+	}
+	f.mu.Unlock()
+
 	timeoutSec, _ := strconv.Atoi(r.FormValue("timeout"))
 	offset, _ := strconv.Atoi(r.FormValue("offset"))
 
@@ -166,6 +194,14 @@ func (f *fakeTelegram) respondSendMessage(w http.ResponseWriter, r *http.Request
 	text := r.FormValue("text")
 	rm := r.FormValue("reply_markup")
 	f.mu.Lock()
+	failCode := f.sendMessageFailCode
+	f.mu.Unlock()
+	if failCode != 0 {
+		// Record nothing as "sent" — the upstream rejected the send.
+		writeAPIError(w, failCode, "scripted sendMessage failure")
+		return
+	}
+	f.mu.Lock()
 	mid := f.nextMessageID
 	f.nextMessageID++
 	f.sentMessages = append(f.sentMessages, sentMessage{ChatID: chatID, Text: text, ReplyMarkup: rm})
@@ -203,6 +239,22 @@ func writeAPIResult(w http.ResponseWriter, result json.RawMessage) {
 	_, _ = w.Write(body)
 }
 
+// writeAPIError writes a Telegram API failure envelope. The bot library
+// decodes the JSON and (because ok=false) returns a *tgbotapi.Error
+// carrying error_code regardless of the HTTP status, so callers see a
+// classified upstream error. We set the HTTP status too for realism.
+func writeAPIError(w http.ResponseWriter, code int, desc string) {
+	if code >= 100 && code <= 599 {
+		w.WriteHeader(code)
+	}
+	body, _ := json.Marshal(struct {
+		Ok          bool   `json:"ok"`
+		ErrorCode   int    `json:"error_code"`
+		Description string `json:"description"`
+	}{Ok: false, ErrorCode: code, Description: desc})
+	_, _ = w.Write(body)
+}
+
 // pushMessage injects a /start (or other text) message update.
 func (f *fakeTelegram) pushMessage(fromID, chatID int64, text string) int {
 	f.mu.Lock()
@@ -235,6 +287,19 @@ func (f *fakeTelegram) pushCallback(fromID int64, username, data string, message
 	cb := fmt.Sprintf(`{"id":%q,"from":{"id":%d,"is_bot":false,"first_name":"u","username":%q},"chat_instance":"ci","data":%q,"message":{"message_id":%d,"chat":{"id":%d,"type":"private"},"date":%d,"text":"prev"}}`,
 		cbID, fromID, username, data, messageID, chatID, time.Now().Unix())
 	f.pendingUpdates = append(f.pendingUpdates, fakeUpdate{UpdateID: uid, CallbackQuery: json.RawMessage(cb)})
+}
+
+// pushRawMessage injects a message update with a caller-supplied raw
+// JSON `message` object. Used for poison-update tests that need a
+// /start command with nil Chat / nil From (which the structured
+// pushMessage helper can't express because it always fills both).
+func (f *fakeTelegram) pushRawMessage(messageJSON string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextUpdateID++
+	uid := f.nextUpdateID
+	f.pendingUpdates = append(f.pendingUpdates, fakeUpdate{UpdateID: uid, Message: json.RawMessage(messageJSON)})
+	return uid
 }
 
 // snapshot helpers — lock + copy so callers don't race the server goroutine.

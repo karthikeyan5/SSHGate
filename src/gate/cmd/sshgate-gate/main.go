@@ -193,14 +193,38 @@ func execChild(cmd string) int {
 	return exit
 }
 
+// gateDirFn resolves the gate install directory and the absolute path
+// to the running gate binary inside it. It is a package-level var so
+// in-package tests can point the resolution at a t.TempDir without
+// re-exec'ing the test binary; production code always uses
+// defaultGateDir, which derives both from os.Executable(). This is NOT
+// driven by any environment variable on purpose — letting the
+// environment redirect where gate.pub is read would be a signature
+// forgery surface, since gate.pub is the trust anchor for every
+// verified command.
+var gateDirFn = defaultGateDir
+
+// homeDirFn resolves the operator's home directory. Same test-seam
+// rationale as gateDirFn; defaults to os.UserHomeDir.
+var homeDirFn = os.UserHomeDir
+
+// defaultGateDir returns the directory holding the gate binary and the
+// binary's own absolute path, both derived from os.Executable().
+func defaultGateDir() (gateDir, binaryPath string, err error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", "", fmt.Errorf("os.Executable: %w", err)
+	}
+	return filepath.Dir(exe), exe, nil
+}
+
 // pubKeyPath returns the path to gate.pub, expected to live in the
 // same directory as the gate binary itself.
 func pubKeyPath() (string, error) {
-	exe, err := os.Executable()
+	dir, _, err := gateDirFn()
 	if err != nil {
-		return "", fmt.Errorf("os.Executable: %w", err)
+		return "", err
 	}
-	dir := filepath.Dir(exe)
 	return filepath.Join(dir, "gate.pub"), nil
 }
 
@@ -217,15 +241,13 @@ func pubKeyPath() (string, error) {
 //	     legitimate, the dir is gone either way)
 //	1  — could not resolve paths or rewrite authorized_keys
 func doRevoke() int {
-	exe, err := os.Executable()
+	gateDir, binaryPath, err := gateDirFn()
 	if err != nil {
-		logf("revoke: os.Executable: %v", err)
+		logf("revoke: %v", err)
 		return exitGeneric
 	}
-	gateDir := filepath.Dir(exe)
-	binaryPath := exe
 
-	home, err := os.UserHomeDir()
+	home, err := homeDirFn()
 	if err != nil {
 		logf("revoke: home dir: %v", err)
 		return exitGeneric
