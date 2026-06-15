@@ -36,27 +36,43 @@ func curlRule(args []string) Kind {
 			// `-O` saves to a filename derived from the URL.
 			return KindWrite
 		case "-D", "--dump-header", "--trace", "--trace-ascii",
-			"-c", "--cookie-jar", "--stderr", "--libcurl":
+			"-c", "--cookie-jar", "--stderr", "--libcurl",
+			"--etag-save", "--hsts", "--alt-svc", "--output-dir":
 			// curl writes a local FILE in many more modes than -o/-O: the
 			// response headers (-D), a full/ascii debug trace (--trace*), the
-			// cookie jar (-c), its own stderr (--stderr), or generated libcurl
-			// C source (--libcurl). `<flag> -` writes to a stdout/stderr stream
-			// (not a disk file) and stays read. Found by the 2026-06-14
-			// red-team — these were missing from the write-flag set.
+			// cookie jar (-c), its own stderr (--stderr), generated libcurl
+			// C source (--libcurl), the saved ETag (--etag-save), the HSTS
+			// cache (--hsts), the Alt-Svc cache (--alt-svc), or the directory
+			// that -o/-O targets resolve into (--output-dir). `<flag> -`
+			// writes to a stdout/stderr stream (not a disk file) and stays
+			// read. The first group found by the 2026-06-14 red-team; the
+			// cache-file group (--etag-save/--hsts/--alt-svc/--output-dir) by
+			// the 2026-06-15 rig hunt. (Note `-b`/`--cookie` is the INPUT jar
+			// — a read — and is intentionally NOT in this set.)
 			if i+1 < len(args) && args[i+1] != "-" {
 				return KindWrite
 			}
 		}
 		// `=VALUE` long forms of the file-writing flags above.
 		for _, pfx := range []string{"--dump-header=", "--trace=", "--trace-ascii=",
-			"--cookie-jar=", "--stderr=", "--libcurl="} {
+			"--cookie-jar=", "--stderr=", "--libcurl=",
+			"--etag-save=", "--hsts=", "--alt-svc=", "--output-dir="} {
 			if strings.HasPrefix(a, pfx) {
 				if strings.TrimPrefix(a, pfx) != "-" {
 					return KindWrite
 				}
 			}
 		}
-		// Bundled short forms `-DFILE` / `-cFILE`.
+		// Bundled short forms `-DFILE` / `-cFILE` / `-oFILE`. The `-o<path>`
+		// glued form (no space) slipped past the exact-token `-o` match above
+		// — `curl -o/config/.ssh/authorized_keys URL` classified READ yet
+		// curl wrote the file (2026-06-15 rig hunt). `-o-` (stdout) stays
+		// read, like the spaced `-o -` form.
+		if strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-' {
+			if a[2:] != "-" {
+				return KindWrite
+			}
+		}
 		if (strings.HasPrefix(a, "-D") || strings.HasPrefix(a, "-c")) && len(a) > 2 {
 			if a[2:] != "-" {
 				return KindWrite
@@ -111,6 +127,26 @@ func wgetRule(args []string) Kind {
 			// Combined short flag like `-Ofile` or `-O-`. `-O-` matched
 			// the exact-equals case above; `-O<anything>` else is a file.
 			return KindWrite
+		case a == "-o" || a == "--output-file":
+			// `-o FILE` / `--output-file FILE` writes wget's LOG to a file
+			// (distinct from `-O`/`--output-document`, the response body) —
+			// a local-filesystem write. A `-` operand logs to the stdout
+			// stream and stays read; everything else names a file => WRITE.
+			// 2026-06-15 rig hunt: `wget -o /tmp/x -O - URL` slipped READ.
+			if i+1 >= len(args) || args[i+1] != "-" {
+				return KindWrite
+			}
+		case strings.HasPrefix(a, "--output-file="):
+			// Already excluded the `=-` stream form here.
+			if strings.TrimPrefix(a, "--output-file=") != "-" {
+				return KindWrite
+			}
+		case strings.HasPrefix(a, "-o") && len(a) > 2:
+			// Combined short flag `-o<path>` (glued log file). `-o-` is the
+			// stdout stream and stays read; `-o<anything>` else is a file.
+			if a[2:] != "-" {
+				return KindWrite
+			}
 		case a == "--post-data", strings.HasPrefix(a, "--post-data="),
 			a == "--post-file", strings.HasPrefix(a, "--post-file="):
 			return KindWrite

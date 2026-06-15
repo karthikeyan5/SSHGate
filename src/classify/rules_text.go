@@ -542,6 +542,13 @@ func sortRule(args []string) Kind {
 			(strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-') {
 			return KindWrite
 		}
+		// `--compress-program PROG` (or `=PROG`): GNU sort EXECS the named
+		// program to (de)compress the temp files it spills under -S/large
+		// input — `sort --compress-program=/bin/sh ...` is unsigned arbitrary
+		// exec, not just a file write. 2026-06-15 rig hunt.
+		if a == "--compress-program" || strings.HasPrefix(a, "--compress-program=") {
+			return KindWrite
+		}
 		// Short-flag bundle scan: an `o` reached before any value-consuming
 		// flag means the output file follows (bundled or as the next arg).
 		if len(a) >= 2 && a[0] == '-' && a[1] != '-' {
