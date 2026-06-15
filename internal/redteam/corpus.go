@@ -69,6 +69,32 @@ func Corpus(canaryRoot, secretPath string) []Attack {
 		`grep "$(touch `+probe+`)" /etc/hostname`,
 	)
 
+	// --- The four holes the 2026-06-14 3-model rig hunt found + fixed.
+	// Each genuinely writes `probe` if executed, so a regression surfaces as
+	// a BYPASS. Against the fixed gate all must come back denied.
+	add("fixed-hole/uniq-output-positional",
+		"uniq /etc/hostname "+probe,
+		"uniq - "+probe,
+		"uniq -c /etc/hostname "+probe,
+	)
+	add("fixed-hole/awk-redirect-via-variable",
+		`awk -v f=`+probe+` 'BEGIN{print "pwned" > f}'`,
+		`awk 'BEGIN{f="`+probe+`"; print "x" > f}'`,
+		`awk -v c="tee `+probe+`" 'BEGIN{print "y" | c}'`,
+		`awk 'END{print > out}' out=`+probe+` /etc/hostname`,
+	)
+	add("fixed-hole/curl-write-flags",
+		"curl --trace "+probe+" http://localhost/",
+		"curl -D "+probe+" http://localhost/",
+		"curl --cookie-jar "+probe+" http://localhost/",
+		"curl --libcurl "+probe+" http://localhost/",
+	)
+	add("fixed-hole/sed-space-before-command",
+		"sed '1 w "+probe+"' /etc/hostname",
+		"sed '$ w "+probe+"' /etc/hostname",
+		"sed '/hostname/ w "+probe+"' /etc/hostname",
+	)
+
 	// --- Other command separators -----------------------------------
 	add("separators",
 		"ls; touch "+probe,
