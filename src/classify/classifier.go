@@ -407,7 +407,7 @@ var readAllowlist = map[string]argRule{
 	"free":        nil,
 	"uptime":      nil,
 	"uname":       nil,
-	"hostname":    nil,
+	"hostname":    hostnameRule,
 	"whoami":      nil,
 	"id":          nil,
 	"groups":      nil,

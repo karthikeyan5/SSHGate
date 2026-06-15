@@ -38,6 +38,19 @@ var dangerousEnvVars = map[string]bool{
 	"RUBYLIB":             true,
 	"MANPAGER":            true,
 	"PAGER":               true, // many tools spawn this; safer to deny
+	// HOME / XDG base-dir redirection: a leading `HOME=/attacker` (or any of
+	// the XDG_*_HOME / XDG_CACHE/STATE/RUNTIME dirs) redirects a read-tool's
+	// config/data/cache WRITE to an attacker-controlled path — e.g.
+	// `HOME=/tmp/x top -bn1` makes top write its rc under /tmp/x, and the
+	// same trick aims dotfile/history/cache writes of other allowlisted
+	// tools at arbitrary locations. A leading assignment of any of these =>
+	// WRITE (2026-06-15 rig hunt). Plain `top -bn1` (no prefix) stays READ.
+	"HOME":            true,
+	"XDG_CONFIG_HOME": true,
+	"XDG_DATA_HOME":   true,
+	"XDG_CACHE_HOME":  true,
+	"XDG_STATE_HOME":  true,
+	"XDG_RUNTIME_DIR": true,
 }
 
 // envRule classifies `env` invocations. `env` is READ iff it is invoked

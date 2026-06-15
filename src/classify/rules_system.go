@@ -228,6 +228,38 @@ func dmesgRule(args []string) Kind {
 	return KindRead
 }
 
+// hostnameRule: `hostname` with no positional only DISPLAYS the name and its
+// variants (`hostname`, `-f`/`--fqdn`, `-i`/`-I`/`--all-ip-addresses`,
+// `-s`/`--short`, `-d`/`--domain`, `-A`/`--all-fqdns`, `-y`/`--yp`) — READ.
+// A single non-flag positional is the NEW name and SETS the system hostname:
+// `hostname pwned` is a WRITE. `hostname` was a nil (always-READ) allowlist
+// entry, so the set form ran unsigned (2026-06-15 rig hunt). We classify WRITE
+// if any non-flag positional is present, else READ. (`-F`/`--file` takes a
+// file VALUE that also sets the name, but it begins with `-`; to stay safe we
+// also treat the value-taking `-F`/`-b`/`-i`-style separate operands narrowly:
+// only a BARE positional — not a flag and not a flag's consumed value — counts.
+// `-F FILE` itself reads the name from a file and sets it, so the leading `-F`
+// flag is enough to mark WRITE.)
+func hostnameRule(args []string) Kind {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "" {
+			continue
+		}
+		if a[0] == '-' && a != "-" {
+			// `-F`/`--file` reads the new name from a file and SETS it — a
+			// write. Other flags here are display-only.
+			if a == "-F" || a == "--file" || strings.HasPrefix(a, "--file=") {
+				return KindWrite
+			}
+			continue
+		}
+		// A bare positional (incl. `-` for stdin) is the NEW hostname.
+		return KindWrite
+	}
+	return KindRead
+}
+
 // ssRule: `ss` is read for socket inspection, but `-K`/`--kill` forcibly
 // closes matching sockets — a state mutation. `ss` was a nil (always-READ)
 // entry, so `ss -K ...` ran unsigned. Cited by the 2026-06-14 review.
@@ -338,20 +370,35 @@ func gitRule(args []string) Kind {
 	}
 	sub := firstNonFlag(args)
 	switch sub {
-	case "status", "log", "diff", "show", "branch",
+	case "status", "log", "diff", "show",
 		"blame", "describe", "remote",
 		"rev-parse", "ls-files", "ls-remote", "shortlog":
-		// `git branch -d/-D` is a write, but the corpus doesn't exercise
-		// it and detecting requires arg scanning across the porcelain.
-		// Acceptable v1.1 tradeoff — caller still sees the command and
-		// the Telegram approval is one tap away if they pass -d.
 		return KindRead
+	case "branch":
+		return gitBranchKind(args)
 	case "stash":
 		return gitStashKind(args)
 	case "config":
 		return gitConfigKind(args)
 	}
 	return KindWrite
+}
+
+// gitBranchKind classifies `git branch ...`. Listing forms (`git branch`,
+// `-a`, `-v`, `--list`, `-r`, ...) are READ, but `-d`/`-D`/`--delete`,
+// `-m`/`-M`/`--move`, and `-c`/`-C`/`--copy` delete/rename/copy a ref — a
+// state mutation that ran unsigned before (2026-06-15 rig hunt). Any of those
+// ref-mutating flags => WRITE; otherwise READ.
+func gitBranchKind(args []string) Kind {
+	for _, a := range args {
+		switch a {
+		case "-d", "-D", "--delete",
+			"-m", "-M", "--move",
+			"-c", "-C", "--copy":
+			return KindWrite
+		}
+	}
+	return KindRead
 }
 
 // gitStashKind classifies `git stash <sub>`. Bare `git stash` is
