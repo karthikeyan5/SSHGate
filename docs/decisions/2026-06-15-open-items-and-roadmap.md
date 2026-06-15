@@ -17,11 +17,28 @@ and the detailed ledger `docs/decisions/2026-06-14-autonomous-run-log.md`.
   (round 1: uniq/awk-var/curl/sed-space; round 2: curl-cache-flags/bundled-o, sort --compress-program (exec),
   wget -o logfile, hostname positional, git branch -d, HOME/XDG env redirect).
 
-## TOP priority — Karthi's two features (RIGHT NOW)
-> Karthi (2026-06-15): "I have two quick features I want to build right away — put them on TOP."
-- **FEATURE 1: _<pending Karthi's next message>_**
-- **FEATURE 2: _<pending Karthi's next message>_**
-(Fill in verbatim when Karthi sends them; build these first, after compaction.)
+## TOP priority — Karthi's two features (RIGHT NOW, build first after compaction)
+> Karthi (2026-06-15) gave these to build right away, on top of everything.
+
+### FEATURE 1 — Interactive prompt / confirmation / password forwarding
+A remote command (a read, an install, "anything") can trigger an INTERACTIVE prompt mid-run — a
+sudo/password prompt, a `[Y/n]` confirmation, an "are you sure?" — and today the gate execs
+non-interactively (`/bin/sh -c`, no TTY), so Karthi would have to SSH in HIMSELF just to type "yes" or a
+password. He does NOT want that ("otherwise it's only half as useful"). **Build a way to forward those prompts
+to the operator and relay the answer back without a manual SSH.** He's fine with a WEB PAGE, or any general
+mechanism. Design sketch: allocate a PTY for the remote command, detect a prompt / input-stall, surface it to
+the operator (Telegram and/or a web UI), capture the response, and write it to the command's stdin. Passwords
+are sensitive — handle securely (don't log/echo). Ties into the existing Telegram-signer approval channel.
+
+### FEATURE 2 — SQL access via per-service whitelist adapters (read-only SQL first)
+You can't give full SQL access (SSH → log into the DB = unrestricted; today it's effectively blocked).
+**Support READ-ONLY SQL queries against any engine (PostgreSQL / MariaDB / SQLite / …)**, with WRITE SQL
+requiring a signature — the same read/write + sign model the gate uses for shell, but applied to SQL.
+**Karthi's architectural direction: write a customized whitelist ADAPTER per service/program** (a SQL adapter,
+a shell adapter, …); he's fine building them one-by-one for each kind of program.
+> **Synergy with #22 (the architectural fix):** the per-service-adapter model could BE the structural answer —
+> replace the single heuristic shell classifier with explicit per-service read/write adapters (argv/grammar-based,
+> not shell-string-guessing). Design the adapter framework and the argv-exec fix TOGETHER.
 
 ## HIGH priority — the structural/architectural fix (Karthi-APPROVED, "ASAP")
 > Karthi (2026-06-15): "we should work on a structural and architectural fix for this — maybe kernel-level,
