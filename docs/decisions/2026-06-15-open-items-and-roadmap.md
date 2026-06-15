@@ -1,0 +1,78 @@
+# SSHGate — open items & roadmap (2026-06-15)
+
+Canonical "nothing-lost" list captured before a planned compaction. Authored after the
+2026-06-14/15 deep gate review + the 3-model red-team hunt loop. Pairs with the auto-memory
+notes (`sshgate_classifier_arms_race`, `sshgate_v12_resume_state`, `sshgate_v2_hosted_signer`)
+and the detailed ledger `docs/decisions/2026-06-14-autonomous-run-log.md`.
+
+## Current state (local `main`)
+- **39 commits ahead of `origin/main`, NOTHING pushed** (held for Karthi — the safety classifier
+  blocks me pushing to a public main on Telegram auth; needs Karthi's own `git push` or CLI-typed auth).
+- `make preflight` (vet + full `-race` incl. redteam live Docker tests + gitleaks + build) = **green**;
+  `make test-integration` (real gate over SSH: read/write/signed/redaction/upgrade/revoke/add-server) = **green**.
+- The gate red-team rig is **multi-instance** (`SSHGATE_REDTEAM_PORT`/`--port`) + standing (up/down/status)
+  + has an in-container inotify write-tripwire. Hunt loop **STOPPED by Karthi** (2026-06-15) — no rigs running.
+- Done this session: deep gate review (2 blockers + dead-code + lazy-compile + classifier split), triple review,
+  and **two full 3-model hunt rounds** — every confirmed bypass fixed + regression-tested + live-re-confirmed
+  (round 1: uniq/awk-var/curl/sed-space; round 2: curl-cache-flags/bundled-o, sort --compress-program (exec),
+  wget -o logfile, hostname positional, git branch -d, HOME/XDG env redirect).
+
+## TOP priority — Karthi's two features (RIGHT NOW)
+> Karthi (2026-06-15): "I have two quick features I want to build right away — put them on TOP."
+- **FEATURE 1: _<pending Karthi's next message>_**
+- **FEATURE 2: _<pending Karthi's next message>_**
+(Fill in verbatim when Karthi sends them; build these first, after compaction.)
+
+## HIGH priority — the structural/architectural fix (Karthi-APPROVED, "ASAP")
+> Karthi (2026-06-15): "we should work on a structural and architectural fix for this — maybe kernel-level,
+> maybe the idea you said, or something else altogether. It's not possible to beat every tool's every flag on
+> every server. Write it in the ToDo; we'll get to it ASAP."
+
+**Problem:** SSHGate's Tier-1 read-only gate execs reads via `/bin/sh -c <raw>` UNSIGNED whenever the
+classifier returns READ. The classifier is a heuristic predicting the shell + every allowlisted tool's
+write/exec flags — a permanent arms race. Two hunt rounds + the triple review each found more bypasses, ALL
+in the hand-maintained per-tool arg denylists (the default-deny allowlist gate itself held). Per-tool
+enumeration cannot win against every tool's every flag on every server.
+
+**Candidate structural fixes (decide + design):**
+1. **Exec reads via parsed `argv` directly (execve, no `/bin/sh`)** — the classifier's view == the exec's
+   view; the entire shell-parse-mismatch class (escapes/quotes/separators/substitution/redirects) cannot
+   execute. Cost: read PIPELINES (`ps aux | grep x`) need a safe mini-executor (parse stages, verify each
+   stage's binary is read-allowlisted, wire without a shell) or must be signed.
+2. **Kernel-level confinement** — run reads in a locked-down sandbox: read-only rootfs/bind mounts + seccomp
+   (deny write/exec syscalls) + no network, so a misclassified write/exec simply cannot persist. Defense in
+   depth independent of the classifier.
+3. **Strict no-metacharacter read mode** — in read-only mode refuse any command with shell metacharacters and
+   run only `binary args` forms with inspected args.
+(Likely a combination — e.g. argv-exec + seccomp. The standing rig is the regression net for whichever path.)
+See memory `sshgate_classifier_arms_race` for the full write-up.
+
+## Needs Karthi / to-discuss (separate from the two features)
+1. **Push `origin/main`** (39 commits) — your `git push` / CLI auth; the classifier blocks me on Telegram auth.
+2. **v1.2 redactor merge** — COMPLETE + triple-reviewed on `feat/v1.2-redactor` (`4a5216f`); needs your
+   ratification of signing-model **option 3** + the accepted within-window (≤5m) replay posture, then merge.
+   (Held — do NOT auto-merge; the C1 confused-deputy fix needs your sign-off.) See `sshgate_v12_resume_state`.
+3. **Tier-3 v2 hosted signer** — headless backend COMPLETE + verified on `feat/v2-hosted-signer` (`b34fcfd`);
+   needs the **6 product decisions** (signing-key placement, auth UX, approval policy, UI approach, deployment,
+   first-operator bootstrap), the rendered web UI (backend serves JSON only), and a stable HTTPS hostname
+   (passkeys are origin-bound). See `sshgate_v2_hosted_signer`.
+4. **Tier-1→Tier-2 upgrade UX (#17)** — design call (how the upgrade is surfaced/wired).
+5. **Live Tier-2 signer demo (#12)** — needs your hardware (logout/login for the sshgatesigner group, relaunch).
+
+## Deferred / lower priority (mine to do, no decision needed — but noted so nothing is lost)
+- **Deferred refactors:** sign-wire struct consolidation (`signRequest`/`signRequestCmd` duplicated
+  `signer/daemon.go` ↔ `mcp/sign/client.go` — do in the v1.2-merge window, designed WITH v1.2's envelope
+  structs); the redaction **scanner** Aho-Corasick/keyword-prefilter (perf for large output — security-sensitive
+  rewrite, deprioritized); softening the upgrade remediation message tone (#18, v1.2-diverged files).
+- **gofmt drift:** local `go1.26.4` vs committed `go 1.25.0`; `make preflight` doesn't gate on gofmt. Pin a
+  gofmt toolchain or add `gofmt -l` under it (not a push blocker; nothing in this work introduced it).
+- **Rig corpus:** round-2 holes (curl-cache/sort-compress/wget-o/hostname/git-branch) not yet added to the
+  rig corpus regression sweep (round-1 holes ARE, `905879e`); the harden4 unit tests already pin them at the
+  classify level. Add to `internal/redteam/corpus.go` when convenient.
+- **Known residual classifier gaps** (subsumed by the architectural fix): the per-tool denylist will keep
+  leaking obscure write/exec flags; the rig is the standing regression net.
+
+## Branches (all local, unmerged unless noted)
+- `main` — all session work merged here, 39 ahead of origin, unpushed.
+- `feat/v1.2-redactor` (`4a5216f`) — v1.2 redactor, ready-to-merge, HELD for option-3 ratify.
+- `feat/v2-hosted-signer` (`b34fcfd`) — Tier-3 headless backend, complete; UI/decisions/deploy remain.
