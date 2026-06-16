@@ -64,6 +64,21 @@ enumeration cannot win against every tool's every flag on every server.
 (Likely a combination — e.g. argv-exec + seccomp. The standing rig is the regression net for whichever path.)
 See memory `sshgate_classifier_arms_race` for the full write-up.
 
+## Future — gated interactive session mode (task #25, lands AFTER #22)
+> Karthi (2026-06-16): "add it to the roadmap right after number 22."
+
+A **gated interactive session**: `ssh <key> host` lands the operator in a shell-LIKE interactive
+**prompt** (a prompt, command history, `cd`/env that feel normal) where **every command is still
+gated**. The SAFE form is **NOT** wrapping a live `/bin/sh` — that is the read-only classifier
+arms-race on hard mode (persistent shell state, `eval`, history, and interactive-program escapes
+like `:!sh`) and it undoes #22. Instead **the gate IS the shell**: it reads a line, parses it into
+argv itself, classifies it, runs it via argv-exec (no `/bin/sh`), prints output, and loops —
+tracking cwd/env itself. Classifier-view ≡ exec-view, exactly the #22 principle, so an interactive
+prompt is just the argv-exec engine with a read-eval-print front end. Interactive sub-programs
+(`vim`/`mysql`/…) are handled by the Feature-2 per-service adapters or blocked. **Depends on the
+#22 argv-exec foundation; build after it.** (`rbash` is the cautionary counter-example — a wrapped
+restricted shell, famously full of escapes.)
+
 ## Needs Karthi / to-discuss (separate from the two features)
 1. **Push `origin/main`** (39 commits) — your `git push` / CLI auth; the classifier blocks me on Telegram auth.
 2. **v1.2 redactor merge** — COMPLETE + triple-reviewed on `feat/v1.2-redactor` (`4a5216f`); needs your
