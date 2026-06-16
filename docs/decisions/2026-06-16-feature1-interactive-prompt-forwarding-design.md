@@ -219,3 +219,19 @@ Each phase is independently shippable and leaves the system safe. Phases 0–2 a
 - **Timeout defaults.** Ratify `T_reply=120s`, `T_cmd=15min`, `T_soft=1.5s` / `T_hard=8s`, prompts-per-command cap `8` — or set your own.
 - **Stall-abort exit code.** Ratify `EX_TEMPFAIL=75` as the distinct "aborted/unknown, not done" status (M7) vs an alternative sysexit.
 - **Scope of secret relay at v1.** Ship confirm-prompts first and treat **password relay as a separate, explicitly-ratified follow-on** (adversarial recommendation), or greenlight both together now.
+
+## Open design question — auto-confirm mode (raised by Karthi, 2026-06-16)
+
+Karthi: during an install a command may fire many routine `[Y/n]` confirms; tapping each is annoying. He wants an **auto-confirm mode** he can enable/disable (e.g. a Telegram slash command) so the agent proceeds without a tap. His own stated worry: this must not become a lever for the AI to defeat the arm's-length **deterministic signer** ("fool it into signing everything"), and the AI must not be able to learn the mode is on and inject a malicious command mid-stream.
+
+**Structural fact that makes this tractable:** a confirm is **stdin to an already-authorized, already-running command, not a signing event** (see "Why this is not a second signing flow"). The signer is not in the confirm path, so auto-confirm can never cause the signer to authorize a new/different command. Every command still clears the normal bar (Tier-2 signature / Tier-1 read-classification) before it can run; auto-mode only changes *who answers prompts inside* an already-cleared command.
+
+**Load-bearing invariant:** *auto-mode never widens what can run — it only auto-answers prompts within an already-authorized command.* This is also the defense against the "inject mid-stream" worry. The toggle MUST live on the **deterministic side** (human-set from Telegram, authenticated as the operator) and be neither settable nor readable by the AI/MCP.
+
+**Residual risk to contain:** a prompt *inside* a legitimately-approved command can itself be consequential (e.g. apt's "replace edited `/etc/ssh/sshd_config` with maintainer version? [Y/n]"), and a blind auto-yes makes that call. **Mitigation rule:** auto-mode auto-answers only prompts matching a **tight allowlist of known-safe standard confirmations**; anything unrecognized, any config-overwrite-style prompt, and **anything echo-off (password) is never auto-answered** and always escalates to the human.
+
+**Two toggle shapes (decide together):**
+1. **Per-command auto-confirm scope (tighter):** approving/signing a command also authorizes "auto-answer its standard confirmations." Binds auto-answering to the specific vetted command; no standing state for the AI to exploit. Best security story.
+2. **Global time-boxed toggle + safe-shape allowlist (better ergonomics):** human-set on/off from Telegram, hard-limited to the allowlist, time-boxed. Convenient but blankets a window.
+
+Likely a hybrid. **DECISION DEFERRED** — Karthi settles this when he reviews the architecture. **Build the confirm path so the auto-answer policy is a pluggable, deterministic-side decision point** (don't hardcode "always ask").
