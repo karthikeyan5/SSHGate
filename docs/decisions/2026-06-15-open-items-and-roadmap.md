@@ -79,6 +79,20 @@ prompt is just the argv-exec engine with a read-eval-print front end. Interactiv
 #22 argv-exec foundation; build after it.** (`rbash` is the cautionary counter-example — a wrapped
 restricted shell, famously full of escapes.)
 
+## Future — friendlier gate responses (task #26)
+> Karthi (2026-06-16): instead of a bare reject/kill, the gate should answer with a clear,
+> actionable message ("needs signature / needs approval") — for BOTH the current single-command
+> mode and the #25 gated session.
+
+When the gate denies a write (or any command needing a signature), don't just exit 77 / kill —
+return a clear, structured, agent-friendly response that says *what* is needed and *how* to get it
+(e.g. "this is a write — it needs an approved signature; request approval, then resubmit with the
+`SSHGATE_SIG` envelope"). This is more than cosmetics: in an agent-driven flow (especially the #25
+gated terminal) it is the **handshake** that tells the agent to go get approval and resubmit,
+instead of guessing why a command died. In #25's interactive mode the write could optionally
+trigger the Telegram approval **inline** (reusing Feature 1's prompt-relay) so the operator just
+taps approve and the command proceeds. Applies to current mode now + #25 later.
+
 ## Needs Karthi / to-discuss (separate from the two features)
 1. **Push `origin/main`** (39 commits) — your `git push` / CLI auth; the classifier blocks me on Telegram auth.
 2. **v1.2 redactor merge** — COMPLETE + triple-reviewed on `feat/v1.2-redactor` (`4a5216f`); needs your
