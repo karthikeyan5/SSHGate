@@ -261,8 +261,21 @@ sudo tee -a /var/lib/sshgatesigner/config/config.toml >/dev/null <<'EOF'
 token_path      = "/var/lib/sshgatesigner/tokens/telegram.token"
 allowed_user_id = NNNN
 chatstore_path  = "/var/lib/sshgatesigner/config/peer.json"
+# api_base_url  = "https://tg-proxy.example.com"   # optional; see below
 EOF
 ```
+
+**Optional — `api_base_url` (api.telegram.org bypass).** If `api.telegram.org`
+is IP-blocked from this host (the rest of the internet works, but Telegram's
+IPs time out), route the approval bot through a maintainer-owned **reverse
+proxy** that forwards `<base>/bot<token>/<method>` → `api.telegram.org/bot…`.
+Set `api_base_url` in `[backend.telegram]` (or the env var
+`SSHGATE_TELEGRAM_API_URL`, which overrides the config). It must be `https://`
+(plain `http://` is allowed **only** for a `localhost`/`127.0.0.1` proxy, since
+the bot token transits the URL path). Empty/absent ⇒ `api.telegram.org`
+(default). On startup the daemon logs `telegram: routing Bot-API via custom
+endpoint <base>` so you can confirm the bypass is active. Example nginx:
+`location / { proxy_pass https://api.telegram.org; proxy_ssl_server_name on; }`.
 
 Flip the backend type:
 

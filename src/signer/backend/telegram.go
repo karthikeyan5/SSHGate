@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -112,6 +113,56 @@ type TelegramOptions struct {
 	// immediately; production uses 30 to keep the upstream request
 	// rate low (daemon.md §11).
 	PollTimeoutSec int
+}
+
+// APIEndpointForBase converts a user-facing Bot-API BASE url (e.g.
+// "https://tg-proxy.example.com") into the tgbotapi endpoint PATTERN
+// ("<base>/bot%s/%s") that TelegramOptions.APIEndpoint expects. An empty
+// (or whitespace-only) base returns "" — the signal NewTelegramBackend
+// reads as "use the default api.telegram.org", byte-for-byte today's
+// behavior. This is the production hook for routing the approval bot
+// through a maintainer-owned reverse proxy when api.telegram.org is
+// IP-blocked (mirrors c3's api_base_url). The base is validated so a typo
+// can never send the bot token — interpolated into the request path — to
+// a non-TLS or malformed host. The proxy must preserve Telegram's path
+// shape (<base>/bot<token>/<method> -> api.telegram.org/bot<token>/<method>).
+func APIEndpointForBase(base string) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "", nil
+	}
+	if err := validateAPIBaseURL(base); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(base, "/") + "/bot%s/%s", nil
+}
+
+// validateAPIBaseURL rejects a base URL that could leak the bot token to a
+// bad host: it must parse, carry a host, and be https:// — with the single
+// exception of http:// for an explicit localhost host (a local reverse
+// proxy). The error names only the base, never the token. Mirrors c3's
+// telegram.validateAPIBaseURL.
+func validateAPIBaseURL(base string) error {
+	u, err := url.Parse(base)
+	if err != nil {
+		return fmt.Errorf("invalid api_base_url %q: %w", base, err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid api_base_url %q: missing host", base)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+		return fmt.Errorf("refusing api_base_url %q: http:// is only allowed for a "+
+			"localhost reverse proxy (the bot token must not transit a non-TLS remote host)", base)
+	default:
+		return fmt.Errorf("refusing api_base_url %q: scheme must be https:// (got %q)", base, u.Scheme)
+	}
 }
 
 // NewTelegramBackend builds a TelegramBackend, verifies the token via

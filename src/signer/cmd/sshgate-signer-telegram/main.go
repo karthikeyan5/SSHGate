@@ -42,6 +42,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -99,6 +100,14 @@ type telegramConfig struct {
 	// ChatStorePath is the JSON file capturing the DM chat_id learned
 	// from the allowed user's first /start.
 	ChatStorePath string `toml:"chatstore_path"`
+	// APIBaseURL optionally routes the approval bot through a
+	// maintainer-owned Bot-API reverse proxy (e.g.
+	// "https://tg-proxy.example.com") instead of api.telegram.org — the
+	// fix when api.telegram.org is IP-blocked. Empty => api.telegram.org
+	// (default). The env var SSHGATE_TELEGRAM_API_URL overrides this.
+	// Must be https:// (http:// only for a localhost proxy); the proxy
+	// must preserve Telegram's "/bot<token>/<method>" path shape.
+	APIBaseURL string `toml:"api_base_url"`
 	// Explainer is the optional LLM-explainer block. When Enabled is
 	// false (or this block is absent in the TOML), no explainer is
 	// wired up and v1 rendering applies.
@@ -346,13 +355,33 @@ func buildTelegramBackend(ctx context.Context, c telegramConfig) (backend.Backen
 		return nil, fmt.Errorf("token file %s is empty", c.TokenPath)
 	}
 
+	// Optional custom Bot-API endpoint: route the approval bot through a
+	// maintainer-owned reverse proxy when api.telegram.org is IP-blocked.
+	// Env SSHGATE_TELEGRAM_API_URL wins over backend.telegram.api_base_url
+	// (mirrors the token-on-disk precedents). Empty => default
+	// api.telegram.org. Validated so a typo can't leak the token.
+	apiBase := strings.TrimSpace(c.APIBaseURL)
+	if env := strings.TrimSpace(os.Getenv("SSHGATE_TELEGRAM_API_URL")); env != "" {
+		apiBase = env
+	}
+	apiEndpoint, err := backend.APIEndpointForBase(apiBase)
+	if err != nil {
+		return nil, err
+	}
+
 	tb, err := backend.NewTelegramBackend(backend.TelegramOptions{
 		BotToken:      token,
 		AllowedUserID: c.AllowedUserID,
 		ChatStore:     &backend.FileChatStore{Path: c.ChatStorePath},
+		APIEndpoint:   apiEndpoint,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new telegram backend: %w", err)
+	}
+	if apiEndpoint != "" {
+		// apiBase carries no token — safe to log; helps the operator
+		// confirm the bypass endpoint is active.
+		logf("telegram: routing Bot-API via custom endpoint %s (api.telegram.org bypass)", apiBase)
 	}
 
 	// Optional: wire up the LLM command explainer (v1.1 Task D). The
