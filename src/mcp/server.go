@@ -78,6 +78,21 @@ const ToolNameStatus = "status"
 // Code's surface name is "mcp__sshgate__revoke_server".
 const ToolNameRevokeServer = "revoke_server"
 
+// serverInstructions is the MCP server-level prompt surfaced to the agent
+// at initialize. It teaches the agent how the gate's read/write split
+// behaves so it doesn't accidentally turn cheap inventory reads into
+// approval-gated writes (Karthi, 2026-06-17).
+const serverInstructions = `SSHGate runs commands on registered servers through a security gate.
+
+READ commands run immediately, no approval. WRITE commands require a human Telegram approval tap.
+
+The gate FAILS CLOSED: a command is treated as a read ONLY when every part of it is a recognized read. Anything it cannot confirm — an uncommon/unknown utility, a redirect (>), or any segment that writes — makes the WHOLE command count as a write and routes it to approval. Guidance:
+- Prefer ONE simple command per call, using common read tools (ls, cat, stat, df, du, free, uptime, ps, ss, ip, journalctl, systemctl list-units / status). A simple pipe between read tools (e.g. "ps aux | grep x") is fine.
+- For inventory/diagnostics, send SEPARATE read calls instead of chaining with &&, ||, ';', or wrapping in test/sh -c — a compound that includes any non-read or unknown segment will be classified a write and need a tap.
+- If a command you intended as a read is refused as a write, simplify it (drop the redirect/compound/uncommon tool) rather than retrying.
+- For genuine writes, batch them into run_batch so all writes in a task share ONE approval tap, and always show the user the planned writes first.
+- Writes to a read-only (Tier-1) server are refused locally before any tap.`
+
 // Server is the MCP front-end. It owns a single tool implementation
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
@@ -101,7 +116,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    ServerName,
 		Version: Version,
-	}, nil)
+	}, &mcpsdk.ServerOptions{Instructions: serverInstructions})
 
 	// Register the run tool using the generic AddTool helper so the
 	// SDK derives the input schema from RunInput automatically.
