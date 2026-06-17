@@ -21,3 +21,7 @@ gate-redteam-report.jsonl
 # Scratch/junk dir for throwaway artifacts (e.g. red-team hunt findings/ideas
 # dumps, stray binaries). Never committed.
 /junk/
+
+# Claude Code local scratch: subagent git worktrees, session-local settings.
+# Never committed (worktrees contain a full repo checkout + live .git pointers).
+/.claude/
