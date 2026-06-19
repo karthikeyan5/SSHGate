@@ -228,6 +228,86 @@ func TestServer_CallToolUnknownAliasReturnsToolError(t *testing.T) {
 	}
 }
 
+// TestServe_RegistersExactlyAgentTools drives the REAL Serve() over a
+// pair of pipes and asserts the production tool registration is exactly
+// the agent-facing set {run, run_batch, list_servers, status,
+// revoke_server} — and, critically, that add_server is NOT among them.
+// Provisioning was removed from the agent surface (it is now the
+// human-only `sshgate` CLI); this test is the regression guard that the
+// MCP server never re-exposes it.
+//
+// Unlike the connectInProcess / connectAllTools helpers, which mirror
+// registration locally, this test exercises Serve itself, so it catches
+// a stray AddTool(add_server) being re-added to server.go.
+func TestServe_RegistersExactlyAgentTools(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
+	srv := &mcp.Server{Runner: runner, Logger: log.New(io.Discard, "", 0)}
+
+	// Two pipes: client→server and server→client. Serve reads from
+	// c2sR and writes to s2cW; the client reads from s2cR and writes to
+	// c2sW.
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ctx, c2sR, s2cW) }()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
+	clientT := &mcpsdk.IOTransport{Reader: s2cR, Writer: c2sW}
+	cs, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+
+	res, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	got := make(map[string]bool, len(res.Tools))
+	for _, tool := range res.Tools {
+		got[tool.Name] = true
+	}
+	want := map[string]bool{
+		mcp.ToolName:             true, // run
+		mcp.ToolNameRunBatch:     true,
+		mcp.ToolNameListServers:  true,
+		mcp.ToolNameStatus:       true,
+		mcp.ToolNameRevokeServer: true,
+	}
+	if len(res.Tools) != len(want) {
+		t.Errorf("registered %d tools; want %d (%v)", len(res.Tools), len(want), got)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("missing expected tool %q", name)
+		}
+	}
+	// The whole point: add_server must NOT be exposed to the agent.
+	if got["add_server"] {
+		t.Error("add_server is registered as an MCP tool; provisioning must be human-only (sshgate CLI)")
+	}
+
+	// Clean shutdown: close the client session, then the client→server
+	// pipe so Serve sees EOF and returns.
+	_ = cs.Close()
+	_ = c2sW.CloseWithError(io.EOF)
+	_ = s2cR.Close()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Errorf("Serve returned: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Serve did not return after client close")
+	}
+}
+
 func TestServe_StdioEOFShutsDown(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
