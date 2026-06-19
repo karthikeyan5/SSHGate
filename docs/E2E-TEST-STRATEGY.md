@@ -34,7 +34,8 @@ Runs everything in `preflight`, then:
 
 5. `make test-integration` — `go test -race -tags=integration ./tests/integration/...`.
    Boots a real `linuxserver/openssh-server` container and exercises the full
-   path: `add_server` deploys the gate over SSH, a read command streams back,
+   path: the provisioning logic (`tools.AddServer`, the shared core the human
+   `sshgate` CLI drives) deploys the gate over SSH, a read command streams back,
    a write is denied at the gate (read-only / Tier-1), and the signed/Tier-2
    paths where present. This is the load-bearing "it actually works" layer.
 6. `make smoke` — `scripts/smoke-fresh-install.sh`. The headless fresh-user
@@ -46,10 +47,10 @@ Runs everything in `preflight`, then:
 ## What can't be headless — the manual fresh-user install check
 
 The Claude Code plugin + slash-command layer (`/plugin install`,
-`/sshgate:setup`, `/sshgate:add`) can't be driven from `go test`. After changes
-to the install flow, the binaries, or the MCP startup, do one real fresh-user
-pass on a clean machine (or a throwaway user / container) and confirm the
-**Tier-1 read-only** path end-to-end:
+`/sshgate:setup`) and the human `sshgate` provisioning CLI can't be driven from
+`go test`. After changes to the install flow, the binaries, or the MCP startup,
+do one real fresh-user pass on a clean machine (or a throwaway user / container)
+and confirm the **Tier-1 read-only** path end-to-end:
 
 1. `go version` ≥ 1.25; `git clone`; `make install-local`; confirm
    `command -v sshgate-mcp` resolves on `$PATH`.
@@ -59,9 +60,11 @@ pass on a clean machine (or a throwaway user / container) and confirm the
    does. After relaunch, run `/mcp` and confirm the `sshgate` server is
    connected and its tools appear (the MCP server must come up even though no
    key exists yet — this is what `make smoke` guards headlessly).
-3. `/sshgate:setup` → Tier 1. Then `/sshgate:add <alias> <user@host>` against a
-   reachable Linux box — confirm it deploys without a reload and a read
-   (`run df -h`) streams back while a write is denied.
+3. `/sshgate:setup` → Tier 1. Then provision a server by hand against a
+   reachable Linux box: `sshgate pubkey`, paste the line into the target's
+   `~/.ssh/authorized_keys`, then `sshgate add <alias> <user@host> --read-only`
+   — confirm it deploys and a read (`run df -h`) streams back while a write is
+   denied.
 4. `/sshgate:status` shows the signer as `not configured (read-only / Tier 1)`
    — that's healthy, not an error.
 

@@ -81,9 +81,9 @@ trust you want to delegate.
 
 - Go 1.25 or newer on `$PATH` (https://go.dev/dl/) — to build the
   binaries. The local side is plain Go; no sudo, no systemd, no Telegram.
-- One or more remote **Linux** servers reachable over SSH; you add them
-  with `/sshgate:add`. The gate runs on the remote — that's the only side
-  that must be Linux.
+- One or more remote **Linux** servers reachable over SSH; you provision them
+  yourself with the human-only `sshgate` CLI (`sshgate pubkey` + `sshgate add`).
+  The gate runs on the remote — that's the only side that must be Linux.
 
 **Tier 2 (local Telegram signer) additionally needs:**
 
@@ -167,23 +167,48 @@ stat -c '%a' ~/.config/sshgate/ssh/sshgate_ed25519
 # expect: 600
 ```
 
-### 4. Add a server (read-only deploy)
+### 4. Provision a server (read-only deploy)
 
-From a Claude session, run:
+Provisioning is a **human-only** step run from your terminal with the
+`sshgate` CLI (installed to `~/go/bin/sshgate` by `make install-local`).
+It is deliberately NOT an agent/MCP tool: onboarding a machine is the
+control plane — it defines which servers the agent can reach — so the
+agent can never expand its own reach by adding a host.
 
+First, print SSHGate's dedicated public-key line:
+
+```bash
+sshgate pubkey
 ```
-/sshgate:add <alias> <user@host> --read-only
+
+Paste that single line, plain, into the **target** server's
+`~/.ssh/authorized_keys` by hand — you already administer that box
+out-of-band. Then lock the key down and register the alias:
+
+```bash
+sshgate add <alias> <user@host> --read-only
 ```
 
-The `--read-only` flag tells `sshgate.add_server` to upload gate
-but skip gate.pub — the remote runs in read-only mode. Reads
-succeed, writes return exit 77 with the "no signing key configured"
-message.
+`sshgate add` connects to the target **using SSHGate's own key** (the
+line you just pasted, which currently has full shell), installs the gate,
+and rewrites that plain line into the restricted
+`command="~/.sshgate-gate/gate"` forced-command entry — locking the key
+down. The `--read-only` flag skips uploading `gate.pub`, so the remote
+runs in read-only mode: reads succeed, writes return exit 77 with the
+"no signing key configured" message.
 
-To upgrade a tier-1 server to tier-2 later (after you've added a
-signer), re-run `/sshgate:add <alias> <user@host>` **without**
-`--read-only` and using the same bootstrap credentials. The new
-gate.pub is pushed idempotently.
+> There is a brief window — between pasting the plain key and
+> `sshgate add` rewriting it — where that key grants full shell. This is
+> accepted and human-controlled. `sshgate add` warns about it, and if
+> setup fails it rolls back to the plain line and tells you to remove it
+> yourself if it can't.
+
+To move a tier-1 server to tier-2 later (after you've added a signer),
+**revoke and re-provision** it: run `/sshgate:revoke <alias>` (which keeps
+its Telegram approval), then `sshgate add <alias> <user@host>` **without**
+`--read-only`. The key is already gated, so an in-place upgrade is a
+re-provision rather than a re-add; a smoother in-place upgrade is planned
+(roadmap #17).
 
 ---
 
@@ -396,11 +421,14 @@ sudo chown "$USER" ~/.config/sshgate/pubkey-distrib/gate.pub
 chmod 644 ~/.config/sshgate/pubkey-distrib/gate.pub
 ```
 
-Then, from a Claude session, re-run `sshgate.add_server` for each
-registered alias with `read_only=false` and the same bootstrap
-credentials you used originally. The tool detects the existing
-restricted entry in `authorized_keys` and pushes the new
-`gate.pub` idempotently — no rewrites, no rollback risk.
+Then bring each existing read-only server up to signed-write. Because the
+SSHGate key is already gated on those hosts, the tier change is a
+re-provision, not a re-add: for each registered alias, run
+`/sshgate:revoke <alias>` (its Telegram approval is kept) and then
+`sshgate add <alias> <user@host>` **without** `--read-only`, which now
+finds the staged `gate.pub` and deploys signed-write. (Servers you
+provision fresh from here on pick up `gate.pub` automatically. A smoother
+in-place read-only→write upgrade is planned — roadmap #17.)
 
 ### 6. Activate the sshgatesigner group, relaunch Claude Code (REQUIRED before writes)
 
@@ -559,5 +587,5 @@ before removing `/var/lib/sshgatesigner/` (which holds the master signing
 key and audit log — destructive). Pass `--purge` to skip the prompts.
 
 Removing `/var/lib/sshgatesigner/` invalidates every gate deployment
-keyed against this signer; you'll need to re-run `/sshgate:add` (and
-auto-setup) on every server after re-installing.
+keyed against this signer; you'll need to re-provision every server with
+the `sshgate` CLI (`sshgate pubkey` + `sshgate add`) after re-installing.

@@ -43,6 +43,11 @@ This document is the single source of truth for "what's not in this release and 
 - **Status:** deferred to v1.1 cascade or v1.2.1+.
 - **Estimated scope:** small. Mirror `scripts/install.sh` with `~/Library/LaunchAgents/` + `launchctl bootstrap`. No code changes to the signer or MCP — the gate binary stays Linux-only since remote hosts are Linux.
 
+### In-place read-only → signed-write upgrade (roadmap #17)
+- **Why:** provisioning moved to the human-only `sshgate` CLI, and the SSHGate key on a registered host is already locked to the forced command. There is no in-place "promote a tier-1 server to tier-2" path yet. Today the operator must `/sshgate:revoke <alias>` (which keeps its Telegram approval) and re-provision with `sshgate add <alias> <user@host>` (no `--read-only`). That works but is heavier than necessary.
+- **Status:** open design item, tracked as **#17** (see [`decisions/2026-06-15-open-items-and-roadmap.md`](decisions/2026-06-15-open-items-and-roadmap.md)). Under the CLI model an upgrade is a re-provision (the key is already gated), so the smoother path is a dedicated `sshgate` subcommand (e.g. `sshgate upgrade <alias>`) that pushes `gate.pub` to an already-gated host idempotently without a full revoke/re-add cycle.
+- **Estimated scope:** small-medium. Reuses the existing gate-deploy + `gate.pub`-push logic; the work is the in-place codepath + CLI surface + tests.
+
 ### Cross-session HMAC-key recovery for legitimate audit
 - **Why:** per-session HMAC keys are non-persistent by design, so even legitimate audit needs (post-incident forensic correlation of redacted spans across sessions) cannot reverse-correlate. A signed admin command that derives a deterministic per-host audit key (separate from per-session) and writes audit-only logs under a master-key-only-readable path could unlock this without breaking the threat model.
 - **Status:** parked.
