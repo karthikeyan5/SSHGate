@@ -291,12 +291,20 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	}
 	defer bootSess.Close()
 
-	// Idempotency: if the restricted entry already exists, skip the rewrite.
+	// Idempotency: skip the rewrite ONLY when the canonical restricted entry
+	// is present AND there is no stray PLAIN duplicate of the same key. If a
+	// plain line coexists with the restricted one (the human pasted twice, or
+	// a prior partial run left both), treating the host as "already set up"
+	// would leave that plain line live — a FULL-SHELL credential — while the
+	// server registers as verified. Forcing the rewrite path in that case
+	// removes ALL lines matching the key (plain and restricted) and re-emits
+	// exactly one restricted line, closing the gap.
 	existing, _, err := bootSess.Run(ctx, "cat "+remoteAuthKeys+" 2>/dev/null || true")
 	if err != nil {
 		return ProvisionOutput{}, fmt.Errorf("read authorized_keys: %w", err)
 	}
-	idempotent := hasRestrictedEntryForKey(existing, sshgatePub, remoteGateBin)
+	idempotent := hasRestrictedEntryForKey(existing, sshgatePub, remoteGateBin) &&
+		!hasPlainLineForKey(existing, sshgatePub)
 
 	// runAutoSetup / rollback are methods on Runner but touch no Runner
 	// state — a zero Runner is a safe shared host for them.
@@ -312,7 +320,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	// triggers gate's SSHGATE_OK probe path.
 	if err := verifyProvision(ctx, in.Host, port, bootCfg); err != nil {
 		if !idempotent {
-			r.rollback(ctx, bootSess, existing != nil)
+			return ProvisionOutput{}, provisionRollback(ctx, &r, bootSess, existing, in.User, in.Host, err)
 		}
 		return ProvisionOutput{}, err
 	}
@@ -325,7 +333,8 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		ReadOnly: in.ReadOnly,
 	}); err != nil {
 		if !idempotent {
-			r.rollback(ctx, bootSess, existing != nil)
+			return ProvisionOutput{}, provisionRollback(ctx, &r, bootSess, existing, in.User, in.Host,
+				fmt.Errorf("registry add: %w", err))
 		}
 		return ProvisionOutput{}, fmt.Errorf("registry add: %w", err)
 	}
@@ -343,6 +352,31 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	}, nil
 }
 
+// provisionRollback runs the shared rollback after a Provision failure that
+// occurred AFTER authorized_keys was modified, then wraps cause in an
+// actionable, security-explicit error. Unlike AddServer (whose backup is the
+// operator's pre-existing authorized_keys), Provision's backup is the human's
+// PLAIN pasted line — so a rollback restores the SSHGate key to FULL SHELL.
+// The human must be told that explicitly:
+//
+//   - On a clean restore: tell them the key is back to the plain full-shell
+//     line they pasted and how to remediate (remove it or re-run `sshgate add`).
+//   - On a FAILED restore: escalate — the host may now hold an un-restricted
+//     SSHGate key in an indeterminate state, so they must inspect it manually.
+//
+// host/user are included so the message names the exact file to fix.
+func provisionRollback(ctx context.Context, r *Runner, bootSess bootstrapSession, existing []byte, user, host string, cause error) error {
+	restoreErr := r.rollback(ctx, bootSess, existing != nil)
+	if restoreErr != nil {
+		return fmt.Errorf(
+			"provisioning failed (%w); ROLLBACK ALSO FAILED (%v) — manually inspect %s:~/.ssh/authorized_keys; it may contain an un-restricted SSHGate key (FULL SHELL) for %s@%s",
+			cause, restoreErr, host, user, host)
+	}
+	return fmt.Errorf(
+		"provisioning failed (%w); the SSHGate key on %s@%s has been rolled back to the PLAIN line you pasted, which grants FULL SHELL — remove that line from %s:~/.ssh/authorized_keys now, or re-run `sshgate add` to complete the lockdown",
+		cause, user, host, host)
+}
+
 // verifyProvision re-dials the target with the (now gated) SSHGate key and
 // runs the empty-command SSHGATE_OK probe. It opens a FRESH connection so the
 // gate's forced command is exercised on a new session (the pre-rewrite
@@ -351,7 +385,15 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 func verifyProvision(ctx context.Context, host string, port int, bootCfg *ssh.ClientConfig) error {
 	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
 	defer cancel()
-	sess, _, err := newBootstrapSession(dialCtx, host, port, bootCfg)
+	// Dial on a COPY of the config. dialBootstrap (add_server.go) wraps and
+	// REPLACES cfg.HostKeyCallback in place to capture the fingerprint, so the
+	// caller's bootCfg has already been mutated by the first dial. Passing a
+	// shallow copy keeps the verify dial from depending on — or further
+	// mutating — that shared callback state. (HostKeyCallback is the only
+	// field dialBootstrap touches; the TOFU store it points at is the durable
+	// pin and is unaffected by the copy.)
+	cfgCopy := *bootCfg
+	sess, _, err := newBootstrapSession(dialCtx, host, port, &cfgCopy)
 	if err != nil {
 		return fmt.Errorf("verify re-dial: %w", err)
 	}

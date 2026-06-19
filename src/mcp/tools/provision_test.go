@@ -548,3 +548,257 @@ func TestProvision_AlreadyRegistered(t *testing.T) {
 		t.Errorf("err = %v; want an 'already registered' refusal", err)
 	}
 }
+
+// ---------------------------------------------------------------------
+// Adversarial security regressions (review findings)
+// ---------------------------------------------------------------------
+
+// countRestrictedEntries returns how many lines in authorized_keys carry the
+// canonical forced-command prefix for pub. The rewrite must always leave
+// EXACTLY one — never zero (key unusable) and never more (duplicate gate lines).
+func countRestrictedEntries(t *testing.T, authKeys []byte, pub ssh.PublicKey) int {
+	t.Helper()
+	wantBytes := pub.Marshal()
+	wantPrefix := fmtCommandPrefix()
+	n := 0
+	for _, line := range strings.Split(string(authKeys), "\n") {
+		if !strings.HasPrefix(line, wantPrefix) {
+			continue
+		}
+		if lineMatchesKey(line, wantBytes) {
+			n++
+		}
+	}
+	return n
+}
+
+// fmtCommandPrefix mirrors the exact restricted-line prefix the rewrite emits.
+func fmtCommandPrefix() string {
+	return strings.Replace(commandForcingFmt, "%s", remoteGateBin, 1)
+}
+
+// TestProvision_HIGH1_RestrictedPlusPlainForcesRewrite is the HIGH-1
+// regression. authorized_keys contains BOTH the canonical restricted line AND
+// a stray PLAIN duplicate of the SAME sshgate key (the human pasted twice, or
+// a prior partial run left both). The old idempotency probe (restricted-entry
+// present => skip) would treat this as "already set up" and leave the plain
+// line LIVE — a full-shell credential — while registering the server verified.
+//
+// Provision MUST instead force the rewrite, producing authorized_keys with NO
+// plain line for the key and EXACTLY ONE restricted entry.
+func TestProvision_HIGH1_RestrictedPlusPlainForcesRewrite(t *testing.T) {
+	cfg, pub := provisionMaterials(t)
+	cfg.GatePubPath = filepath.Join(t.TempDir(), "absent") // tier-1 for simplicity
+
+	// Seed BOTH: the canonical restricted line AND a stray plain duplicate.
+	restricted := canonicalAuthKeysLine(t, pub)
+	plain := plainPastedLine(t, pub)
+	existing := append(append([]byte(nil), restricted...), plain...)
+
+	// Sanity: the pre-condition the bug relies on actually holds.
+	if !hasRestrictedEntryForKey(existing, pub, remoteGateBin) {
+		t.Fatal("test seed lacks the restricted entry")
+	}
+	if !hasPlainLineForKey(existing, pub) {
+		t.Fatal("test seed lacks the coexisting plain duplicate")
+	}
+
+	sess := &fakeBootstrapSession{catAuthKeys: existing, probeOut: []byte("SSHGATE_OK\n")}
+	installFakeBootstrapSession(t, sess, "SHA256:high1")
+
+	out, err := Provision(context.Background(), cfg, ProvisionInput{
+		Alias:    "high1",
+		Host:     "h.example.com",
+		User:     "u",
+		ReadOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	// The host must NOT be treated as idempotent — the rewrite has to run.
+	if out.Idempotent {
+		t.Fatal("Idempotent = true despite a coexisting PLAIN line; the rewrite was skipped and the full-shell key survives (HIGH-1)")
+	}
+	au, ok := sess.uploadedTo(remoteAuthKeys)
+	if !ok {
+		t.Fatal("authorized_keys was not rewritten; the coexisting plain line was left live (HIGH-1)")
+	}
+	if hasPlainLineForKey(au.body, pub) {
+		t.Error("PLAIN (full-shell) sshgate line survived; HIGH-1 not fixed")
+	}
+	if !hasRestrictedEntryForKey(au.body, pub, remoteGateBin) {
+		t.Error("restricted entry missing after the forced rewrite")
+	}
+	if n := countRestrictedEntries(t, au.body, pub); n != 1 {
+		t.Errorf("restricted entries = %d; want exactly 1 after the rewrite", n)
+	}
+}
+
+// TestProvision_HIGH2_VerifyFailureSurfacesPlainKeyRemediation is the HIGH-2
+// regression. When verify fails after authorized_keys was modified, the
+// shared rollback restores the backup — which for Provision is the human's
+// PLAIN pasted line, i.e. the key is back to FULL SHELL. The returned error
+// MUST tell the human that explicitly and name the host so it is actionable.
+func TestProvision_HIGH2_VerifyFailureSurfacesPlainKeyRemediation(t *testing.T) {
+	cfg, pub := provisionMaterials(t)
+	cfg.GatePubPath = filepath.Join(t.TempDir(), "absent") // tier-1
+
+	sess := &fakeBootstrapSession{
+		catAuthKeys: plainPastedLine(t, pub),
+		probeOut:    []byte("nope\n"), // verify re-dial returns junk => verify fails
+	}
+	installFakeBootstrapSession(t, sess, "SHA256:high2verify")
+
+	_, err := Provision(context.Background(), cfg, ProvisionInput{
+		Alias:    "high2",
+		Host:     "target.example.com",
+		User:     "deploy",
+		ReadOnly: true,
+	})
+	if err == nil {
+		t.Fatal("Provision = nil; want a verify failure with remediation")
+	}
+	msg := err.Error()
+	// Names the host so the human knows exactly which file to fix.
+	if !strings.Contains(msg, "target.example.com") {
+		t.Errorf("err = %v; want the host named for actionability", err)
+	}
+	// Spells out the danger and the fix.
+	if !strings.Contains(msg, "FULL SHELL") {
+		t.Errorf("err = %v; want the explicit FULL SHELL warning", err)
+	}
+	if !strings.Contains(msg, "PLAIN") {
+		t.Errorf("err = %v; want the PLAIN pasted-line remediation", err)
+	}
+	if !strings.Contains(msg, "authorized_keys") {
+		t.Errorf("err = %v; want the authorized_keys file referenced", err)
+	}
+	// The underlying cause must still be wrapped in.
+	if !strings.Contains(msg, "SSHGATE_OK") {
+		t.Errorf("err = %v; want the underlying verify cause preserved", err)
+	}
+}
+
+// TestProvision_HIGH2_RollbackRestoreFailureEscalates is the second half of
+// HIGH-2: when the rollback's authorized_keys RESTORE itself fails, the host
+// may be left holding an un-restricted SSHGate key in an indeterminate state.
+// The error must ESCALATE to the "ROLLBACK ALSO FAILED — manually inspect"
+// message rather than the (now misleading) "rolled back to the plain line".
+func TestProvision_HIGH2_RollbackRestoreFailureEscalates(t *testing.T) {
+	cfg, pub := provisionMaterials(t)
+	cfg.GatePubPath = filepath.Join(t.TempDir(), "absent") // tier-1
+
+	sess := &fakeBootstrapSession{
+		catAuthKeys: plainPastedLine(t, pub),
+		probeOut:    []byte("nope\n"), // force verify failure -> rollback
+		// Fail ONLY the rollback restore (cp FROM backup TO authorized_keys).
+		// The setup backup step copies the other direction (authkeys -> backup)
+		// so it is NOT matched and setup still completes.
+		failRunSub: "cp " + remoteAuthKeysBackup + " " + remoteAuthKeys,
+	}
+	installFakeBootstrapSession(t, sess, "SHA256:high2restore")
+
+	_, err := Provision(context.Background(), cfg, ProvisionInput{
+		Alias:    "high2b",
+		Host:     "danger.example.com",
+		User:     "deploy",
+		ReadOnly: true,
+	})
+	if err == nil {
+		t.Fatal("Provision = nil; want an escalated rollback-failure error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ROLLBACK ALSO FAILED") {
+		t.Errorf("err = %v; want the escalated 'ROLLBACK ALSO FAILED' message", err)
+	}
+	if !strings.Contains(msg, "manually inspect") {
+		t.Errorf("err = %v; want the 'manually inspect' instruction", err)
+	}
+	if !strings.Contains(msg, "danger.example.com") {
+		t.Errorf("err = %v; want the host named for actionability", err)
+	}
+	if !strings.Contains(msg, "un-restricted") {
+		t.Errorf("err = %v; want the un-restricted-key warning", err)
+	}
+}
+
+// TestProvision_RewriteRobustness_CRLFOptionsDuplicate exercises the
+// Provision-level rewrite against a gnarly seed: the pasted plain line carries
+// CRLF line endings AND leading options (from="..."), a SECOND duplicate paste
+// of the same key, and an UNRELATED other key. After Provision, authorized_keys
+// must have exactly one restricted line, no surviving plain line for the key,
+// and the unrelated key preserved.
+func TestProvision_RewriteRobustness_CRLFOptionsDuplicate(t *testing.T) {
+	cfg, pub := provisionMaterials(t)
+	cfg.GatePubPath = filepath.Join(t.TempDir(), "absent") // tier-1
+
+	// An unrelated key already present in authorized_keys.
+	otherRaw, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPub, err := ssh.NewPublicKey(otherRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherLine := strings.TrimRight(string(ssh.MarshalAuthorizedKey(otherPub)), "\n")
+
+	// Bare key (no comment), to compose option-prefixed / CRLF variants.
+	bare := strings.TrimRight(string(ssh.MarshalAuthorizedKey(pub)), "\n")
+
+	// Seed: CRLF endings throughout; first sshgate paste carries leading
+	// options; a second duplicate paste is plain; an unrelated key sits in
+	// between.
+	withOptions := `from="10.0.0.0/8" ` + bare
+	seed := withOptions + "\r\n" +
+		otherLine + "\r\n" +
+		bare + "\r\n"
+	existing := []byte(seed)
+
+	// Pre-conditions the rewrite must clean up.
+	if !hasPlainLineForKey(existing, pub) {
+		t.Fatal("seed should contain at least one plain sshgate line")
+	}
+
+	sess := &fakeBootstrapSession{catAuthKeys: existing, probeOut: []byte("SSHGATE_OK\n")}
+	installFakeBootstrapSession(t, sess, "SHA256:robust")
+
+	_, err = Provision(context.Background(), cfg, ProvisionInput{
+		Alias:    "robust",
+		Host:     "h.example.com",
+		User:     "u",
+		ReadOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	au, ok := sess.uploadedTo(remoteAuthKeys)
+	if !ok {
+		t.Fatal("authorized_keys was not rewritten")
+	}
+	if hasPlainLineForKey(au.body, pub) {
+		t.Error("a PLAIN sshgate line (CRLF / options / duplicate) survived the rewrite")
+	}
+	if !hasRestrictedEntryForKey(au.body, pub, remoteGateBin) {
+		t.Error("restricted entry missing after the rewrite")
+	}
+	if n := countRestrictedEntries(t, au.body, pub); n != 1 {
+		t.Errorf("restricted entries = %d; want exactly 1 (both pastes collapse to one)", n)
+	}
+	// The unrelated key must still be present.
+	if !lineSetHasKey(au.body, otherPub) {
+		t.Error("unrelated authorized_keys key was not preserved")
+	}
+}
+
+// lineSetHasKey reports whether any line in authKeys parses to otherPub.
+func lineSetHasKey(authKeys []byte, otherPub ssh.PublicKey) bool {
+	want := otherPub.Marshal()
+	for _, line := range strings.Split(string(authKeys), "\n") {
+		if lineMatchesKey(line, want) {
+			return true
+		}
+	}
+	return false
+}
