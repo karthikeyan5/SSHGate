@@ -443,11 +443,14 @@ distinction is pinned in `src/mcp/format_status_permission_test.go` (§9).
 
 `connectInProcess` (`server_test.go:58`) wires the server over
 `mcpsdk.NewInMemoryTransports()` (line 61) — channel-based JSON-RPC, no socket.
-`connectAllTools` (`server_alltools_test.go:29`) registers and exercises the full
-tool surface end-to-end through the SDK: the six tools are `add_server`,
-`list_servers`, `status`, `revoke_server`, `run`, `run_batch`
-(`mcp.ToolName*`). goleak runs via `TestMain` in `server_test.go:26` (the server
-spawns goroutines, so the helper waits for counts to settle).
+`connectAllTools` (`server_alltools_test.go:29`) exercises a tool surface through
+the SDK using local shim handlers: the five agent tools are `list_servers`,
+`status`, `revoke_server`, `run`, `run_batch` (`mcp.ToolName*`). Provisioning is
+the human-only `sshgate` CLI and is deliberately not an agent tool. The
+authoritative "exactly these tools are registered" guard drives the real
+`Serve()`: `TestServe_RegistersExactlyAgentTools` (`server_test.go`). goleak runs
+via `TestMain` in `server_test.go:26` (the server spawns goroutines, so the
+helper waits for counts to settle).
 
 ### 9.2 White-box format tests
 

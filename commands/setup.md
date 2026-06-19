@@ -272,8 +272,8 @@ Claude Code (quit and relaunch) — not just `/reload-plugins` — so the
 
 ### T1.3 — Create the SSHGate SSH key
 
-The SSHGate dedicated SSH key (`sshgate_ed25519`) is what
-`sshgate.add_server` lays into each remote's `authorized_keys` behind
+The SSHGate dedicated SSH key (`sshgate_ed25519`) is what the
+`sshgate add` CLI lays into each remote's `authorized_keys` behind
 the `command="~/.sshgate-gate/gate"` forcing entry. The key never
 leaves the laptop; the public half goes to the remote.
 
