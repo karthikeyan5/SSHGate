@@ -14,11 +14,14 @@ import (
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
 )
 
-// connectAllTools mirrors Server.Serve's full tool registration (all six
-// tools) over the SDK's in-memory transport. The existing
-// connectInProcess helper wires only run/run_batch; this one closes the
-// gap so add_server, list_servers, status, and revoke_server are also
-// exercised at the SDK boundary (request → handler → structured result).
+// connectAllTools mirrors Server.Serve's agent-facing tool registration
+// (the five tools the agent can call) over the SDK's in-memory
+// transport. The existing connectInProcess helper wires only
+// run/run_batch; this one closes the gap so list_servers, status, and
+// revoke_server are also exercised at the SDK boundary (request →
+// handler → structured result). add_server is intentionally absent: it
+// is no longer an MCP tool — provisioning is the human-only `sshgate`
+// CLI.
 //
 // Handlers here are thin shims that call the same Runner methods the
 // production handlers in server.go call — no production behavior is
@@ -36,16 +39,6 @@ func connectAllTools(t *testing.T, server *mcp.Server) (*mcpsdk.ClientSession, f
 		Version: mcp.Version,
 	}, nil)
 
-	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
-		Name:        mcp.ToolNameAddServer,
-		Description: "Register a new server alias and install gate on it.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.AddServerInput) (*mcpsdk.CallToolResult, tools.AddServerOutput, error) {
-		out, err := server.Runner.AddServer(ctx, in)
-		if err != nil {
-			return nil, tools.AddServerOutput{}, err
-		}
-		return nil, out, nil
-	})
 	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
 		Name:        mcp.ToolNameListServers,
 		Description: "List every registered SSHGate server.",
@@ -173,34 +166,6 @@ func TestServer_Status_SDKBoundary(t *testing.T) {
 	}
 	if len(out.Servers) != 1 || !out.Servers[0].Reachable {
 		t.Errorf("server probe = %+v; want one reachable row", out.Servers)
-	}
-}
-
-func TestServer_AddServer_SDKBoundaryValidationError(t *testing.T) {
-	t.Parallel()
-	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
-	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
-	srv := buildServer(t, runner)
-	cs, stop := connectAllTools(t, srv)
-	defer stop()
-
-	// Invalid alias ("Bad" — uppercase) is rejected before any network
-	// I/O, so the no-sudo/no-network invariant holds while still
-	// exercising the add_server handler end-to-end through the SDK.
-	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
-		Name: mcp.ToolNameAddServer,
-		Arguments: map[string]any{
-			"alias":             "Bad",
-			"host":              "example.com",
-			"user":              "ops",
-			"bootstrap_agent":   true,
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool returned protocol err: %v", err)
-	}
-	if !res.IsError {
-		t.Error("IsError = false; want true for invalid alias")
 	}
 }
 

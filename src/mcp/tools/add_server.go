@@ -320,7 +320,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 		// surfacing the bare SSH error.
 		if strings.Contains(err.Error(), "unable to authenticate") {
 			return AddServerOutput{}, fmt.Errorf(
-				"tools: bootstrap SSH auth to %s@%s failed — the key offered is not authorized on the host (wrong default key, or a passphrase-protected key not loaded). Run `ssh-add <the key that reaches %s>`, then re-run /sshgate:add: %w",
+				"tools: bootstrap SSH auth to %s@%s failed — the key offered is not authorized on the host (wrong default key, or a passphrase-protected key not loaded). Run `ssh-add <the key that reaches %s>`, then re-run `sshgate add`: %w",
 				in.User, in.Host, in.Host, err)
 		}
 		return AddServerOutput{}, fmt.Errorf("tools: bootstrap dial: %w", err)
@@ -348,9 +348,13 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	probe, _, _, err := r.SSH.Run(ctx, in.Host, in.User, port, "")
 	if err != nil || !strings.Contains(string(probe), "SSHGATE_OK") {
 		// Roll back if we just made changes; idempotent re-use never
-		// modified anything, so skip rollback in that case.
+		// modified anything, so skip rollback in that case. AddServer's
+		// backup is the operator's PRE-EXISTING authorized_keys (the
+		// SSHGate key was only ever appended, never made the sole shell
+		// credential), so a restore failure is not a full-shell exposure
+		// the way it is for the CLI Provision path — we ignore it here.
 		if !idempotent {
-			r.rollback(ctx, bootSess, existing != nil)
+			_ = r.rollback(ctx, bootSess, existing != nil)
 		}
 		if err != nil {
 			return AddServerOutput{}, fmt.Errorf("tools: verify probe: %w (stdout=%q)", err, string(probe))
@@ -368,7 +372,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 	}); err != nil {
 		// Roll back the remote — registry was the last step.
 		if !idempotent {
-			r.rollback(ctx, bootSess, existing != nil)
+			_ = r.rollback(ctx, bootSess, existing != nil)
 		}
 		return AddServerOutput{}, fmt.Errorf("tools: registry add: %w", err)
 	}
@@ -560,12 +564,22 @@ func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, boots
 // the backup and remove ~/.sshgate-gate/. The hadOriginal flag is reserved
 // for future granularity (e.g. distinguishing "no original file" from
 // "original was empty") — today both cases collapse to restore-or-noop.
-func (r *Runner) rollback(ctx context.Context, c bootstrapSession, hadOriginal bool) {
+//
+// It returns the error (if any) from the authorized_keys RESTORE step.
+// AddServer logs/ignores it (it already has a primary error and an
+// operator-facing fix path), but Provision uses it to decide whether to
+// escalate its remediation message: for the CLI path the "backup" is the
+// human's PLAIN pasted line, so a restore failure can leave an
+// un-restricted SSHGate key on the host and the human must be told. The
+// gate-dir removal error is intentionally not surfaced — a leftover
+// ~/.sshgate-gate/ is harmless next to a correctly-restricted key.
+func (r *Runner) rollback(ctx context.Context, c bootstrapSession, hadOriginal bool) error {
 	_ = hadOriginal
-	_, _, _ = c.Run(ctx,
+	_, _, restoreErr := c.Run(ctx,
 		"if [ -f "+remoteAuthKeysBackup+" ]; then cp "+remoteAuthKeysBackup+" "+remoteAuthKeys+
 			" && chmod 600 "+remoteAuthKeys+"; fi")
 	_, _, _ = c.Run(ctx, "rm -rf "+remoteGateDir)
+	return restoreErr
 }
 
 // resolveAddServerCfg fills in the default paths for the runner. Tests

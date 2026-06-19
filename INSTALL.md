@@ -103,7 +103,8 @@ Tier 2 also needs `sudo` access on the local machine and a Telegram account
 user picks a tier in step 5 (`/sshgate:setup`).
 
 The remote hosts must be Linux with SSH reachable. They get checked
-per-server later via `/sshgate:add`, not here.
+per-server later, when you provision each one with the human-only `sshgate`
+CLI (`sshgate pubkey` + `sshgate add`), not here.
 
 ## 2. Clone the repo, build binaries onto $PATH, persist the PATH
 
@@ -286,7 +287,9 @@ Signer
   socket:    /run/sshgatesigner/sock
   status:    not configured (read-only / Tier 1) — writes denied at the gate
 
-No servers registered. Add one with /sshgate:add <alias> <user@host>.
+No servers registered. Provision one with the `sshgate` CLI:
+  sshgate pubkey   # paste the printed line into the target's authorized_keys
+  sshgate add <alias> <user@host> [--read-only]
 ```
 
 For a Tier 2 install with no servers yet, expect the signer socket
@@ -309,18 +312,23 @@ never installed.
 > tool I/O is normal MCP request/response, and approvals flow to your
 > phone via Telegram.)
 >
-> Add a server:
+> Add a server — this is a human-only CLI step (I, the agent, can't do it; provisioning is deliberately off my tool surface):
 >
->     /sshgate:add <alias> <user@host>
+>     sshgate pubkey                                  # prints SSHGate's key line
+>     # paste that line into <host>:~/.ssh/authorized_keys yourself
+>     sshgate add <alias> <user@host> [--read-only]   # installs gate, locks the key down
 >
 > Then ask me anything in plain English — `What's eating disk on prod-db?`
 > or `Restart nginx on staging.` Reads stream back instantly. Writes
 > queue for a Telegram approval and run after you tap approve.
 >
-> Useful slash commands going forward:
+> Provisioning (human-only `sshgate` CLI):
+>   `sshgate pubkey`   — print SSHGate's dedicated public-key line to paste
+>   `sshgate add`      — install gate on a server + lock the key down + register
+>
+> Useful slash commands going forward (agent-callable):
 >   `/sshgate:setup`   — re-run the tiered installer (idempotent)
 >   `/sshgate:status`  — health check signer + every registered server
->   `/sshgate:add`     — register a new server (auto-installs gate)
 >   `/sshgate:run`     — explicit one-shot SSH command (debug aid)
 >   `/sshgate:revoke`  — uninstall gate from a server (needs approval)
 >

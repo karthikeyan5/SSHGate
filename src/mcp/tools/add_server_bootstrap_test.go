@@ -56,6 +56,12 @@ type fakeBootstrapSession struct {
 	// uploadedAuthKeys captures the bytes written to remoteAuthKeys (the
 	// rewritten file) so tests can assert the forced-command rewrite.
 	uploadedAuthKeys []byte
+
+	// probeOut is the stdout returned for the empty-command SSHGATE_OK
+	// verify probe (Provision re-dials and runs ""). Set to "SSHGATE_OK\n"
+	// for the success paths; left empty to drive the verify-failure rollback
+	// path.
+	probeOut []byte
 }
 
 type uploadCall struct {
@@ -73,6 +79,11 @@ func (f *fakeBootstrapSession) Run(_ context.Context, cmd string) ([]byte, []byt
 	// the modelled existing keys for any cat-of-authorized_keys command.
 	if strings.Contains(cmd, "cat "+remoteAuthKeys) {
 		return f.catAuthKeys, nil, nil
+	}
+	// The Provision verify probe re-dials and runs the empty command, which
+	// triggers gate's SSHGATE_OK path. Model that as probeOut.
+	if cmd == "" {
+		return f.probeOut, nil, nil
 	}
 	return nil, nil, nil
 }
@@ -441,8 +452,8 @@ func TestAddServer_DefaultPort22AndFingerprint(t *testing.T) {
 	runner := &Runner{Servers: reg, SSH: ssh, AddServerCfg: cfg}
 
 	out, err := runner.AddServer(context.Background(), AddServerInput{
-		Alias:            "defport",
-		Host:             "h.example.com",
+		Alias: "defport",
+		Host:  "h.example.com",
 		// Port omitted => default 22.
 		User:             "u",
 		BootstrapKeyPath: writeBootstrapKey(t),

@@ -5,19 +5,28 @@ description: This skill should be used when the user asks to debug, diagnose, or
 
 # Debugging remote servers with SSHGate
 
-SSHGate gives you SSH access to the user's registered servers through
-three MCP tools: `sshgate.list_servers`, `sshgate.run`, and
-`sshgate.run_batch`. Read commands run instantly. Write commands need
-the user to tap a Telegram approval button on their phone. Optimise
-for: fast diagnosis, one approval per fix, no surprises.
+SSHGate gives you SSH access to the user's registered servers. Your MCP
+tool surface is exactly five tools — `sshgate.run`, `sshgate.run_batch`,
+`sshgate.list_servers`, `sshgate.status`, and `sshgate.revoke_server` — and
+debugging mostly uses the first three. Read commands run instantly. Write
+commands need the user to tap a Telegram approval button on their phone.
+Optimise for: fast diagnosis, one approval per fix, no surprises.
+
+**You cannot add a server.** Provisioning a new machine is a human-only
+`sshgate` CLI step (`sshgate pubkey` then `sshgate add`), deliberately kept
+off your tool surface so you can only operate within the servers a human
+has already registered. If the user wants a new server reachable, point
+them at that CLI — never attempt to onboard one yourself.
 
 ## Tool order
 
 1. **`sshgate.list_servers`** first, every session, before touching
    anything. Confirms the alias the user mentioned is actually
    registered and surfaces the host/user so you can speak about it
-   accurately. If the alias is not registered, say so and stop —
-   suggest `/sshgate:add` rather than guessing.
+   accurately. If the alias is not registered, say so and stop — tell the
+   user to provision it with the human-only `sshgate` CLI (`sshgate pubkey`
+   then `sshgate add <alias> <user@host>`) rather than guessing. You have
+   no tool to add it yourself.
 2. **`sshgate.run`** for diagnostics. Reads execute on the remote
    immediately, no approval, no notification. Stream the output back
    and reason from it.
@@ -83,21 +92,24 @@ to confirm.
 
 ## Read-only (Tier-1) servers — writes refused before any tap
 
-A server can be registered **read-only** (`/sshgate:add … --read-only`):
-the gate is installed but no signer pubkey was pushed, so it executes
-reads and denies every write locally. When you send a write to such a
-server, `sshgate.run` / `sshgate.run_batch` **refuse it before
-soliciting any Telegram approval** — no tap is wasted — and return an
-error like:
+A server can be provisioned **read-only** (a human ran
+`sshgate add … --read-only`): the gate is installed but no signer pubkey
+was pushed, so it executes reads and denies every write locally. When you
+send a write to such a server, `sshgate.run` / `sshgate.run_batch`
+**refuse it before soliciting any Telegram approval** — no tap is wasted —
+and return an error like:
 
 ```
 server "prod-db" is registered read-only — writes are denied at the
-gate (no signer pubkey was pushed). Run /sshgate:setup to add a
-Telegram signer, then re-run /sshgate:add prod-db <user@host> to
-upgrade it to signed-write.
+gate (no signer pubkey was pushed).
 ```
 
-Do NOT retry. Surface that upgrade path to the user and stop. Reads on
+Do NOT retry. Surface the correct upgrade path to the user and stop:
+making the server signed-write is a **human-only** action — they run
+`/sshgate:setup` to add a Telegram signer (if they don't have one), then
+`/sshgate:revoke prod-db` (its Telegram approval is kept) and re-provision
+with `sshgate add prod-db <user@host>` (no `--read-only`). You have no tool
+to do this; a smoother in-place upgrade is planned (roadmap #17). Reads on
 the same server still work normally — keep diagnosing with `sshgate.run`.
 
 ## Denial, timeout, and signer-access handling
@@ -136,7 +148,9 @@ memorise the codes, but:
 
 - **exit 77** — missing signature OR the host has no signer pubkey
   (read-only / Tier-1). Check `sshgate.status`; if the signer is not
-  configured, `/sshgate:setup` then re-`/sshgate:add` to upgrade.
+  configured, the user runs `/sshgate:setup`, then revokes and re-provisions
+  the server (`/sshgate:revoke <alias>` + `sshgate add`, no `--read-only`) to
+  upgrade — a human-only step you can't perform.
 - **exit 65** — bad / expired signature: usually clock skew or a stale
   approval. Retry once.
 

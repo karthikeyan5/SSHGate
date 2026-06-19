@@ -4,14 +4,34 @@ The cross-tool source of truth is `AGENTS.md`. Read it now — Codex and any oth
 
 ## SSHGate-specific notes for Claude Code
 
-This is a Claude Code plugin. The tool surface (MCP) is:
+This is a Claude Code plugin. The agent (MCP) tool surface is exactly **five
+tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`:
 
 - `sshgate.run(alias, command)` — run one command on a registered server
 - `sshgate.run_batch(alias, commands[])` — run several commands; writes bulk-approve in one Telegram tap
-- `sshgate.add_server(alias, host, user, port?, read_only?, {bootstrap_key_path | bootstrap_agent})` — register and auto-setup a new server. Exactly one bootstrap method is required: `bootstrap_key_path` (an existing private key, mode 0600) or `bootstrap_agent=true` (ssh-agent via `$SSH_AUTH_SOCK`). `read_only=true` deploys gate without a signer pubkey (Tier-1).
 - `sshgate.list_servers()` — list registered aliases
 - `sshgate.status()` — health of the signer + reachability of each server
 - `sshgate.revoke_server(alias)` — uninstall gate from a server (requires Telegram approval)
+
+**Provisioning is NOT an agent tool.** There is deliberately no `add_server`
+on the MCP surface: a new machine is onboarded by a human at a terminal with
+the `sshgate` CLI (installed to `~/go/bin/sshgate` by `make install-local`),
+never by the agent. Provisioning is the control plane — it defines the trust
+boundary (which machines the agent can reach). Running commands is the data
+plane. Keeping provisioning human-only means the agent can never expand its
+own reach; it only operates within boundaries a human established. The human
+flow is:
+
+1. `sshgate pubkey` — print SSHGate's dedicated public-key line.
+2. Paste that line into the target server's `~/.ssh/authorized_keys` by hand
+   (out-of-band, using existing admin access to the box).
+3. `sshgate add <alias> <user@host>[:port] [--read-only]` — connect with
+   SSHGate's own key, install the gate, and rewrite the pasted plain line into
+   the locked `command="~/.sshgate-gate/gate"` forced-command line. The alias
+   lands in `~/.config/sshgate/servers.json`, the same registry the MCP reads.
+
+If you (the agent) are asked to add a server, do NOT attempt it — tell the
+user to run the `sshgate` CLI steps above; you have no tool for it.
 
 When the user asks to debug, diagnose, or operate a remote server:
 1. Start with `sshgate.list_servers` to confirm the alias is registered.
@@ -24,25 +44,31 @@ See `skills/debugging-remote-servers/SKILL.md` for the full skill.
 
 ## Tiers, read-only servers, and write denials
 
-A server is registered either **read-only (Tier-1)** or **signed-write (Tier-2)**.
+A server is provisioned either **read-only (Tier-1)** or **signed-write (Tier-2)**
+(via `sshgate add` / `sshgate add --read-only`). `gate.pub` present on the
+remote = signed-write; absent = read-only.
 `sshgate.list_servers` does not surface the flag directly; check `sshgate.status`
 and the error messages below.
 
 - **Writes to a read-only server are refused locally, BEFORE any Telegram tap.**
   `sshgate.run`/`sshgate.run_batch` return an error like `server "<alias>" is
   registered read-only — writes are denied at the gate (no signer pubkey was
-  pushed)`. Do NOT retry — the fix is `/sshgate:setup` (add a Telegram signer)
-  then re-run `/sshgate:add <alias> <user@host>` to upgrade it to signed-write.
+  pushed)`. Do NOT retry. To change a server's tier today: a human runs
+  `/sshgate:revoke <alias>` (keeps its Telegram approval) and then re-provisions
+  it with `sshgate add` at the desired tier (run `/sshgate:setup` first if no
+  signer is configured yet). A smoother in-place read-only→write upgrade is
+  planned (roadmap #17); there is no agent tool for any of this.
 - **Gate deny exit codes** come back annotated, not bare:
   - **exit 77** — missing signature OR the host has no signer pubkey
     (read-only / Tier-1). Check `sshgate.status`; if the signer is not
-    configured, run `/sshgate:setup` then re-`/sshgate:add` to upgrade.
+    configured, the user runs `/sshgate:setup` and re-provisions with
+    `sshgate add` (no `--read-only`) — see the tier note above.
   - **exit 65** — bad/expired signature, usually clock skew or a stale
     approval. Retry once.
 
 ## When to escalate to the user
 
-- If `sshgate.add_server` fails the verify step → STOP, ask the user to check the host's `/var/log/auth.log` and the bootstrap SSH credentials.
+- Provisioning is the human-only `sshgate` CLI (see above), not an agent tool — if `sshgate add` fails on the user's side, ask them to check the host's `/var/log/auth.log` and that SSHGate's public-key line was pasted into the target's `~/.ssh/authorized_keys` before they ran `sshgate add`.
 - If a write fails with a **signer-permission** error (`signer socket … is present
   but not accessible (permission denied) — your shell/session is not yet in the
   sshgatesigner group`) → STOP. This is NOT a dead daemon. The user (or the agent

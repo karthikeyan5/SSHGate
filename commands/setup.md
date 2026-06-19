@@ -272,8 +272,8 @@ Claude Code (quit and relaunch) — not just `/reload-plugins` — so the
 
 ### T1.3 — Create the SSHGate SSH key
 
-The SSHGate dedicated SSH key (`sshgate_ed25519`) is what
-`sshgate.add_server` lays into each remote's `authorized_keys` behind
+The SSHGate dedicated SSH key (`sshgate_ed25519`) is what the
+`sshgate add` CLI lays into each remote's `authorized_keys` behind
 the `command="~/.sshgate-gate/gate"` forcing entry. The key never
 leaves the laptop; the public half goes to the remote.
 
@@ -323,9 +323,11 @@ Print verbatim:
 > - Registry: ~/.config/sshgate/servers.json
 > - gate binary: ~/.config/sshgate/bin/sshgate-gate-linux-amd64
 >
-> Add a server (read-only — no signer yet on Tier 1):
+> Add a server (read-only — no signer yet on Tier 1). Provisioning is a
+> human-only CLI step; paste SSHGate's key (`sshgate pubkey`) into the host
+> first, then:
 >
->     /sshgate:add <alias> <user@host> --read-only
+>     sshgate add <alias> <user@host> --read-only
 >
 > Reads will work through the gate; writes will be denied locally with:
 >
@@ -560,7 +562,7 @@ jq -r '.servers | keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || 
 If the list is empty, skip to T2.7 — there's nothing to upgrade.
 
 > ⚠️ **In-place tier-1 → tier-2 upgrade is not yet wired to a command.**
-> Re-running `/sshgate:add <alias> <user@host>` on an already-registered
+> Re-running `sshgate add <alias> <user@host>` on an already-registered
 > alias is currently **rejected** ("alias already registered; use
 > sshgate.revoke_server first") — it does NOT upgrade in place. The deploy
 > routine that pushes gate.pub and clears the read-only flag

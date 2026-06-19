@@ -34,7 +34,9 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 **signer-telegram** (`sshgate-signer-telegram`) — the local approval daemon on your laptop. Runs as a separate Unix user (`sshgatesigner`) so Claude — running as you — cannot read its key file, ptrace its process, or read its Telegram bot token. When a write arrives, signer-telegram DMs you on a dedicated Telegram bot with the command list and Approve/Deny buttons; it signs only after your tap, and only if Telegram's `from.id` matches the allowlisted user.
 
-**MCP server** (`sshgate-mcp`) — the Claude Code plugin half. Exposes `run`, `run_batch`, `add_server`, `list_servers`, `status`, and `revoke_server` as MCP tools. Reads SSH directly; writes go to signer-telegram first for approval, then SSH the signed command across.
+**MCP server** (`sshgate-mcp`) — the Claude Code plugin half. Exposes exactly five MCP tools: `run`, `run_batch`, `list_servers`, `status`, and `revoke_server`. Reads SSH directly; writes go to signer-telegram first for approval, then SSH the signed command across. Provisioning a server is *not* among these tools — see **gate** above and the `sshgate` CLI below; it is deliberately human-only.
+
+**sshgate CLI** (`sshgate`) — the human-only provisioning tool, installed to `~/go/bin/sshgate` by `make install-local`. Onboarding a new server is the control plane (it defines which machines the agent can reach), so it is kept off the agent/MCP surface entirely: the agent can never expand its own reach by adding a machine. `sshgate pubkey` prints SSHGate's dedicated public-key line; you paste it into the target's `~/.ssh/authorized_keys` by hand; `sshgate add <alias> <user@host> [--read-only]` then connects with that key, installs the gate, and rewrites the pasted line into the locked forced-command entry.
 
 ---
 
@@ -43,7 +45,7 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 - Ask Claude to debug a server in plain English. Reads stream back instantly with no approval friction. "What's eating disk on prod-db" becomes one chat turn instead of fifteen.
 - Restart services, install packages, edit configs with one tap on your phone. Your laptop and your phone are the two trust domains; the agent is neither.
 - Bulk-approve a sequence of writes in one tap. Claude queues `apt update && apt install nginx && systemctl enable nginx && systemctl start nginx` as a single approval. Each command is still individually signed for audit; the "bulk" is purely the UI.
-- Register a new server in one slash command: `/sshgate:add prod-db ubuntu@prod-db.example.com`. The plugin auto-installs gate, lays in the restricted `authorized_keys` entry, and verifies end-to-end with a probe.
+- Register a new server with the human-only `sshgate` CLI: `sshgate pubkey` prints the key line to paste into the target's `authorized_keys`, then `sshgate add prod-db ubuntu@prod-db.example.com` installs gate, locks that pasted line down to the restricted `authorized_keys` entry, and verifies end-to-end with a probe. The agent never runs this — provisioning stays in human hands so the agent can only operate within boundaries you set.
 - Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. For a guarantee that holds against a privileged rogue agent, run the signer on a separate machine (the hosted-signer tier). See [docs/decisions/2026-06-18-signer-approval-architecture.md](docs/decisions/2026-06-18-signer-approval-architecture.md).
 
 **Approval architecture (two tiers):** see [docs/decisions/2026-06-18-signer-approval-architecture.md](docs/decisions/2026-06-18-signer-approval-architecture.md).

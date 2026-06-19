@@ -10,7 +10,8 @@ deletes `~/.sshgate-gate/` on the remote, and drops the alias from the
 local registry.
 
 Parse the first positional argument as `alias`. Validate it matches
-`[a-z][a-z0-9-]{0,30}` — same rule as `/sshgate:add`. If empty or
+`[a-z][a-z0-9-]{0,30}` — same `[a-z][a-z0-9-]{0,30}` alias rule used at
+provisioning time. If empty or
 malformed, print:
 
 ```
