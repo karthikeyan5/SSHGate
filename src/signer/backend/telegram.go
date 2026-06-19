@@ -14,6 +14,8 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // TelegramBackend implements Backend over a dedicated Telegram bot DM.
@@ -104,9 +106,9 @@ type TelegramOptions struct {
 	// Logger receives structured-ish event lines. Defaults to a logger
 	// writing to os.Stderr with prefix "signer-bot: ".
 	Logger *log.Logger
-	// RequestTimeout is the per-request wait window. Defaults to 60s
-	// (matches the spec's "Expires in 60s"). Tests inject a short
-	// duration.
+	// RequestTimeout is the per-request wait window — how long we wait
+	// for the human Telegram tap before resolving as timed-out. Defaults
+	// to sigwire.ApprovalWindow. Tests inject a short duration.
 	RequestTimeout time.Duration
 	// PollTimeoutSec is the getUpdates long-poll timeout in seconds.
 	// Defaults to 30. Tests inject 0 so getUpdates returns
@@ -195,7 +197,7 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 	}
 	reqTimeout := opts.RequestTimeout
 	if reqTimeout == 0 {
-		reqTimeout = 60 * time.Second
+		reqTimeout = sigwire.ApprovalWindow
 	}
 	poll := opts.PollTimeoutSec
 	if poll == 0 && opts.PollTimeoutSec == 0 {

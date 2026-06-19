@@ -50,6 +50,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/signer"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 const version = "0.2.0"
@@ -212,7 +213,12 @@ func run(args []string) int {
 		Backend: bk,
 		Audit:   audit,
 	}
-	srv := &signer.Server{Path: cfg.Paths.Socket, Handler: daemon}
+	// HandlerTimeout bounds the WHOLE connection (request read + approval
+	// wait + response write) under serveOne's single absolute deadline.
+	// It is pinned to sigwire.SignerHandlerTimeout, which is defined as
+	// ApprovalWindow + slack, so it can never fall at/below the window and
+	// strand an approved-but-undelivered signature. See sigwire/timeouts.go.
+	srv := &signer.Server{Path: cfg.Paths.Socket, Handler: daemon, HandlerTimeout: sigwire.SignerHandlerTimeout}
 
 	// SIGHUP: log "restart to apply changes" and continue.
 	hupCh := make(chan os.Signal, 1)

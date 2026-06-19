@@ -11,6 +11,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // ErrDenied is returned by Sign when signer replied with
@@ -37,8 +39,10 @@ var ErrSignerPermission = errors.New("sign: signer socket permission denied")
 
 // Client is the signer socket client. SocketPath is the absolute
 // path to the Unix socket; Timeout is the total per-request budget
-// (dial + write + read), and must include signer's approval window
-// (60s default for Telegram in v2).
+// (dial + write + read). It must exceed the signer daemon's handler
+// timeout so the daemon's authoritative verdict wins the race rather
+// than the client abandoning early (which would strand an approved
+// signature). Defaults to sigwire.ClientSignTimeout when zero.
 type Client struct {
 	SocketPath string
 	Timeout    time.Duration
@@ -110,7 +114,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 
 	timeout := c.Timeout
 	if timeout <= 0 {
-		timeout = 75 * time.Second // signer default approval window + slack
+		timeout = sigwire.ClientSignTimeout
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)

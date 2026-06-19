@@ -37,10 +37,14 @@ type Server struct {
 	Path    string
 	Handler RequestHandler
 
-	// HandlerTimeout bounds a single connection's lifetime. Zero means
-	// the default, 30s, which is plenty for the longest expected wait
-	// (Telegram backend default approval window is 60s; we set a higher
-	// per-connection limit in main wire-up).
+	// HandlerTimeout bounds a single connection's lifetime: request read
+	// + approval wait + response write, all under one absolute deadline
+	// (see serveOne). Zero means 30s — fine for the stub/mock backends
+	// and tests, but TOO SHORT for a human-in-the-loop backend. A caller
+	// using one MUST set this larger than the approval window; the cmd
+	// wire-up pins it to sigwire.SignerHandlerTimeout (= ApprovalWindow +
+	// slack). Otherwise the deadline cuts the approval short and the
+	// post-approval response write fails ("approved-undelivered").
 	HandlerTimeout time.Duration
 }
 
