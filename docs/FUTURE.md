@@ -36,6 +36,7 @@ This document is the single source of truth for "what's not in this release and 
 - **Status:** scaffolded in `src/signer-server/` from v1 cascade; full implementation deferred indefinitely.
 - **Estimated scope:** large. HTTP API (POST /v1/sign, GET /v1/poll, GET /v1/audit); Postgres or SQLite state; WebAuthn + TOTP libs; minimal static-HTML + htmx UI; deploy script with VPS setup notes; `HostedServerBackend` implementation in `signer` so the swap is one line.
 - **Trigger condition:** request from a second operator (or Karthi's own use of two signing devices).
+- See the decided two-tier approval architecture: [2026-06-18-signer-approval-architecture.md](decisions/2026-06-18-signer-approval-architecture.md).
 
 ### macOS native install (launchd plist)
 - **Why:** SSHGate's installer is Linux-systemd-only today. macOS operators can run the MCP and signer, but the install script needs launchd plist generation for the signer service.

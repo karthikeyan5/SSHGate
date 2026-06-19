@@ -44,7 +44,9 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 - Restart services, install packages, edit configs with one tap on your phone. Your laptop and your phone are the two trust domains; the agent is neither.
 - Bulk-approve a sequence of writes in one tap. Claude queues `apt update && apt install nginx && systemctl enable nginx && systemctl start nginx` as a single approval. Each command is still individually signed for audit; the "bulk" is purely the UI.
 - Register a new server in one slash command: `/sshgate:add prod-db ubuntu@prod-db.example.com`. The plugin auto-installs gate, lays in the restricted `authorized_keys` entry, and verifies end-to-end with a probe.
-- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them.
+- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. For a guarantee that holds against a privileged rogue agent, run the signer on a separate machine (the hosted-signer tier). See [docs/decisions/2026-06-18-signer-approval-architecture.md](docs/decisions/2026-06-18-signer-approval-architecture.md).
+
+**Approval architecture (two tiers):** see [docs/decisions/2026-06-18-signer-approval-architecture.md](docs/decisions/2026-06-18-signer-approval-architecture.md).
 
 ---
 

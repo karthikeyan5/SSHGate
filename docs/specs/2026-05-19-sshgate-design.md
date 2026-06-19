@@ -3,6 +3,7 @@
 **Date:** 2026-05-19
 **Author:** Ram (Claude) & Karthi
 **Status:** Approved for v1 implementation
+Superseded in part by [2026-06-18-signer-approval-architecture.md](../decisions/2026-06-18-signer-approval-architecture.md) (2026-06-18): the human approval window is now 300s/5 min, and approvals may route through the user's existing c3 (Tier 1) — "no c3 coupling" is no longer a principle.
 **Supersedes:** VelGate Spec v1.0 (2026-03-29) — this document is the Claude Code adaptation; the prior spec was for the larger "Vel" product with a hosted dashboard.
 
 ---
@@ -208,7 +209,7 @@ New Telegram bot. Created via @BotFather. Token lives at `/var/lib/sshgatesigner
 4. signer captures the chat_id and user_id from that interaction, stores them in `/var/lib/sshgatesigner/config/peer.json` (also 0600)
 5. From this point, signer only DMs that chat_id and only accepts callbacks where `from.id == stored user_id`
 
-No groups. No supergroups. No c3 coupling. Just signer talking directly to Karthi via a one-on-one bot DM.
+No groups. No supergroups. No c3 coupling. Just signer talking directly to Karthi via a one-on-one bot DM. (Superseded: the dedicated-bot DM is still the current same-machine implementation, but "no c3 coupling" is no longer a principle — Tier 1 may route via the user's existing c3. See the 2026-06-18 approval-architecture doc.)
 
 **Approval message shape:**
 
@@ -221,7 +222,7 @@ No groups. No supergroups. No c3 coupling. Just signer talking directly to Karth
 3. certbot --nginx -d example.com
 
 Request ID: r_a1b2c3
-Expires in 60s
+Expires in 5m
 
 [✓ Approve all]   [✗ Deny]
 ```
@@ -330,7 +331,7 @@ Claude → MCP.run("prod-db", "systemctl restart nginx")
 MCP   → classify locally → write → build sign request
 MCP   → signer.sock: { kind: sign, request_id: r_xxx, commands: [...] }
 signer → posts Telegram DM to Karthi with approve/deny buttons
-        → starts 60s timeout
+        → starts the 5-minute (300s) approval window
 Karthi → taps [✓ Approve all] on phone
 Telegram → callback to signer-bot: from.id=12345678, data="approve:r_xxx"
 signer → verifies from.id, request_id, not-expired
@@ -367,7 +368,7 @@ One tap covers N commands. Each command is still individually signed (audit trai
 
 If Karthi taps Deny: signer returns `{status: denied}` immediately. MCP returns "denied by operator" to Claude.
 
-If 60s elapses with no callback: signer returns `{status: timeout}`. MCP returns "approval timed out" to Claude. Pending message in Telegram is edited to show "Expired."
+If the 5-minute (300s) approval window elapses with no callback: signer returns `{status: timeout}`. MCP returns "approval timed out" to Claude. Pending message in Telegram is edited to show "Expired."
 
 ---
 

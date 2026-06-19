@@ -109,7 +109,7 @@ resubmitting the same batch is rude and (for the first three) hopeless.
   verbatim; ask why (wrong time, wrong server, command needs a tweak);
   propose an alternative or wait for direction.
 - **Timeout** (`approval timed out`) — the approval window elapsed
-  (signer's default is ~60s). The user was probably away. Tell them and
+  (signer's default is ~5 minutes / 300s). The user was probably away. Tell them and
   offer to re-send when they're ready, but don't auto-resubmit.
 - **Signer permission denied** (`signer socket … is present but not
   accessible (permission denied) — your shell/session is not yet in the

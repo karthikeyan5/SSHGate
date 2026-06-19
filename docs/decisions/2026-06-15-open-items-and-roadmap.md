@@ -1,5 +1,7 @@
 # SSHGate — open items & roadmap (2026-06-15)
 
+> **UPDATE 2026-06-18:** Approval architecture is now DECIDED — a two-tier model; see [2026-06-18-signer-approval-architecture.md](2026-06-18-signer-approval-architecture.md). The c3-vs-dedicated-bot question is RESOLVED. Tier-2 live approval is VERIFIED end-to-end (task #12 done). The next work is the **server-consolidation migration**. (This dated snapshot's commit-count figures below are stale — local main is now ~51 commits ahead, unpushed.)
+
 Canonical "nothing-lost" list captured before a planned compaction. Authored after the
 2026-06-14/15 deep gate review + the 3-model red-team hunt loop. Pairs with the auto-memory
 notes (`sshgate_classifier_arms_race`, `sshgate_v12_resume_state`, `sshgate_v2_hosted_signer`)
@@ -103,7 +105,7 @@ taps approve and the command proceeds. Applies to current mode now + #25 later.
    first-operator bootstrap), the rendered web UI (backend serves JSON only), and a stable HTTPS hostname
    (passkeys are origin-bound). See `sshgate_v2_hosted_signer`.
 4. **Tier-1→Tier-2 upgrade UX (#17)** — design call (how the upgrade is surfaced/wired).
-5. **Live Tier-2 signer demo (#12)** — needs your hardware (logout/login for the sshgatesigner group, relaunch).
+5. ~~**Live Tier-2 signer demo (#12)**~~ — DONE 2026-06-18 (verified end-to-end via @sshgate_example_bot + tg-api.example.com proxy).
 
 ## Deferred / lower priority (mine to do, no decision needed — but noted so nothing is lost)
 - **Deferred refactors:** sign-wire struct consolidation (`signRequest`/`signRequestCmd` duplicated

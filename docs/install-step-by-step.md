@@ -52,8 +52,13 @@ trust you want to delegate.
     signer signs it; gate verifies the signature against
     `gate.pub` on the remote.
 - **Trust model:** the master key is isolated under a dedicated Unix
-  user. Claude (running as you) cannot read it. Every write requires
-  your active tap on Telegram. The bot's `allowed_user_id` pins the
+  user. Claude (running as you) cannot read it. On the same machine this
+  is a safety rail, not a hard wall — an agent that can escalate privileges
+  on the host (e.g. has `sudo`) could read the signing key directly and
+  bypass approval. For a guarantee that holds against a privileged rogue
+  agent, run the signer on a separate machine (the hosted-signer tier).
+  See `decisions/2026-06-18-signer-approval-architecture.md`. Every write
+  requires your active tap on Telegram. The bot's `allowed_user_id` pins the
   channel to your account.
 - **Use when:** you want active human-in-the-loop approvals; you're
   comfortable with a Telegram bot as the second factor.

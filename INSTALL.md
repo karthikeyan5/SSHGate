@@ -43,7 +43,12 @@ state) trigger ONE phone-tap approval via a dedicated Telegram bot before
 they run.
 
 The signing key that authorizes writes is isolated under a separate Unix
-user, so the agent cannot forge approvals even if it tried. The
+user, so the agent cannot forge approvals even if it tried. On the same
+machine this is a safety rail, not a hard wall — an agent that can escalate
+privileges on the host (e.g. has `sudo`) could read the signing key directly
+and bypass approval. For a guarantee that holds against a privileged rogue
+agent, run the signer on a separate machine (the hosted-signer tier). See
+`docs/decisions/2026-06-18-signer-approval-architecture.md`. The
 cryptographic gate is enforced on each remote server independently.
 
 ### What we're about to set up
