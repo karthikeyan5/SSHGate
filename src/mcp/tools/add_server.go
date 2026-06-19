@@ -320,7 +320,7 @@ func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOut
 		// surfacing the bare SSH error.
 		if strings.Contains(err.Error(), "unable to authenticate") {
 			return AddServerOutput{}, fmt.Errorf(
-				"tools: bootstrap SSH auth to %s@%s failed — the key offered is not authorized on the host (wrong default key, or a passphrase-protected key not loaded). Run `ssh-add <the key that reaches %s>`, then re-run /sshgate:add: %w",
+				"tools: bootstrap SSH auth to %s@%s failed — the key offered is not authorized on the host (wrong default key, or a passphrase-protected key not loaded). Run `ssh-add <the key that reaches %s>`, then re-run `sshgate add`: %w",
 				in.User, in.Host, in.Host, err)
 		}
 		return AddServerOutput{}, fmt.Errorf("tools: bootstrap dial: %w", err)

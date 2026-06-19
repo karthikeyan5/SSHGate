@@ -242,7 +242,7 @@ func (r *Runner) classifySignErrReason(err error) string {
 				"signer socket %s is present but not accepting connections — check `systemctl status sshgate-signer-telegram` and `journalctl -u sshgate-signer-telegram -n 50`.",
 				r.SignerSockPath)
 		}
-		return "no signer configured (Tier-1 read-only). Writes need a Telegram signer; run /sshgate:setup, then re-run /sshgate:add to upgrade your servers."
+		return "no signer configured (Tier-1 read-only). Writes need a Telegram signer: a human runs /sshgate:setup, then re-provisions each read-only server via /sshgate:revoke <alias> and `sshgate add <alias> <user@host>`."
 	default:
 		return classifySignErr(err)
 	}

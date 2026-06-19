@@ -263,7 +263,7 @@ func gateDenyNoteFor(r tools.CommandResult) string {
 	}
 	switch r.ExitCode {
 	case 77:
-		return "gate denied (exit 77): no signer pubkey (read-only / Tier-1) or missing signature — run /sshgate:setup then /sshgate:add to upgrade."
+		return "gate denied (exit 77): no signer pubkey (read-only / Tier-1) or missing signature — a human upgrades the tier with /sshgate:setup (if needed) then /sshgate:revoke <alias> and `sshgate add <alias> <user@host>` (without --read-only)."
 	case 65:
 		return "gate rejected the signature (exit 65): expired or invalid — usually clock skew or a stale approval; retry."
 	default:

@@ -56,7 +56,7 @@ Servers
 If the registry is empty, say so plainly:
 
 ```
-No servers registered. Add one with /sshgate:add <alias> <user@host>.
+No servers registered. A human adds one with `sshgate pubkey` (paste the key into the host), then `sshgate add <alias> <user@host>`.
 ```
 
 If the tool itself returns an error (not the same as a server being
