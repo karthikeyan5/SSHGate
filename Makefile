@@ -9,6 +9,7 @@ build: sshgate-signer-server sshgate-gate-linux
 	go build -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
 	go build -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
 	go build -o bin/sshgate-gate             ./src/gate/cmd/sshgate-gate
+	go build -o bin/sshgate                  ./src/cli/cmd/sshgate
 
 # sshgate-signer-server: v2 hosted approval daemon (scaffold). Built into
 # bin/ alongside the v1 binaries so a single `make build` produces
@@ -50,7 +51,8 @@ cross: build darwin
 # and INSTALL.md. It depends on `build`, so ONE `make install-local`
 # produces everything the install needs:
 #   - <clone>/bin/*  (sshgate-mcp, sshgate-signer-telegram, sshgate-gate,
-#                     sshgate-gate-linux-amd64) for scripts/install.sh
+#                     sshgate (human CLI), sshgate-gate-linux-amd64) for
+#                     scripts/install.sh
 #   - $PATH binaries in $(go env GOPATH)/bin via `go install`
 #                     (.mcp.json now references the bare `sshgate-mcp`)
 #   - sshgate-gate-linux-amd64 staged into the STABLE config location the
@@ -60,6 +62,7 @@ cross: build darwin
 install-local: build
 	go install ./src/mcp/cmd/sshgate-mcp
 	go install ./src/signer/cmd/sshgate-signer-telegram
+	go install ./src/cli/cmd/sshgate
 	mkdir -p "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags='-s -w' \
@@ -67,7 +70,7 @@ install-local: build
 		./src/gate/cmd/sshgate-gate
 	@echo "install-local done:"
 	@echo "  <clone>/bin/* (incl. sshgate-gate-linux-amd64) -> for scripts/install.sh"
-	@echo "  sshgate-mcp, sshgate-signer-telegram -> $$(go env GOPATH)/bin (must be on PATH)"
+	@echo "  sshgate-mcp, sshgate-signer-telegram, sshgate -> $$(go env GOPATH)/bin (must be on PATH)"
 	@echo "  sshgate-gate-linux-amd64 -> $${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/"
 
 test:
