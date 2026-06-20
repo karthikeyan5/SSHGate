@@ -46,7 +46,9 @@ These are the highest-priority forward items.
   answer. Allocate a PTY for the remote command, detect a prompt or input stall,
   surface it to the operator (Telegram and/or a web UI), capture the response,
   and write it to the command's stdin. Passwords must be handled securely — never
-  logged or echoed. Reuses the existing approval channel.
+  logged or echoed. Reuses the existing approval channel. A design proposal exists
+  at [docs/proposed/feature1-interactive-prompt-forwarding.md](proposed/feature1-interactive-prompt-forwarding.md)
+  to start from.
 
 - **Read-only SQL via per-service adapters (Feature 2).** Full SQL access over
   SSH is effectively all-or-nothing today. Support **read-only** SQL queries
@@ -56,7 +58,9 @@ These are the highest-priority forward items.
   whitelist **adapter** (a SQL adapter, a shell adapter, …) built one engine at a
   time. This pairs naturally with #22: explicit per-service argv/grammar-based
   adapters can *be* the structural replacement for the single heuristic shell
-  classifier. Design the adapter framework and the argv-exec fix together.
+  classifier. Design the adapter framework and the argv-exec fix together. A design
+  proposal exists at [docs/proposed/feature2-service-adapters-argv-exec.md](proposed/feature2-service-adapters-argv-exec.md)
+  to start from.
 
 ---
 
