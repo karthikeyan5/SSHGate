@@ -41,7 +41,7 @@ func TestSanitiseExplainerErr(t *testing.T) {
 		{"wrapped_canceled", fmt.Errorf("explainer: %w", context.Canceled), "canceled"},
 		// SECURITY: anything carrying a URL or bearer token must collapse
 		// to a generic "upstream error" — never leak endpoints/creds to
-		// Karthi's Telegram DM.
+		// the operator's Telegram DM.
 		{"https_url", errors.New("dial https://api.openai.com/v1/chat failed"), "upstream error"},
 		{"http_url", errors.New("connect http://10.0.0.1:8080 refused"), "upstream error"},
 		{"bearer_token", errors.New("auth failed for Bearer sk-secret-xyz"), "upstream error"},

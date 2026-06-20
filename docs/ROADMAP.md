@@ -86,8 +86,8 @@ These are the highest-priority forward items.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
 
-- **Signed-at-rest redactor (v1.2).** Strengthen the redaction path's signing
-  posture and merge the v1.2 redactor work.
+- **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
+  posture and merge the deferred redactor work.
 
 ---
 
@@ -108,4 +108,9 @@ These are the highest-priority forward items.
 
 - **Sign-wire struct consolidation.** Internal cleanup of the signed-command
   request structures shared between the signer and the MCP, best done alongside
-  the v1.2 envelope work.
+  the signed-at-rest envelope work.
+
+---
+
+Deferred / longer-term directions and the honest limitations of the shipped
+surface: see [FUTURE.md](FUTURE.md).

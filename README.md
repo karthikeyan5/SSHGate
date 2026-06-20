@@ -66,7 +66,7 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 ## Install
 
-SSHGate is a Claude Code plugin. Anthropic-marketplace publication is on the v1.x roadmap; until then, install from a local clone.
+SSHGate is a Claude Code plugin. Anthropic-marketplace publication is on the roadmap; until then, install from a local clone.
 
 > **Launch Claude Code normally with `claude`.** SSHGate does NOT require `--dangerously-load-development-channels`. That flag is for plugins that stream channel notifications INTO Claude's context. SSHGate only uses standard MCP tool calls; its approvals flow OUT to your phone via Telegram, not into the conversation.
 
@@ -88,7 +88,7 @@ You'll be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only). T
 
 Requirements: Go 1.25+; Linux with systemd (Tier 2 only — Tier 1 needs no systemd), sudo (Tier 2 only), a Telegram account (Tier 2 only). Remote servers must be reachable over SSH and run Linux.
 
-macOS: cross-compile only in v1.x; native install path is v1.2. See [the install guide](docs/install-step-by-step.md#macos-users) for status.
+macOS: cross-compile only for now; a native install path is a future release. See [the install guide](docs/install-step-by-step.md#macos-users) for status.
 
 ---
 

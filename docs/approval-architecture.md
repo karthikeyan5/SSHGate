@@ -66,17 +66,15 @@ differs is only the **channel**: the existing-Telegram channel for Tier 1; web U
 + Telegram for Tier 2. This is the same channel-pluggable shape the underlying
 approval transport itself uses.
 
-## What this means for the work in flight
+## Build status
 
 - **Tier 1 build** is small: an existing-Telegram approval channel plus the caveat banner.
 - **Tier 2 build** is the larger, recommended investment: web UI + a Telegram
   channel on the hosted signer + deployment.
-- **The current same-machine signer** (the dedicated `@sshgate_example_bot` + the
-  `tg-api.example.com` proxy stood up on 2026-06-18) is a working same-machine
-  implementation. It is adequate as a *trusted-agent review UX* — good enough to
-  drive the imminent server-consolidation migration, where the human simply taps
-  to approve each batch. The existing-Telegram route is the direction to adopt for Tier 1
-  afterward; it is not a blocker for the migration.
+- **The current same-machine signer** is a working same-machine implementation.
+  It is adequate as a *trusted-agent review UX*, where the human simply taps to
+  approve each batch. The existing-Telegram route is the direction to adopt for
+  Tier 1.
 
 ## Previously considered and rejected (kept brief on purpose)
 

@@ -120,8 +120,9 @@ timestamp and an expiry. The gate:
 - decodes the envelope and re-marshals the payload to obtain the exact bytes that
   were signed,
 - verifies the Ed25519 signature over those bytes against the deployed public
-  key,
-- checks that the payload's command matches the command being run,
+  key, then executes the command carried in the signed payload — integrity comes
+  from the signature over those bytes, not from any comparison against the
+  forwarded `SSH_ORIGINAL_COMMAND`,
 - rejects malformed or non-positive timestamps, and rejects a token whose
   validity window (`exp − ts`) exceeds the maximum allowed lifetime, and
 - rejects an expired token (`now ≥ exp`).
@@ -140,8 +141,8 @@ clock skew or a stale approval, safe to retry once).
 
 ## Read/write classification
 
-The gate, the signer, and the MCP all share one classifier so that all three
-agree on which commands need approval.
+The gate and the MCP share one classifier so that both agree on which commands
+need approval (the signer signs what the MCP hands it; it does not classify).
 
 The classifier is **fail-closed**: anything that is not affirmatively a known
 read command is treated as a write and routed through approval. Pipes,

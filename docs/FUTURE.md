@@ -50,9 +50,9 @@ For the active, sequenced, priority-ordered work, see [`ROADMAP.md`](ROADMAP.md)
 - **Open questions:** key custody — who can decrypt audit logs? Probably only the same Telegram-tap path that authorises the derivation.
 
 ### `redact.list` operator-side UX
-- **Why:** the wire command exists in v1.2 (it's in the 11-subcommand surface), but the operator-side rendering — pagination, filtering by `kind` / `signed` / `session_fp` / `added_at`, a Telegram-rendered list view — is deferred.
-- **Status:** wire command shipped v1.2; UX deferred to v1.2.1+.
-- **Estimated scope:** small. MCP tool `sshgate.list_redact_rules` exists; needs a paginated rendering + a Telegram-side compact view.
+- **Why:** the `redact.list` wire command is part of the deferred rule-management surface (the 11-subcommand set), and the operator-side rendering — pagination, filtering by `kind` / `signed` / `session_fp` / `added_at`, a Telegram-rendered list view — is deferred alongside it.
+- **Status:** deferred (wire command + UX both part of a future release).
+- **Estimated scope:** small. `sshgate.list_redact_rules` is a deferred wire command, not one of the five MCP tools; the operator-side work needs a paginated rendering + a Telegram-side compact view.
 
 ### Telemetry channel for aggregate redaction counts
 - **Why:** to answer the empirical FPR/FNR questions below, SSHGate needs anonymised aggregate stats — count of redactions per mode per host. Never the redacted plaintext.
@@ -121,7 +121,7 @@ v2 vision requires a hosted server; a deployment harness (Docker image + compose
 - Real-world FPR/FNR on command output across `journalctl`, `env`, `docker inspect`, `kubectl describe`. No public benchmark exists for streaming scanners on command output; SSHGate will publish the first.
 - Performance under `thorough` mode with entropy enabled on 10 GB+ `journalctl --no-pager` dumps. May warrant runtime auto-downgrade ("output > 100 MB → drop to standard for this command only"); deferred to avoid v1.2 scope creep.
 - HMAC redaction's effect on agent reasoning quality. Does Claude debug effectively when secrets are HMAC tokens? Only operator usage answers.
-- Whether exposing the redactlist as a Claude tool (`sshgate.list_redact_patterns`) gives a hostile model the rule names it would need to craft evasions. The wire command exists but the MCP-side tool surface for listing is deferred for this reason.
+- Whether exposing the redactlist as a Claude tool (`sshgate.list_redact_patterns`) gives a hostile model the rule names it would need to craft evasions. `sshgate.list_redact_patterns` is a deferred wire command, not one of the five MCP tools; the MCP-side tool surface for listing is deferred for this reason.
 - Whether to expose the redactlist as machine-readable audit output (SARIF, CycloneDX) for enterprise consumers. Deferred until a request appears.
 - Per-chunk wall-clock budget (default 50 ms; configurable) as a ReDoS safety net for pathological regexes that pass auto-validation but degrade on adversarial input. v1.2.1 backlog item.
 

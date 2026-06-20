@@ -76,7 +76,7 @@ const ToolNameRevokeServer = "revoke_server"
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
-// approval-gated writes (Karthi, 2026-06-17).
+// approval-gated writes.
 const serverInstructions = `SSHGate runs commands on registered servers through a security gate.
 
 READ commands run immediately, no approval. WRITE commands require a human Telegram approval tap.

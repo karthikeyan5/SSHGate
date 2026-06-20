@@ -5,7 +5,7 @@
 // The Backend interface is the v1→v2 swap point: v1 ships StubBackend
 // (always denies, used by the phase-1 end-to-end test that proves the
 // signing loop without a human in the loop) and — landing in task 2.1 —
-// TelegramBackend, which posts the request to Karthi's DM and waits for
+// TelegramBackend, which posts the request to the operator's Telegram DM and waits for
 // an inline-keyboard tap. v2's HostedServerBackend implements the same
 // interface against a remote HTTPS approval service.
 //

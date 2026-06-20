@@ -626,7 +626,7 @@ func outcomeMark(s ResultStatus) string {
 // Returning a non-nil error tells the caller to fall back to the
 // "commands only + footer" rendering. The error string is fed through
 // sanitiseExplainerErr before rendering so we never leak credentials,
-// upstream URLs, or stack-y wrappers to Karthi's Telegram DM.
+// upstream URLs, or stack-y wrappers to the operator's Telegram DM.
 func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []CommandReq) (lines []string, err error) {
 	if t.Explainer == nil || len(cmds) == 0 {
 		return nil, nil
@@ -657,7 +657,7 @@ func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []CommandReq) (
 // sanitiseExplainerErr renders a short, credential-free reason string
 // for the "no explanations" footer. We intentionally lose detail — the
 // daemon log carries the full err for diagnostics; the Telegram DM
-// only needs enough for Karthi to know whether to bother retrying.
+// only needs enough for the operator to know whether to bother retrying.
 func sanitiseExplainerErr(err error) string {
 	if err == nil {
 		return "unknown"
@@ -733,7 +733,7 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 }
 
 // maskUserID renders an id like "1234567" as "12***67". The point is
-// to make the bot's refusal message unambiguous to Karthi (who knows
+// to make the bot's refusal message unambiguous to the operator (who knows
 // his own user_id and recognises the partial) without leaking the
 // full value to a curious third party who DMs the bot.
 func maskUserID(id int64) string {

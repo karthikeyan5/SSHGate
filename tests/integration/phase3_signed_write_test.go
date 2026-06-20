@@ -5,7 +5,7 @@
 // The other Phase-3 tests deliberately stub the signer (noopSign) and so
 // only prove the gate's write-DENIAL path over real SSH. Phase-4 proves
 // the full signer -> sign -> gate-verify -> execute pipeline, but via the
-// SSHGATE_REVOKE *admin verb*. This test closes the remaining gap Karthi
+// SSHGATE_REVOKE *admin verb*. This test closes the remaining gap the operator
 // flagged for the server-migration dress rehearsal: a *regular signed
 // write* (a redirect run under /bin/sh -c — the shape of useradd /
 // systemctl / file-edit migration steps) actually EXECUTING over real SSH

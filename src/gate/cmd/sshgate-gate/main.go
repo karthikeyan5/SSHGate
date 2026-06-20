@@ -144,8 +144,8 @@ func run() int {
 			return doRevoke()
 		}
 		if strings.HasPrefix(innerCmd, "SSHGATE_UPDATE ") {
-			// TODO(v1.1): fetch + verify + replace the gate binary.
-			logf("SSHGATE_UPDATE not yet implemented (v1.1)")
+			// Future: self-update path (fetch + verify + replace the gate binary).
+			logf("SSHGATE_UPDATE not yet implemented")
 			return exitGeneric
 		}
 	}

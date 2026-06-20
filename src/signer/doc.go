@@ -1,5 +1,5 @@
 // Package signer implements the local approval daemon that owns the
-// master Ed25519 signing key on Karthi's laptop. It runs as a dedicated
+// master Ed25519 signing key on the operator's machine. It runs as a dedicated
 // OS user so that Claude Code (running as karthi) cannot read the key
 // or attach to the daemon's process memory.
 //
