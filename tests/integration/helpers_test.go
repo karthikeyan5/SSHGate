@@ -388,6 +388,38 @@ chmod 600 %s
 	}
 }
 
+// pasteSSHGatePlainLine appends the SSHGate dedicated key's PLAIN
+// authorized_keys line to the container's ~/.ssh/authorized_keys,
+// mirroring the out-of-band step a human performs before running
+// `sshgate add` (paste `sshgate pubkey`'s output into the target's
+// authorized_keys). Provision then dials with the dedicated key itself
+// and rewrites this plain line into the restricted forced-command line.
+//
+// pubKeyPath is the dedicated key's .pub file (a single
+// "ssh-ed25519 AAAA... comment" line). We strip the trailing newline and
+// single-quote the line for the remote shell (OpenSSH pubkey lines never
+// contain single quotes, so single-quote wrapping is safe), then chown +
+// chmod 600 so sshd accepts the file (matches deployGateBinary's perms).
+func pasteSSHGatePlainLine(t *testing.T, pubKeyPath string) {
+	t.Helper()
+	body, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		t.Fatalf("read dedicated pubkey %s: %v", pubKeyPath, err)
+	}
+	line := strings.TrimRight(string(body), "\r\n")
+	if strings.ContainsAny(line, "\n'") {
+		t.Fatalf("dedicated pubkey line %q is not a single quote-safe line", line)
+	}
+	authPath := containerHome + "/.ssh/authorized_keys"
+	shCmd := fmt.Sprintf(
+		"set -e; mkdir -p %[1]s/.ssh && touch %[2]s && printf '%%s\\n' '%[3]s' >> %[2]s && "+
+			"chown %[4]s:%[4]s %[2]s && chmod 600 %[2]s",
+		containerHome, authPath, line, remoteUser)
+	if out, err := dockerExec(t, nil, shCmd); err != nil {
+		t.Fatalf("paste dedicated plain line into authorized_keys: %v\n%s", err, out)
+	}
+}
+
 // startSigner spins up a real signer.Server in a goroutine,
 // bound to a socket under t.TempDir() and backed by StubBackend
 // (which denies every request). Returns the socket path and a

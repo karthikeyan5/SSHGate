@@ -41,12 +41,16 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
+// TestExec exercises the raw executor via ExecWithRedaction with an empty
+// ExecOpts (the no-redaction pass-through path). It covers the core
+// process-control surface: exit-code propagation, context cancellation,
+// large-output streaming, and empty-command rejection.
 func TestExec(t *testing.T) {
 	t.Run("echo returns 0 and writes to stdout", func(t *testing.T) {
 		var exit int
 		var err error
 		out := captureStdout(t, func() {
-			exit, err = gate.Exec(context.Background(), "echo hello")
+			exit, err = gate.ExecWithRedaction(context.Background(), "echo hello", gate.ExecOpts{})
 		})
 		if err != nil {
 			t.Fatalf("err = %v, want nil", err)
@@ -60,7 +64,7 @@ func TestExec(t *testing.T) {
 	})
 
 	t.Run("false returns exit 1", func(t *testing.T) {
-		exit, err := gate.Exec(context.Background(), "false")
+		exit, err := gate.ExecWithRedaction(context.Background(), "false", gate.ExecOpts{})
 		if err != nil {
 			t.Fatalf("err = %v, want nil (false's nonzero exit is not a start error)", err)
 		}
@@ -70,7 +74,7 @@ func TestExec(t *testing.T) {
 	})
 
 	t.Run("explicit exit code passes through", func(t *testing.T) {
-		exit, err := gate.Exec(context.Background(), "sh -c 'exit 42'")
+		exit, err := gate.ExecWithRedaction(context.Background(), "sh -c 'exit 42'", gate.ExecOpts{})
 		if err != nil {
 			t.Fatalf("err = %v, want nil", err)
 		}
@@ -80,7 +84,7 @@ func TestExec(t *testing.T) {
 	})
 
 	t.Run("nonexistent command exits nonzero", func(t *testing.T) {
-		exit, err := gate.Exec(context.Background(), "/nonexistent/path/binary")
+		exit, err := gate.ExecWithRedaction(context.Background(), "/nonexistent/path/binary", gate.ExecOpts{})
 		if err != nil {
 			t.Fatalf("err = %v, want nil (nonzero exit is not a start error)", err)
 		}
@@ -93,7 +97,7 @@ func TestExec(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		start := time.Now()
-		exit, err := gate.Exec(ctx, "sleep 10")
+		exit, err := gate.ExecWithRedaction(ctx, "sleep 10", gate.ExecOpts{})
 		dur := time.Since(start)
 		if dur > 5*time.Second {
 			t.Fatalf("exec ran %v, expected to be killed promptly", dur)
@@ -110,7 +114,7 @@ func TestExec(t *testing.T) {
 		// child shouldn't block.
 		out := captureStdout(t, func() {
 			// 64 KB of "x" via printf — portable across sh/bash.
-			_, err := gate.Exec(context.Background(), "yes x | head -c 65536")
+			_, err := gate.ExecWithRedaction(context.Background(), "yes x | head -c 65536", gate.ExecOpts{})
 			if err != nil {
 				t.Errorf("err = %v", err)
 			}
@@ -125,7 +129,7 @@ func TestExec(t *testing.T) {
 	})
 
 	t.Run("empty cmd is rejected", func(t *testing.T) {
-		exit, err := gate.Exec(context.Background(), "")
+		exit, err := gate.ExecWithRedaction(context.Background(), "", gate.ExecOpts{})
 		if err == nil {
 			t.Errorf("err = nil, want error for empty cmd; exit=%d", exit)
 		}
@@ -172,7 +176,7 @@ func TestExecWithRedaction(t *testing.T) {
 		}
 	})
 
-	t.Run("empty ruleset is equivalent to plain Exec", func(t *testing.T) {
+	t.Run("empty ruleset is a pass-through", func(t *testing.T) {
 		out := captureStdout(t, func() {
 			_, err := gate.ExecWithRedaction(context.Background(), "echo AKIA1234567890ABCDEF", gate.ExecOpts{
 				SessionSalt: salt,

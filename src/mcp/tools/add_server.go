@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,15 +17,17 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
-	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 )
 
-// AddServerInput is the JSON input to sshgate.add_server.
+// AddServerInput carries the bootstrap-credential fields the shared
+// provisioning machinery consumes. The human-only CLI add (Provision)
+// builds one with just BootstrapKeyPath set to the SSHGate dedicated key;
+// bootstrapAuthMethod resolves it into an ssh.AuthMethod.
 //
 // Exactly one of BootstrapKeyPath / BootstrapAgent must be set. The
-// bootstrap leg uses the operator's existing SSH access to lay down
-// gate; subsequent connections use the SSHGate dedicated key (with
+// bootstrap leg uses an existing SSH credential to lay down gate;
+// subsequent connections use the SSHGate dedicated key (with
 // command="..." forcing).
 type AddServerInput struct {
 	Alias string `json:"alias" jsonschema:"new alias to register; [a-z][a-z0-9-]{0,30}"`
@@ -43,9 +44,9 @@ type AddServerInput struct {
 	// remote runs in read-only mode (reads exec, writes deny locally
 	// at the gate). This is the tier-1 install path: no signer, no
 	// Telegram, no master key — useful when the operator wants to try
-	// the gate before committing to a signer setup. Run
-	// /sshgate:setup later to add a signer + push gate.pub via
-	// UpgradeServerToSigning.
+	// the gate before committing to a signer setup. To move to
+	// signed-write, revoke and re-provision with `sshgate add` (no
+	// --read-only) after running /sshgate:setup.
 	ReadOnly bool `json:"read_only,omitempty" jsonschema:"deploy gate WITHOUT uploading gate.pub; remote runs in read-only mode (writes denied at the gate). Tier-1 install path"`
 }
 
@@ -64,36 +65,33 @@ type AddServerOutput struct {
 	// Idempotent is true when a pre-existing restricted entry was
 	// detected and the rewrite was skipped (we only verified + registered).
 	Idempotent bool `json:"idempotent,omitempty"`
-	// ReadOnlyMode echoes AddServerInput.ReadOnly. When true, the
-	// remote has gate deployed but NO gate.pub — writes will be
-	// denied at the gate until UpgradeServerToSigning is run.
+	// ReadOnlyMode echoes the tier-1 read-only request. When true, the
+	// remote has gate deployed but NO gate.pub — writes are denied at
+	// the gate until the server is re-provisioned at tier-2.
 	ReadOnlyMode bool `json:"read_only_mode,omitempty"`
 }
 
-// addServerCfg gathers the host-side paths/env knobs that the runner
-// consults when running AddServer. Defaults are populated when fields
-// are zero; tests inject overrides directly.
+// addServerCfg gathers the host-side local paths the shared provisioning
+// machinery consults. The CLI add (Provision) carries the equivalent paths in
+// its own provisionCfg; this struct survives as the override knob wired
+// through Runner.AddServerCfg (intended for tests).
 type addServerCfg struct {
 	// GateBinaryPath is the local path to the cross-compiled gate
-	// binary (sshgate-gate-linux-amd64). Default: resolved by
-	// defaultGateBinaryPath — $SSHGATE_GATE_BIN, then
-	// <configRoot>/bin/, then os.Executable-relative, then
-	// $CLAUDE_PLUGIN_ROOT/bin/.
+	// binary (sshgate-gate-linux-amd64).
 	GateBinaryPath string
-	// GatePubPath is the local path to the gate signing pubkey.
-	// Default: <configRoot>/pubkey-distrib/gate.pub.
+	// GatePubPath is the local path to the gate signing pubkey
+	// (pubkey-distrib/gate.pub).
 	GatePubPath string
 	// SSHGatePubPath is the local path to the SSHGate dedicated SSH
-	// pubkey. Default: <configRoot>/ssh/sshgate_ed25519.pub.
+	// pubkey (ssh/sshgate_ed25519.pub).
 	SSHGatePubPath string
 	// RemoteHome is the directory on the remote where ~/.sshgate-gate/ lives.
 	// Default: "~" (left as a shell tilde — the remote shell expands it).
 	RemoteHome string
 }
 
-// AddServerConfig overrides AddServer's defaults. Set fields are used
-// verbatim; zero fields fall back to the documented defaults. Wired
-// through Runner.AddServerCfg (intended for tests).
+// AddServerConfig is the exported alias wired through Runner.AddServerCfg
+// (intended for tests). Set fields are used verbatim.
 type AddServerConfig = addServerCfg
 
 // remoteGateDir is the canonical install location on the remote.
@@ -184,11 +182,9 @@ type bootstrapSession interface {
 }
 
 // sshBootstrapSession is the production bootstrapSession: a thin wrapper
-// over a connected *ssh.Client. Run/Upload forward UNCHANGED to the
-// package functions runSSH / uploadFile (the same code paths AddServer
-// used before the seam was introduced); Close forwards to the client.
-// The only difference from the pre-seam code is the indirection — the
-// real ssh session construction in runSSH/uploadFile is identical.
+// over a connected *ssh.Client. Run/Upload forward to the package functions
+// runSSH / uploadFile; Close forwards to the client. The indirection exists
+// solely so tests can swap in an in-memory fake.
 type sshBootstrapSession struct {
 	client *ssh.Client
 }
@@ -220,174 +216,6 @@ var newBootstrapSession = func(ctx context.Context, host string, port int, cfg *
 		return nil, "", err
 	}
 	return &sshBootstrapSession{client: client}, fingerprint, nil
-}
-
-// AddServer registers a new server alias and installs gate on it
-// using the bootstrap credentials supplied in in. The flow is:
-//
-//  1. Validate inputs (alias regex, exactly one bootstrap method,
-//     not-already-registered).
-//  2. Dial the remote with the bootstrap credentials (using the
-//     SAME TOFU known_hosts as r.SSH so the host key pins on first
-//     contact).
-//  3. Upload gate + gate.pub under ~/.sshgate-gate/.
-//  4. Back up authorized_keys and rewrite it to gate the SSHGate
-//     dedicated key behind a command= forcing.
-//  5. Verify by reconnecting via r.SSH (empty SSH_ORIGINAL_COMMAND
-//     → "SSHGATE_OK").
-//  6. Register the alias in the registry.
-//
-// Steps 3-5 are wrapped in a rollback: any failure restores
-// authorized_keys from the backup and removes ~/.sshgate-gate/. The
-// registry is never touched on failure.
-//
-// Idempotent: if the alias is new but authorized_keys already has the
-// canonical restricted entry for our pubkey, steps 3-5 reduce to
-// "verify + register" (Output.Idempotent=true).
-func (r *Runner) AddServer(ctx context.Context, in AddServerInput) (AddServerOutput, error) {
-	if r.Servers == nil {
-		return AddServerOutput{}, errors.New("tools: Servers is nil")
-	}
-	if r.SSH == nil {
-		return AddServerOutput{}, errors.New("tools: SSH is nil")
-	}
-	if !aliasPattern.MatchString(in.Alias) {
-		return AddServerOutput{}, fmt.Errorf("tools: invalid alias %q (must match %s)", in.Alias, aliasPattern)
-	}
-	if err := validateHost(in.Host); err != nil {
-		return AddServerOutput{}, fmt.Errorf("tools: %w", err)
-	}
-	if err := validateUser(in.User); err != nil {
-		return AddServerOutput{}, fmt.Errorf("tools: %w", err)
-	}
-	port := in.Port
-	if port == 0 {
-		port = 22
-	}
-	if _, exists := r.Servers.Get(in.Alias); exists {
-		return AddServerOutput{}, fmt.Errorf("tools: alias %q already registered; use sshgate.revoke_server first", in.Alias)
-	}
-	if in.BootstrapAgent == (in.BootstrapKeyPath != "") {
-		return AddServerOutput{}, errors.New("tools: must specify exactly one of bootstrap_key_path or bootstrap_agent=true")
-	}
-
-	cfg, err := r.resolveAddServerCfg()
-	if err != nil {
-		return AddServerOutput{}, err
-	}
-
-	// Read local materials first so we fail fast before touching the
-	// remote.
-	gateBin, err := readLocalFile(cfg.GateBinaryPath, "gate binary",
-		"run /sshgate:setup (or `make install-local`) to build sshgate-gate-linux-amd64 into ~/.config/sshgate/bin/")
-	if err != nil {
-		return AddServerOutput{}, err
-	}
-	// Tier-1 (read-only) skips the signing pubkey entirely — the
-	// operator hasn't set up signer yet, so the file may not even
-	// exist on disk. Tier-2 reads it and pushes it to the remote.
-	var gatePubBytes []byte
-	if !in.ReadOnly {
-		gatePubBytes, err = readLocalFile(cfg.GatePubPath, "gate signing public key",
-			"ensure /sshgate:setup tier-2 has been run (or pass read_only=true for tier-1)")
-		if err != nil {
-			return AddServerOutput{}, err
-		}
-	}
-	sshgatePubBytes, err := readLocalFile(cfg.SSHGatePubPath, "SSHGate dedicated SSH public key",
-		"ensure /sshgate:setup has been run")
-	if err != nil {
-		return AddServerOutput{}, err
-	}
-	sshgatePub, _, _, _, err := ssh.ParseAuthorizedKey(sshgatePubBytes)
-	if err != nil {
-		return AddServerOutput{}, fmt.Errorf("tools: parse %s: %w", cfg.SSHGatePubPath, err)
-	}
-
-	// Dial the bootstrap leg.
-	bootCfg, err := r.buildBootstrapClientConfig(in)
-	if err != nil {
-		return AddServerOutput{}, err
-	}
-	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
-	defer cancel()
-	bootSess, hostFingerprint, err := newBootstrapSession(dialCtx, in.Host, port, bootCfg)
-	if err != nil {
-		// An "unable to authenticate" handshake failure means the
-		// offered bootstrap key is not authorized on the host (wrong
-		// default key, or a passphrase-protected key not loaded into
-		// the agent). Point the operator at the fix rather than
-		// surfacing the bare SSH error.
-		if strings.Contains(err.Error(), "unable to authenticate") {
-			return AddServerOutput{}, fmt.Errorf(
-				"tools: bootstrap SSH auth to %s@%s failed — the key offered is not authorized on the host (wrong default key, or a passphrase-protected key not loaded). Run `ssh-add <the key that reaches %s>`, then re-run `sshgate add`: %w",
-				in.User, in.Host, in.Host, err)
-		}
-		return AddServerOutput{}, fmt.Errorf("tools: bootstrap dial: %w", err)
-	}
-	defer bootSess.Close()
-
-	// Check whether authorized_keys already has the canonical
-	// restricted entry for our pubkey. If so, skip the rewrite.
-	existing, _, err := bootSess.Run(ctx, "cat "+remoteAuthKeys+" 2>/dev/null || true")
-	if err != nil {
-		return AddServerOutput{}, fmt.Errorf("tools: read authorized_keys: %w", err)
-	}
-	idempotent := hasRestrictedEntryForKey(existing, sshgatePub, remoteGateBin)
-
-	if !idempotent {
-		// Run the full auto-setup, with rollback on any failure.
-		if err := r.runAutoSetup(ctx, bootSess, gateBin, gatePubBytes,
-			sshgatePub, existing); err != nil {
-			return AddServerOutput{}, err
-		}
-	}
-
-	// Step 7 — verify via r.SSH (sshgate dedicated key). Empty cmd
-	// triggers the SSHGATE_OK probe path in gate's main.
-	probe, _, _, err := r.SSH.Run(ctx, in.Host, in.User, port, "")
-	if err != nil || !strings.Contains(string(probe), "SSHGATE_OK") {
-		// Roll back if we just made changes; idempotent re-use never
-		// modified anything, so skip rollback in that case. AddServer's
-		// backup is the operator's PRE-EXISTING authorized_keys (the
-		// SSHGate key was only ever appended, never made the sole shell
-		// credential), so a restore failure is not a full-shell exposure
-		// the way it is for the CLI Provision path — we ignore it here.
-		if !idempotent {
-			_ = r.rollback(ctx, bootSess, existing != nil)
-		}
-		if err != nil {
-			return AddServerOutput{}, fmt.Errorf("tools: verify probe: %w (stdout=%q)", err, string(probe))
-		}
-		return AddServerOutput{}, fmt.Errorf("tools: verify probe did not return SSHGATE_OK (got %q)", string(probe))
-	}
-
-	// Step 9 — register.
-	if err := r.Servers.Add(in.Alias, registry.Entry{
-		Host:     in.Host,
-		Port:     port,
-		User:     in.User,
-		AddedAt:  time.Now().UTC(),
-		ReadOnly: in.ReadOnly,
-	}); err != nil {
-		// Roll back the remote — registry was the last step.
-		if !idempotent {
-			_ = r.rollback(ctx, bootSess, existing != nil)
-		}
-		return AddServerOutput{}, fmt.Errorf("tools: registry add: %w", err)
-	}
-
-	return AddServerOutput{
-		Alias:        in.Alias,
-		Host:         in.Host,
-		Port:         port,
-		User:         in.User,
-		Fingerprint:  hostFingerprint,
-		BinaryPath:   remoteGateBin,
-		VerifiedOK:   true,
-		Idempotent:   idempotent,
-		ReadOnlyMode: in.ReadOnly,
-	}, nil
 }
 
 // runAutoSetup executes steps 1–5 of the auto-setup flow (mkdir,
@@ -467,98 +295,6 @@ func (r *Runner) rollbackPartial(ctx context.Context, c bootstrapSession, origin
 	_, _, _ = c.Run(ctx, "rm -rf "+remoteGateDir)
 }
 
-// UpgradeServerToSigning pushes gate.pub to an already-registered
-// alias so the remote can verify signed write commands. Used in the
-// tier-1 → tier-2 transition: after the operator runs /sshgate:setup
-// to generate a signer, the slash command iterates registered servers
-// and calls this method to switch each one from "read-only" to
-// "signed-write" mode.
-//
-// The upload reuses the same bootstrap-leg credentials that AddServer
-// used originally (BootstrapKeyPath / BootstrapAgent). We do not
-// route the push through the SSHGate dedicated key because that key
-// is locked to `command="~/.sshgate-gate/gate"` — it cannot place a
-// file. Re-supplying bootstrap creds is the simplest correct design
-// for v1.x; revisit when v2.x ships the hosted signer.
-//
-// Idempotent: calling on a server that already has gate.pub
-// overwrites it. The probe at the end is the same SSHGATE_OK
-// post-install check AddServer uses.
-func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, bootstrap AddServerInput) error {
-	if r.Servers == nil {
-		return errors.New("tools: Servers is nil")
-	}
-	if r.SSH == nil {
-		return errors.New("tools: SSH is nil")
-	}
-	entry, ok := r.Servers.Get(alias)
-	if !ok {
-		return fmt.Errorf("tools: unknown server alias %q (check sshgate.list_servers)", alias)
-	}
-	if bootstrap.BootstrapAgent == (bootstrap.BootstrapKeyPath != "") {
-		return errors.New("tools: must specify exactly one of bootstrap_key_path or bootstrap_agent=true")
-	}
-	// Fill the bootstrap host/user/port from the registry so callers
-	// only have to supply the credentials.
-	bootstrap.Alias = alias
-	bootstrap.Host = entry.Host
-	bootstrap.User = entry.User
-	bootstrap.Port = entry.Port
-
-	cfg, err := r.resolveAddServerCfg()
-	if err != nil {
-		return err
-	}
-	gatePubBytes, err := readLocalFile(cfg.GatePubPath, "gate signing public key",
-		"run /sshgate:setup tier-2 to generate it")
-	if err != nil {
-		return err
-	}
-
-	bootCfg, err := r.buildBootstrapClientConfig(bootstrap)
-	if err != nil {
-		return err
-	}
-	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
-	defer cancel()
-	bootSess, _, err := newBootstrapSession(dialCtx, entry.Host, entry.Port, bootCfg)
-	if err != nil {
-		return fmt.Errorf("tools: bootstrap dial: %w", err)
-	}
-	defer bootSess.Close()
-
-	// Push gate.pub. The remote directory already exists (gate
-	// itself is in there), so we skip the mkdir; uploadFile sets the
-	// final mode deterministically.
-	if err := bootSess.Upload(ctx, gatePubBytes, remoteGatePub, "644"); err != nil {
-		return fmt.Errorf("tools: upload gate.pub: %w", err)
-	}
-
-	// Verify via r.SSH (sshgate dedicated key) — empty cmd triggers
-	// the SSHGATE_OK probe regardless of pubkey state, so this only
-	// confirms the gate still answers, not that signed writes work.
-	// The actual signed-write path is exercised the first time the
-	// operator runs a write command through sshgate.run.
-	probe, _, _, err := r.SSH.Run(ctx, entry.Host, entry.User, entry.Port, "")
-	if err != nil || !strings.Contains(string(probe), "SSHGATE_OK") {
-		if err != nil {
-			return fmt.Errorf("tools: verify probe: %w (stdout=%q)", err, string(probe))
-		}
-		return fmt.Errorf("tools: verify probe did not return SSHGATE_OK (got %q)", string(probe))
-	}
-
-	// gate.pub is now on the host, so writes are signed-and-verified. Clear
-	// the registry's read-only flag by re-adding the entry with
-	// ReadOnly=false (preserving Host/Port/User/AddedAt) — Servers.Add
-	// overwrites in place. Without this, the run/run_batch read-only
-	// short-circuit would keep refusing writes after a successful upgrade.
-	entry.ReadOnly = false
-	if err := r.Servers.Add(alias, entry); err != nil {
-		return fmt.Errorf("tools: clear read-only flag for %q after upgrade: %w", alias, err)
-	}
-	return nil
-}
-
 // rollback is the post-verify rollback path: the auto-setup completed
 // but the verification probe failed. We restore authorized_keys from
 // the backup and remove ~/.sshgate-gate/. The hadOriginal flag is reserved
@@ -566,13 +302,12 @@ func (r *Runner) UpgradeServerToSigning(ctx context.Context, alias string, boots
 // "original was empty") — today both cases collapse to restore-or-noop.
 //
 // It returns the error (if any) from the authorized_keys RESTORE step.
-// AddServer logs/ignores it (it already has a primary error and an
-// operator-facing fix path), but Provision uses it to decide whether to
-// escalate its remediation message: for the CLI path the "backup" is the
-// human's PLAIN pasted line, so a restore failure can leave an
-// un-restricted SSHGate key on the host and the human must be told. The
-// gate-dir removal error is intentionally not surfaced — a leftover
-// ~/.sshgate-gate/ is harmless next to a correctly-restricted key.
+// Provision uses it to decide whether to escalate its remediation message:
+// for the CLI path the "backup" is the human's PLAIN pasted line, so a
+// restore failure can leave an un-restricted SSHGate key on the host and the
+// human must be told. The gate-dir removal error is intentionally not
+// surfaced — a leftover ~/.sshgate-gate/ is harmless next to a
+// correctly-restricted key.
 func (r *Runner) rollback(ctx context.Context, c bootstrapSession, hadOriginal bool) error {
 	_ = hadOriginal
 	_, _, restoreErr := c.Run(ctx,
@@ -580,112 +315,6 @@ func (r *Runner) rollback(ctx context.Context, c bootstrapSession, hadOriginal b
 			" && chmod 600 "+remoteAuthKeys+"; fi")
 	_, _, _ = c.Run(ctx, "rm -rf "+remoteGateDir)
 	return restoreErr
-}
-
-// resolveAddServerCfg fills in the default paths for the runner. Tests
-// inject overrides via Runner.AddServerCfg.
-func (r *Runner) resolveAddServerCfg() (addServerCfg, error) {
-	cfg := r.AddServerCfg
-	if cfg.GateBinaryPath == "" {
-		p, err := defaultGateBinaryPath()
-		if err != nil {
-			return cfg, err
-		}
-		cfg.GateBinaryPath = p
-	}
-	if cfg.GatePubPath == "" {
-		// NOTE: this env was previously the doubled-prefix typo
-		// SSHGATE_SSHGATE_PUB_PATH, so the override silently never fired.
-		// Corrected to mirror its sibling SSHGATE_SSH_PUBKEY_PATH below.
-		if env := os.Getenv("SSHGATE_GATE_PUB_PATH"); env != "" {
-			cfg.GatePubPath = env
-		} else {
-			root, err := configRoot()
-			if err != nil {
-				return cfg, err
-			}
-			cfg.GatePubPath = filepath.Join(root, "pubkey-distrib", "gate.pub")
-		}
-	}
-	if cfg.SSHGatePubPath == "" {
-		if env := os.Getenv("SSHGATE_SSH_PUBKEY_PATH"); env != "" {
-			cfg.SSHGatePubPath = env
-		} else {
-			root, err := configRoot()
-			if err != nil {
-				return cfg, err
-			}
-			cfg.SSHGatePubPath = filepath.Join(root, "ssh", "sshgate_ed25519.pub")
-		}
-	}
-	return cfg, nil
-}
-
-// gateBinaryName is the canonical basename of the cross-compiled
-// remote gate binary (linux/amd64). It is the PREFIXED name produced
-// by `make sshgate-gate-linux` and `make install-local`. The old
-// unprefixed `gate-linux-amd64` is gone (audit B3).
-const gateBinaryName = "sshgate-gate-linux-amd64"
-
-// defaultGateBinaryPath resolves the cross-compiled gate binary. The
-// /plugin install cache strips src/ and bin/, so we cannot rely on a
-// path under the plugin cache. Resolution order (audit B3/M1/m1):
-//
-//  1. $SSHGATE_GATE_BIN — explicit operator override (absolute path).
-//  2. <configRoot>/bin/sshgate-gate-linux-amd64 — the STABLE location
-//     `make install-local` writes to (~/.config/sshgate/bin/).
-//  3. <dir(os.Executable())>/sshgate-gate-linux-amd64 — covers the
-//     `go install` layout where the gate sits beside sshgate-mcp in
-//     $GOPATH/bin (dev / belt-and-braces).
-//  4. $CLAUDE_PLUGIN_ROOT/bin/sshgate-gate-linux-amd64 — last-resort
-//     legacy path for a clone-as-plugin-root install that still ships
-//     a built bin/. (Note: this is CLAUDE_PLUGIN_ROOT, not the dead
-//     SSHGATE_PLUGIN_ROOT that was never set — audit m1.)
-//
-// Each candidate is stat-checked; the first that exists wins. If none
-// exists we return candidate (2) so readLocalFile surfaces a clean
-// error naming the stable location and the build command.
-func defaultGateBinaryPath() (string, error) {
-	if env := os.Getenv("SSHGATE_GATE_BIN"); env != "" {
-		return env, nil
-	}
-
-	root, err := configRoot()
-	if err != nil {
-		return "", err
-	}
-	configCandidate := filepath.Join(root, "bin", gateBinaryName)
-
-	candidates := []string{configCandidate}
-
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), gateBinaryName))
-	}
-	if pluginRoot := os.Getenv("CLAUDE_PLUGIN_ROOT"); pluginRoot != "" {
-		candidates = append(candidates, filepath.Join(pluginRoot, "bin", gateBinaryName))
-	}
-
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c, nil
-		}
-	}
-	// None found: return the stable config-root candidate so the
-	// missing-file error points the operator at the right place.
-	return configCandidate, nil
-}
-
-// configRoot returns the SSHGate config root honouring
-// $XDG_CONFIG_HOME / $HOME, mirroring sshgate-mcp/main.go.
-func configRoot() (string, error) {
-	if root := os.Getenv("XDG_CONFIG_HOME"); root != "" {
-		return filepath.Join(root, "sshgate"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".config", "sshgate"), nil
 }
 
 // readLocalFile reads path with a helpful error envelope. The error
@@ -700,30 +329,6 @@ func readLocalFile(path, kind, hint string) ([]byte, error) {
 		return nil, fmt.Errorf("tools: read %s: %w", path, err)
 	}
 	return b, nil
-}
-
-// buildBootstrapClientConfig assembles an *ssh.ClientConfig for the
-// FIRST dial to the server. Auth comes from either BootstrapKeyPath or
-// ssh-agent ($SSH_AUTH_SOCK). Host-key verification uses the same TOFU
-// store as r.SSH.
-func (r *Runner) buildBootstrapClientConfig(in AddServerInput) (*ssh.ClientConfig, error) {
-	auth, err := bootstrapAuthMethod(in)
-	if err != nil {
-		return nil, err
-	}
-
-	// Re-use the regular SSH client's known_hosts for TOFU so the
-	// bootstrap pin is the one subsequent r.SSH dials verify against.
-	khPath := r.knownHostsPath()
-	if khPath == "" {
-		return nil, errors.New("tools: SSH client has no KnownHostsPath; cannot pin host key")
-	}
-	return &ssh.ClientConfig{
-		User:            in.User,
-		Auth:            []ssh.AuthMethod{auth},
-		HostKeyCallback: sshpkg.TOFU(khPath),
-		Timeout:         bootstrapDialTimeout,
-	}, nil
 }
 
 // dialAgentSock dials the ssh-agent Unix socket at $SSH_AUTH_SOCK. It is
@@ -781,23 +386,6 @@ func bootstrapAuthMethod(in AddServerInput) (ssh.AuthMethod, error) {
 		return ssh.PublicKeys(signer), nil
 	}
 	return nil, errors.New("tools: no bootstrap method")
-}
-
-// knownHostsPath introspects r.SSH for its known_hosts path. We use a
-// small interface-cast rather than threading another field through the
-// Runner; production wires in *sshpkg.Client, which exports the field.
-func (r *Runner) knownHostsPath() string {
-	type kh interface {
-		KnownHosts() string
-	}
-	if k, ok := r.SSH.(kh); ok {
-		return k.KnownHosts()
-	}
-	// Fallback: reflect on the common *sshpkg.Client type.
-	if c, ok := r.SSH.(*sshpkg.Client); ok {
-		return c.KnownHostsPath
-	}
-	return ""
 }
 
 // dialBootstrap performs the TCP dial + SSH handshake and returns the

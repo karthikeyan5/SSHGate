@@ -23,25 +23,17 @@ import (
 
 // This file implements the HUMAN-ONLY CLI provisioning path (the `sshgate`
 // binary's `pubkey` and `add` subcommands). It lives in the tools package so
-// it can reuse the exact auto-setup machinery AddServer already has —
-// runAutoSetup, rewriteAuthorizedKeys, hasRestrictedEntryForKey, the backup +
-// rollback, and the bootstrapSession seam — rather than duplicating any of it.
+// it can reuse the shared auto-setup machinery — runAutoSetup,
+// rewriteAuthorizedKeys, hasRestrictedEntryForKey, the backup + rollback, and
+// the bootstrapSession seam — rather than duplicating any of it.
 //
-// The ONE behavioural delta from AddServer:
-//
-//   - AddServer dials with a SEPARATE bootstrap credential (the operator's
-//     personal key / ssh-agent) and APPENDS the restricted forced-command
-//     line for the SSHGate key.
-//   - Provision dials with the SSHGate dedicated key itself — the human has
-//     already pasted its PLAIN public key into the target's authorized_keys
-//     out-of-band — and the rewrite REPLACES that same key's plain line with
-//     the restricted line, locking the key down. From then on the key is
-//     gated.
-//
-// Both share rewriteAuthorizedKeys, which removes ANY line matching the key
-// (plain or restricted) and re-emits exactly one restricted line, so the
-// plain→restricted replacement falls out for free; the delta is only the dial
-// credential and the verify path.
+// Provision dials with the SSHGate dedicated key itself — the human has
+// already pasted its PLAIN public key into the target's authorized_keys
+// out-of-band — and the rewrite REPLACES that same key's plain line with the
+// restricted forced-command line, locking the key down. From then on the key
+// is gated. rewriteAuthorizedKeys removes ANY line matching the key (plain or
+// restricted) and re-emits exactly one restricted line, so the
+// plain→restricted replacement falls out for free.
 
 // EnsureSSHGateKeypair makes sure the SSHGate dedicated ed25519 keypair exists
 // at keyPath (private, mode 0600) and keyPath+".pub" (mode 0644), generating
@@ -197,9 +189,9 @@ type ProvisionOutput struct {
 // gate, rewrites the pasted plain line into the restricted forced-command
 // line (locking the key down), verifies, and registers the alias.
 //
-// The auto-setup + rollback machinery is shared verbatim with AddServer via a
-// throwaway Runner (runAutoSetup / rollback / rollbackPartial are methods on
-// Runner that touch no Runner state). The flow:
+// The auto-setup + rollback machinery is invoked via a throwaway Runner
+// (runAutoSetup / rollback / rollbackPartial are methods on Runner that touch
+// no Runner state). The flow:
 //
 //  1. Validate (alias regex, not-already-registered).
 //  2. Read local materials (gate binary; gate.pub for tier-2; sshgate pubkey).
@@ -354,8 +346,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 
 // provisionRollback runs the shared rollback after a Provision failure that
 // occurred AFTER authorized_keys was modified, then wraps cause in an
-// actionable, security-explicit error. Unlike AddServer (whose backup is the
-// operator's pre-existing authorized_keys), Provision's backup is the human's
+// actionable, security-explicit error. Provision's backup is the human's
 // PLAIN pasted line — so a rollback restores the SSHGate key to FULL SHELL.
 // The human must be told that explicitly:
 //

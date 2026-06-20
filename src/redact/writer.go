@@ -1,7 +1,6 @@
 package redact
 
 import (
-	"bytes"
 	"errors"
 	"io"
 )
@@ -268,10 +267,4 @@ func (w *Writer) scanAndEmit(span []byte) error {
 // has emitted. Cheap; safe to call from any goroutine.
 func (w *Writer) Redactions() uint64 {
 	return w.scanner.Stats()
-}
-
-// hasNoMarker is a debugging helper used by tests to assert that a
-// passthrough chunk is verbatim. Not part of the public API.
-func hasNoMarker(b []byte) bool {
-	return !bytes.Contains(b, []byte(MarkerPrefix))
 }

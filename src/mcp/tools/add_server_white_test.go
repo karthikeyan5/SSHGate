@@ -98,38 +98,12 @@ func TestUploadFile_RemotePathMetacharGuard(t *testing.T) {
 	}
 }
 
-// TestBuildBootstrapClientConfig_NoKnownHostsPath asserts that when the
-// runner's SSH client exposes no known_hosts path, config assembly refuses
-// rather than silently building a config with no host-key pin. We pass a
-// valid bootstrap key so bootstrapAuthMethod succeeds and the failure is
-// unambiguously the missing known_hosts path.
-func TestBuildBootstrapClientConfig_NoKnownHostsPath(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	keyPath := writeTestPrivKey(t, dir, "id_ed25519", 0o600)
-
-	// noKnownHostsSSH satisfies SSHRunner but exposes neither a
-	// KnownHosts() method nor the *sshpkg.Client type, so knownHostsPath()
-	// returns "".
-	r := &Runner{SSH: &noKnownHostsSSH{}}
-	_, err := r.buildBootstrapClientConfig(AddServerInput{
-		User:             "u",
-		BootstrapKeyPath: keyPath,
-	})
-	if err == nil {
-		t.Fatal("buildBootstrapClientConfig with no known_hosts path = nil; want error")
-	}
-	if !strings.Contains(err.Error(), "KnownHostsPath") {
-		t.Errorf("err = %v; want mention of missing KnownHostsPath", err)
-	}
-}
-
 // TestBootstrapAuthMethod covers the validation surface of the
-// bootstrap-credential resolver: agent path with empty $SSH_AUTH_SOCK,
-// key-file path with a missing file, and key-file path with an insecure
-// (group/other-readable) mode. The agent-present and key-valid happy paths
-// require a live ssh-agent / are exercised by buildBootstrapClientConfig
-// above, so they are not duplicated here.
+// bootstrap-credential resolver (shared with Provision): agent path with
+// empty $SSH_AUTH_SOCK, key-file path with a missing file, and key-file path
+// with an insecure (group/other-readable) mode. The agent-present and
+// key-valid happy paths are exercised via the seam tests in
+// add_server_bootstrap_test.go, so they are not duplicated here.
 func TestBootstrapAuthMethod_EmptyAgentSocket(t *testing.T) {
 	// Not t.Parallel: mutates the process-wide SSH_AUTH_SOCK env var.
 	t.Setenv("SSH_AUTH_SOCK", "")
@@ -182,12 +156,4 @@ func TestBootstrapAuthMethod_ValidKeyAccepted(t *testing.T) {
 	if auth == nil {
 		t.Fatal("bootstrapAuthMethod returned a nil AuthMethod for a valid key")
 	}
-}
-
-// noKnownHostsSSH implements tools.SSHRunner but deliberately exposes no
-// way to discover a known_hosts path, so Runner.knownHostsPath() returns "".
-type noKnownHostsSSH struct{}
-
-func (noKnownHostsSSH) Run(_ context.Context, _, _ string, _ int, _ string) ([]byte, []byte, int, error) {
-	return nil, nil, 0, nil
 }

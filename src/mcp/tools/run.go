@@ -80,10 +80,9 @@ type Runner struct {
 	// DefaultWriteTTLSec.
 	WriteTTLSec int64
 
-	// AddServerCfg overrides the defaults used by AddServer (paths to
-	// the gate binary, signing pubkey, and SSHGate dedicated
-	// pubkey). Tests inject this; production leaves it zero and the
-	// resolver populates each field from $XDG_CONFIG_HOME / env.
+	// AddServerCfg holds local-path overrides (gate binary, signing
+	// pubkey, SSHGate dedicated pubkey) for the shared provisioning
+	// machinery. Tests inject this; production leaves it zero.
 	AddServerCfg AddServerConfig
 
 	// SignerSockPath is the absolute path to the signer Unix

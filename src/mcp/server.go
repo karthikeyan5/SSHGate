@@ -127,11 +127,10 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Description: "Run a sequence of shell commands on a registered server. Reads run directly; all writes are bundled into a single approval (one Telegram tap). stop_on_error defaults to true.",
 	}, s.runBatchHandler)
 
-	// Provisioning (add_server) is intentionally NOT exposed to the
-	// agent: server registration + gate install is a human-only action,
-	// performed via the standalone `sshgate` CLI (`sshgate pubkey` +
-	// `sshgate add`). The underlying tools.AddServer logic still lives in
-	// the tools package and is driven by that CLI's Provision path.
+	// Provisioning is intentionally NOT exposed to the agent: server
+	// registration + gate install is a human-only action, performed via
+	// the standalone `sshgate` CLI (`sshgate pubkey` + `sshgate add`). The
+	// install logic lives in tools.Provision, driven by that CLI.
 
 	// list_servers — returns every registered alias with its host/port/user.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{

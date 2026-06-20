@@ -13,36 +13,6 @@ import (
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
-// Exec runs cmd via "/bin/sh -c <cmd>", streaming the child's stdout
-// and stderr to the calling process's os.Stdout and os.Stderr — or,
-// if a session salt and ruleset are supplied via ExecOpts, through a
-// redact.Writer that scrubs Layer-1 named-format secrets inline. It
-// blocks until the child exits or ctx is cancelled, whichever comes
-// first.
-//
-// Return values:
-//
-//   - exitCode is the child's exit code in the range 0..255. When the
-//     process is killed by a signal (including ctx cancellation), the
-//     exit code is reported as 128+signum, matching the convention used
-//     by shells. If the process never started (e.g. /bin/sh missing),
-//     exitCode is -1.
-//   - err is non-nil only on start failures. A nonzero exit code from a
-//     successfully-started child is NOT an error from gate's
-//     perspective — the caller is expected to propagate exitCode as
-//     gate's own exit status.
-//
-// Exec sets a process group on the child so that ctx cancellation
-// kills the whole group, not just the shell. This matters because the
-// child may itself spawn subprocesses (e.g. pipelines) that would
-// otherwise be reparented to PID 1 and outlive cancellation.
-//
-// Exec wraps the historical no-redact signature; new callers should
-// use ExecWithRedaction.
-func Exec(ctx context.Context, cmd string) (exitCode int, err error) {
-	return ExecWithRedaction(ctx, cmd, ExecOpts{})
-}
-
 // ExecOpts holds the optional redactor wiring for a single command.
 //
 // SessionSalt is a per-process 32-byte random value used for HMAC
@@ -58,15 +28,34 @@ type ExecOpts struct {
 	Rules       []redact.Rule
 }
 
-// ExecWithRedaction is the v1.2 entry point. When opts.Rules is
-// non-empty, c.Stdout and c.Stderr are wrapped in redact.Writer
-// instances so every byte the child emits passes through the
-// streaming scrubber before reaching the SSH stream.
+// ExecWithRedaction runs cmd via "/bin/sh -c <cmd>", streaming the child's
+// stdout and stderr to os.Stdout / os.Stderr. When opts.Rules is non-empty,
+// c.Stdout and c.Stderr are wrapped in redact.Writer instances so every byte
+// the child emits passes through the streaming scrubber before reaching the
+// SSH stream; when opts.Rules is empty both streams pass through unredacted.
+// It blocks until the child exits or ctx is cancelled, whichever comes first.
 //
 // The redactor lives at the gate boundary by design (see
 // docs/audits/secrets-redaction-architecture-2026-05-19.md §"Where
 // it lives") — the MCP-side trust boundary is bypassable; the gate
 // is the only physical choke point.
+//
+// Return values:
+//
+//   - exitCode is the child's exit code in the range 0..255. When the
+//     process is killed by a signal (including ctx cancellation), the
+//     exit code is reported as 128+signum, matching the convention used
+//     by shells. If the process never started (e.g. /bin/sh missing),
+//     exitCode is -1.
+//   - err is non-nil only on start failures. A nonzero exit code from a
+//     successfully-started child is NOT an error from gate's
+//     perspective — the caller is expected to propagate exitCode as
+//     gate's own exit status.
+//
+// It sets a process group on the child so that ctx cancellation kills the
+// whole group, not just the shell. This matters because the child may itself
+// spawn subprocesses (e.g. pipelines) that would otherwise be reparented to
+// PID 1 and outlive cancellation.
 func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (exitCode int, err error) {
 	if strings.TrimSpace(cmd) == "" {
 		return -1, errors.New("exec: empty command")

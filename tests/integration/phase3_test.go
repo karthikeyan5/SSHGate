@@ -4,22 +4,29 @@
 // task 3.1).
 //
 // Boots a FRESH linuxserver/openssh-server container with NO gate
-// pre-installed, then exercises the real sshgate.add_server tool:
+// pre-installed, then exercises the human-only CLI provisioning path
+// (tools.Provision — the engine behind `sshgate add`):
 //
-//   1. Success path. AddServer dials with the operator's bootstrap key
-//      (the one the linuxserver image baked into authorized_keys),
-//      uploads gate + signing pubkey, rewrites authorized_keys to
-//      gate the SSHGate dedicated key behind command="..." forcing,
-//      verifies via the SSHGATE_OK probe, registers the alias. Then
-//      a plain `df -h` Runner.Run goes through and works.
-//   2. Verify failure → rollback. We re-use the same fresh container
-//      after tearing down between subtests, point AddServer at a
-//      pubkey that won't actually let the sshgate key in, and assert
-//      that authorized_keys is restored from the backup (the bootstrap
-//      key still works) AND ~/.sshgate-gate/ no longer exists.
-//   3. Idempotent re-add (different alias, already-restricted state) →
-//      skip rewrite, return Idempotent=true, register the new alias.
-//   4. Re-adding the same alias → "already registered" error.
+//  1. Success path. The human pastes SSHGate's dedicated PLAIN public
+//     key into the target's authorized_keys out-of-band (pasteSSHGate-
+//     PlainLine, using the bootstrap key the linuxserver image baked in).
+//     Provision then dials with the dedicated key ITSELF, uploads gate +
+//     signing pubkey, rewrites the pasted plain line into the restricted
+//     command="..." forced-command line (locking the key down), verifies
+//     via the SSHGATE_OK probe, and registers the alias. Then a plain
+//     `df -h` Runner.Run goes through and works.
+//  2. Verify failure → rollback. Point Provision's SSHGatePubPath at a
+//     DIFFERENT pubkey than the key it dials with: the rewrite gates the
+//     WRONG key and leaves the dedicated key's plain line in place, so the
+//     verify re-dial gets a bare shell (no SSHGATE_OK) and fails. Rollback
+//     restores authorized_keys from the backup (the bootstrap key still
+//     works) AND removes ~/.sshgate-gate/.
+//  3. Idempotent re-add (different alias, already-restricted state) →
+//     skip rewrite, return Idempotent=true, register the new alias.
+//  4. Re-adding the same alias → "already registered" error (fires before
+//     any dial, so this subtest needs no container).
+//  5. Read-only (tier-1) provision: no gate.pub pushed; reads execute,
+//     writes are denied at the gate.
 //
 // Goroutine leak check at the end mirrors Phases 1-2.
 package integration_test
@@ -44,55 +51,42 @@ import (
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
 )
 
-func TestPhase3AddServer_Success(t *testing.T) {
+func TestPhase3Provision_Success(t *testing.T) {
 	// The linuxserver image bakes ONE pubkey into authorized_keys at
 	// boot — call that the "bootstrap key" (operator's normal access).
 	bootstrapPriv, _ := generateSSHKey(t)
 	cleanup := bootContainer(t)
 	t.Cleanup(cleanup)
 
-	// SSHGate-dedicated key (separate from bootstrap) — the auto-setup
-	// rewrites authorized_keys for THIS pubkey.
+	// SSHGate-dedicated key (separate from bootstrap). The human pastes
+	// its PLAIN line first; Provision dials with it and rewrites that line.
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
+	pasteSSHGatePlainLine(t, dedicatedPub)
 
 	// Cross-compile gate + generate signing keypair.
 	gateBin := buildGateLinux(t)
 	_, gatePub := generateGateKeyPair(t)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
-	servers, err := registry.New(regPath)
-	if err != nil {
-		t.Fatalf("registry.New: %v", err)
-	}
-
 	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	sshClient := &sshpkg.Client{
-		KeyPath:        dedicatedPriv,
-		KnownHostsPath: khPath,
-		Timeout:        15 * time.Second,
-	}
-	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &noopSign{}, // not used by AddServer or by reads
-		SSH:     sshClient,
-		AddServerCfg: tools.AddServerConfig{
-			GateBinaryPath: gateBin,
-			GatePubPath:    gatePub,
-			SSHGatePubPath:    dedicatedPub,
-		},
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	out, err := runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "test",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
+	out, err := tools.Provision(ctx, tools.ProvisionConfig{
+		GateBinaryPath: gateBin,
+		GatePubPath:    gatePub,
+		SSHGateKeyPath: dedicatedPriv,
+		SSHGatePubPath: dedicatedPub,
+		KnownHostsPath: khPath,
+		ServersPath:    regPath,
+	}, tools.ProvisionInput{
+		Alias: "test",
+		Host:  "127.0.0.1",
+		Port:  sshContainerPort,
+		User:  remoteUser,
 	})
 	if err != nil {
-		t.Fatalf("AddServer: %v", err)
+		t.Fatalf("Provision: %v", err)
 	}
 	if !out.VerifiedOK {
 		t.Errorf("VerifiedOK=false; want true")
@@ -109,16 +103,32 @@ func TestPhase3AddServer_Success(t *testing.T) {
 	if out.Idempotent {
 		t.Errorf("Idempotent=true on first add; want false")
 	}
-	// Registry now holds the alias.
+
+	// Registry on disk holds the alias. Open it fresh (Provision wrote it
+	// via its own *registry.Servers).
+	servers, err := registry.New(regPath)
+	if err != nil {
+		t.Fatalf("registry.New: %v", err)
+	}
 	if _, ok := servers.Get("test"); !ok {
-		t.Errorf("registry does not have 'test' after AddServer")
+		t.Errorf("registry does not have 'test' after Provision")
 	}
 
-	// Now run a read via the dedicated key — confirm gate is in the
-	// loop and routes the read through to /bin/sh -c successfully.
+	// Now run a read via the (now gated) dedicated key — confirm gate is
+	// in the loop and routes the read through to /bin/sh -c successfully.
+	sshClient := &sshpkg.Client{
+		KeyPath:        dedicatedPriv,
+		KnownHostsPath: khPath,
+		Timeout:        15 * time.Second,
+	}
+	runner := &tools.Runner{
+		Servers: servers,
+		Sign:    &noopSign{}, // not used by reads
+		SSH:     sshClient,
+	}
 	rdOut, err := runner.Run(ctx, tools.RunInput{Alias: "test", Command: "df -h"})
 	if err != nil {
-		t.Fatalf("Runner.Run(df -h) after add: %v", err)
+		t.Fatalf("Runner.Run(df -h) after provision: %v", err)
 	}
 	if rdOut.ExitCode != 0 {
 		t.Errorf("df -h exit=%d; want 0 (stderr=%q)", rdOut.ExitCode, rdOut.Stderr)
@@ -131,64 +141,62 @@ func TestPhase3AddServer_Success(t *testing.T) {
 	if got := fingerprintFromKnownHosts(t, khPath); got != out.Fingerprint {
 		t.Errorf("captured fingerprint=%q; known_hosts has %q", out.Fingerprint, got)
 	}
+
+	_ = bootstrapPriv // bootstrap key is only the paste credential here.
 }
 
-func TestPhase3AddServer_VerifyFailureRollsBack(t *testing.T) {
+func TestPhase3Provision_VerifyFailureRollsBack(t *testing.T) {
 	bootstrapPriv, _ := generateSSHKey(t)
 	cleanup := bootContainer(t)
 	t.Cleanup(cleanup)
 
-	// Generate the SSHGate-dedicated key, but DELIBERATELY give
-	// AddServer a DIFFERENT pubkey to put into authorized_keys. The
-	// verify probe (which uses the dedicated key) won't authenticate,
-	// triggering the rollback path.
-	dedicatedPriv, _ := generateStandaloneSSHKey(t)
+	// The dedicated key whose PLAIN line we paste and whose PRIVATE half
+	// Provision dials with.
+	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
+	pasteSSHGatePlainLine(t, dedicatedPub)
+
+	// DELIBERATELY hand Provision a DIFFERENT pubkey via SSHGatePubPath.
+	// rewriteAuthorizedKeys then gates the WRONG key and leaves the
+	// dedicated key's PLAIN line untouched — so the verify re-dial (with the
+	// dedicated key) lands on a bare shell, the empty-command probe returns
+	// no SSHGATE_OK, and Provision rolls back.
 	_, wrongPub := generateStandaloneSSHKey(t)
 
 	gateBin := buildGateLinux(t)
 	_, gatePub := generateGateKeyPair(t)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err := tools.Provision(ctx, tools.ProvisionConfig{
+		GateBinaryPath: gateBin,
+		GatePubPath:    gatePub,
+		SSHGateKeyPath: dedicatedPriv,
+		// Rewrite locks down THIS (wrong) key; the dial key's plain line
+		// survives, so the gated probe never runs → verify fails.
+		SSHGatePubPath: wrongPub,
+		KnownHostsPath: khPath,
+		ServersPath:    regPath,
+	}, tools.ProvisionInput{
+		Alias: "test",
+		Host:  "127.0.0.1",
+		Port:  sshContainerPort,
+		User:  remoteUser,
+	})
+	if err == nil {
+		t.Fatalf("Provision: nil err; expected verify failure")
+	}
+	if !strings.Contains(err.Error(), "verify") && !strings.Contains(err.Error(), "SSHGATE_OK") {
+		t.Errorf("err=%v; expected message mentioning verify / SSHGATE_OK", err)
+	}
+
+	// Registry must NOT have been touched.
 	servers, err := registry.New(regPath)
 	if err != nil {
 		t.Fatalf("registry.New: %v", err)
 	}
-
-	sshClient := &sshpkg.Client{
-		KeyPath:        dedicatedPriv,
-		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
-		Timeout:        10 * time.Second,
-	}
-	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &noopSign{},
-		SSH:     sshClient,
-		AddServerCfg: tools.AddServerConfig{
-			GateBinaryPath: gateBin,
-			GatePubPath:    gatePub,
-			// authorized_keys will be rewritten for THIS key — but the
-			// SSH client above uses the OTHER key, so verify fails.
-			SSHGatePubPath: wrongPub,
-		},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	_, err = runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "test",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
-	})
-	if err == nil {
-		t.Fatalf("AddServer: nil err; expected verify failure")
-	}
-	if !strings.Contains(err.Error(), "verify") {
-		t.Errorf("err=%v; expected message mentioning verify", err)
-	}
-
-	// Registry must NOT have been touched.
 	if _, ok := servers.Get("test"); ok {
 		t.Errorf("registry has 'test' after rollback; should be empty")
 	}
@@ -217,7 +225,9 @@ func TestPhase3AddServer_VerifyFailureRollsBack(t *testing.T) {
 	}
 }
 
-func TestPhase3AddServer_AliasAlreadyRegistered(t *testing.T) {
+func TestPhase3Provision_AliasAlreadyRegistered(t *testing.T) {
+	// Provision's already-registered guard fires BEFORE it reads any local
+	// material or dials the remote, so this subtest needs no container.
 	regPath := filepath.Join(t.TempDir(), "servers.json")
 	servers, err := registry.New(regPath)
 	if err != nil {
@@ -228,143 +238,132 @@ func TestPhase3AddServer_AliasAlreadyRegistered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &noopSign{},
-		SSH:     &sshpkg.Client{KeyPath: "/nonexistent", KnownHostsPath: "/nonexistent"},
-	}
-	_, err = runner.AddServer(context.Background(), tools.AddServerInput{
-		Alias:            "dup",
-		Host:             "127.0.0.1",
-		User:             "anyone",
-		BootstrapKeyPath: "/dev/null",
+
+	_, err = tools.Provision(context.Background(), tools.ProvisionConfig{
+		GateBinaryPath: "/nonexistent",
+		GatePubPath:    "/nonexistent",
+		SSHGateKeyPath: "/nonexistent",
+		SSHGatePubPath: "/nonexistent",
+		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
+		ServersPath:    regPath,
+	}, tools.ProvisionInput{
+		Alias: "dup",
+		Host:  "127.0.0.1",
+		User:  "anyone",
 	})
 	if err == nil {
-		t.Fatalf("AddServer: nil err; expected 'already registered'")
+		t.Fatalf("Provision: nil err; expected 'already registered'")
 	}
 	if !strings.Contains(err.Error(), "already registered") {
 		t.Errorf("err=%v; expected 'already registered'", err)
 	}
 }
 
-func TestPhase3AddServer_IdempotentReAdd(t *testing.T) {
+func TestPhase3Provision_IdempotentReAdd(t *testing.T) {
 	bootstrapPriv, _ := generateSSHKey(t)
 	cleanup := bootContainer(t)
 	t.Cleanup(cleanup)
 
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
+	pasteSSHGatePlainLine(t, dedicatedPub)
+
 	gateBin := buildGateLinux(t)
 	_, gatePub := generateGateKeyPair(t)
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
-	servers, err := registry.New(regPath)
-	if err != nil {
-		t.Fatalf("registry.New: %v", err)
-	}
-	sshClient := &sshpkg.Client{
-		KeyPath:        dedicatedPriv,
-		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
-		Timeout:        15 * time.Second,
-	}
-	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &noopSign{},
-		SSH:     sshClient,
-		AddServerCfg: tools.AddServerConfig{
-			GateBinaryPath: gateBin,
-			GatePubPath:    gatePub,
-			SSHGatePubPath:    dedicatedPub,
-		},
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	cfg := tools.ProvisionConfig{
+		GateBinaryPath: gateBin,
+		GatePubPath:    gatePub,
+		SSHGateKeyPath: dedicatedPriv,
+		SSHGatePubPath: dedicatedPub,
+		KnownHostsPath: khPath,
+		ServersPath:    regPath,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	out, err := runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "first",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
+	out, err := tools.Provision(ctx, cfg, tools.ProvisionInput{
+		Alias: "first",
+		Host:  "127.0.0.1",
+		Port:  sshContainerPort,
+		User:  remoteUser,
 	})
 	if err != nil {
-		t.Fatalf("first AddServer: %v", err)
+		t.Fatalf("first Provision: %v", err)
 	}
 	if out.Idempotent {
 		t.Errorf("Idempotent=true on first add; want false")
 	}
 
-	// Now re-add with a DIFFERENT alias — same pubkey is already
-	// installed on the remote, so the tool should detect the canonical
-	// restricted entry and skip the rewrite.
-	out2, err := runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "second",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
+	// Re-provision with a DIFFERENT alias against the same host. The
+	// dedicated key is already gated by the restricted entry (and the plain
+	// line was rewritten away in the first provision), so Provision detects
+	// the canonical restricted entry, skips the rewrite, and just verifies +
+	// registers the new alias.
+	out2, err := tools.Provision(ctx, cfg, tools.ProvisionInput{
+		Alias: "second",
+		Host:  "127.0.0.1",
+		Port:  sshContainerPort,
+		User:  remoteUser,
 	})
 	if err != nil {
-		t.Fatalf("second AddServer (idempotent): %v", err)
+		t.Fatalf("second Provision (idempotent): %v", err)
 	}
 	if !out2.Idempotent {
 		t.Errorf("Idempotent=false on the re-add; want true (restricted entry already present)")
 	}
+
+	servers, err := registry.New(regPath)
+	if err != nil {
+		t.Fatalf("registry.New: %v", err)
+	}
 	if _, ok := servers.Get("second"); !ok {
 		t.Errorf("second alias not registered after idempotent re-add")
 	}
+
+	_ = bootstrapPriv // only the paste credential here.
 }
 
-// TestPhase3AddServer_ReadOnly covers the tier-1 install path: deploy
+// TestPhase3Provision_ReadOnly covers the tier-1 install path: deploy
 // gate WITHOUT uploading gate.pub. Reads should still execute
 // through the gate (gate's keystore returns (nil, nil) for the
 // missing pubkey and treats reads as allowed); writes must be denied
 // with the read-only-mode error message and exit code 77.
-func TestPhase3AddServer_ReadOnly(t *testing.T) {
+func TestPhase3Provision_ReadOnly(t *testing.T) {
 	bootstrapPriv, _ := generateSSHKey(t)
 	cleanup := bootContainer(t)
 	t.Cleanup(cleanup)
 
 	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
+	pasteSSHGatePlainLine(t, dedicatedPub)
+
 	gateBin := buildGateLinux(t)
-	// GatePubPath points at a non-existent file — AddServer in
-	// ReadOnly mode must not read it. The slash command flow doesn't
-	// have it on disk yet in tier-1.
+	// GatePubPath points at a non-existent file — Provision in ReadOnly
+	// mode must not read it. The tier-1 flow doesn't have it on disk yet.
 	gatePubPath := filepath.Join(t.TempDir(), "definitely-not-here.pub")
 
 	regPath := filepath.Join(t.TempDir(), "servers.json")
-	servers, err := registry.New(regPath)
-	if err != nil {
-		t.Fatalf("registry.New: %v", err)
-	}
 	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	sshClient := &sshpkg.Client{
-		KeyPath:        dedicatedPriv,
-		KnownHostsPath: khPath,
-		Timeout:        15 * time.Second,
-	}
-	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &noopSign{},
-		SSH:     sshClient,
-		AddServerCfg: tools.AddServerConfig{
-			GateBinaryPath: gateBin,
-			GatePubPath:    gatePubPath,
-			SSHGatePubPath:    dedicatedPub,
-		},
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	out, err := runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "ro",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
-		ReadOnly:         true,
+	out, err := tools.Provision(ctx, tools.ProvisionConfig{
+		GateBinaryPath: gateBin,
+		GatePubPath:    gatePubPath,
+		SSHGateKeyPath: dedicatedPriv,
+		SSHGatePubPath: dedicatedPub,
+		KnownHostsPath: khPath,
+		ServersPath:    regPath,
+	}, tools.ProvisionInput{
+		Alias:    "ro",
+		Host:     "127.0.0.1",
+		Port:     sshContainerPort,
+		User:     remoteUser,
+		ReadOnly: true,
 	})
 	if err != nil {
-		t.Fatalf("AddServer (read-only): %v", err)
+		t.Fatalf("Provision (read-only): %v", err)
 	}
 	if !out.ReadOnlyMode {
 		t.Errorf("ReadOnlyMode=false on read-only add; want true")
@@ -384,6 +383,21 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 		t.Errorf("gate.pub present on remote in tier-1 (exit=%d, stdout=%q)", exit, probe)
 	}
 
+	servers, err := registry.New(regPath)
+	if err != nil {
+		t.Fatalf("registry.New: %v", err)
+	}
+	sshClient := &sshpkg.Client{
+		KeyPath:        dedicatedPriv,
+		KnownHostsPath: khPath,
+		Timeout:        15 * time.Second,
+	}
+	runner := &tools.Runner{
+		Servers: servers,
+		Sign:    &noopSign{},
+		SSH:     sshClient,
+	}
+
 	// Read goes through.
 	rdOut, err := runner.Run(ctx, tools.RunInput{Alias: "ro", Command: "df -h"})
 	if err != nil {
@@ -393,10 +407,10 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 		t.Errorf("df -h exit=%d; want 0 (stderr=%q)", rdOut.ExitCode, rdOut.Stderr)
 	}
 
-	// Write hits the SSH layer with a SIG prefix from Sign... but
-	// noopSign errors. So we exercise the gate denial path via a
-	// direct unsigned SSH dial that gate classifies as a write.
-	// SSH_ORIGINAL_COMMAND is set to "rm /tmp/x" by the SSH client.
+	// A write straight over SSH on the gated dedicated key must be denied
+	// at the gate (tier-1 has no signer pubkey). SSH_ORIGINAL_COMMAND is
+	// set to "rm /tmp/x" by the SSH client; the gate classifies it write
+	// and refuses with the read-only-mode message and exit 77.
 	_, stderr, exit, err := sshClient.Run(ctx, "127.0.0.1", remoteUser, sshContainerPort, "rm /tmp/x")
 	if err == nil && exit == 0 {
 		t.Fatalf("write executed on tier-1 server (exit=0, stderr=%q); want denial", stderr)
@@ -412,91 +426,7 @@ func TestPhase3AddServer_ReadOnly(t *testing.T) {
 	}
 }
 
-// TestPhase3UpgradeServerToSigning covers the tier-1 → tier-2
-// transition: an existing read-only server gets its gate.pub
-// pushed via the bootstrap leg, after which signed writes can be
-// verified. We don't exercise a real signed write here (that needs
-// signer) — we just confirm the upload + probe completes and the
-// remote file is present afterward.
-func TestPhase3UpgradeServerToSigning(t *testing.T) {
-	bootstrapPriv, _ := generateSSHKey(t)
-	cleanup := bootContainer(t)
-	t.Cleanup(cleanup)
-
-	dedicatedPriv, dedicatedPub := generateStandaloneSSHKey(t)
-	gateBin := buildGateLinux(t)
-	gatePubPathMissing := filepath.Join(t.TempDir(), "missing.pub")
-	_, gatePub := generateGateKeyPair(t) // for the upgrade
-
-	regPath := filepath.Join(t.TempDir(), "servers.json")
-	servers, err := registry.New(regPath)
-	if err != nil {
-		t.Fatalf("registry.New: %v", err)
-	}
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	sshClient := &sshpkg.Client{
-		KeyPath:        dedicatedPriv,
-		KnownHostsPath: khPath,
-		Timeout:        15 * time.Second,
-	}
-	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &noopSign{},
-		SSH:     sshClient,
-		AddServerCfg: tools.AddServerConfig{
-			GateBinaryPath: gateBin,
-			GatePubPath:    gatePubPathMissing,
-			SSHGatePubPath:    dedicatedPub,
-		},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	// Step 1: tier-1 add (no pubkey on disk).
-	if _, err := runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "upgrade-target",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
-		ReadOnly:         true,
-	}); err != nil {
-		t.Fatalf("tier-1 AddServer: %v", err)
-	}
-
-	// Step 2: signer is set up; swap the config to point at the real
-	// pubkey and run UpgradeServerToSigning.
-	runner.AddServerCfg.GatePubPath = gatePub
-	if err := runner.UpgradeServerToSigning(ctx, "upgrade-target", tools.AddServerInput{
-		BootstrapKeyPath: bootstrapPriv,
-	}); err != nil {
-		t.Fatalf("UpgradeServerToSigning: %v", err)
-	}
-
-	// Confirm gate.pub is now on the remote.
-	probe, _, _, err := directUnsignedSSH(t, bootstrapPriv,
-		"127.0.0.1", sshContainerPort, remoteUser,
-		"test -f ~/.sshgate-gate/gate.pub && echo PRESENT || echo ABSENT")
-	if err != nil {
-		t.Fatalf("post-upgrade pubkey probe: %v", err)
-	}
-	if !strings.Contains(string(probe), "PRESENT") {
-		t.Errorf("gate.pub still absent after upgrade (stdout=%q)", probe)
-	}
-
-	// And the registry's read-only flag must be CLEARED by the upgrade —
-	// otherwise the run/run_batch short-circuit keeps refusing signed writes
-	// after a successful upgrade (the false-green the 2026-06-14 triple
-	// review caught: this test previously asserted only gate.pub presence).
-	if e, ok := servers.Get("upgrade-target"); !ok {
-		t.Fatal("entry vanished after upgrade")
-	} else if e.ReadOnly {
-		t.Error("ReadOnly still true after UpgradeServerToSigning; want cleared")
-	}
-}
-
-func TestPhase3AddServer_NoGoroutineLeaks(t *testing.T) {
+func TestPhase3Provision_NoGoroutineLeaks(t *testing.T) {
 	// The other Phase-3 subtests own the heavy lifetimes via t.Cleanup;
 	// goleak here is a final sanity check that any docker/SSH goroutines
 	// have unwound.
@@ -508,8 +438,8 @@ func TestPhase3AddServer_NoGoroutineLeaks(t *testing.T) {
 	)
 }
 
-// noopSign is a Sign stub that errors if invoked. AddServer must not
-// call Sign at any point; reads after the add must not call Sign
+// noopSign is a Sign stub that errors if invoked. The Provision path must
+// not call Sign at any point; reads after the add must not call Sign
 // either (the read path is direct).
 type noopSign struct{}
 

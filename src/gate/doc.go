@@ -9,8 +9,9 @@
 //   - VerifySigned parses a SSHGATE_SIG: line, verifies its Ed25519
 //     signature against the bundled gate.pub, and enforces the spec's
 //     time bounds. It returns the inner cmd string for execution.
-//   - Exec runs a shell command via /bin/sh -c, streaming stdout/stderr
-//     to the caller and forwarding SIGTERM/SIGINT to the child.
+//   - ExecWithRedaction runs a shell command via /bin/sh -c, streaming
+//     stdout/stderr to the caller (optionally through the secrets redactor)
+//     and forwarding SIGTERM/SIGINT to the child.
 //   - LoadPubKey loads the Ed25519 public key from a file, refusing to
 //     read it if the mode is more permissive than 0644.
 //

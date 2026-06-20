@@ -4,9 +4,11 @@
 //
 // Demonstrates the full teardown loop:
 //
-//  1. add_server: real auto-setup against a fresh openssh-server
-//     container. gate is installed; authorized_keys is rewritten
-//     with the command="..." forcing for the SSHGate dedicated key.
+//  1. provision: the human-only CLI add (tools.Provision) against a fresh
+//     openssh-server container. The dedicated key's PLAIN line is pasted
+//     into authorized_keys first (the out-of-band human step); Provision
+//     dials with the dedicated key, installs gate, and rewrites that plain
+//     line into the command="..." forced-command line, locking it down.
 //  2. run (read): proves gate is in the loop and routes a read
 //     directly.
 //  3. revoke_server: signs SSHGATE_REVOKE via an auto-approve signer
@@ -161,34 +163,46 @@ func TestPhase4RevokeServer_FullCycle(t *testing.T) {
 	signClient := &signpkg.Client{SocketPath: socketPath, Timeout: 15 * time.Second}
 
 	runner := &tools.Runner{
-		Servers:           servers,
-		Sign:              signClient,
-		SSH:               sshClient,
-		WriteTTLSec:       60,
+		Servers:        servers,
+		Sign:           signClient,
+		SSH:            sshClient,
+		WriteTTLSec:    60,
 		SignerSockPath: socketPath,
-		AddServerCfg: tools.AddServerConfig{
-			GateBinaryPath: gateBin,
-			GatePubPath:    gatePub,
-			SSHGatePubPath:    dedicatedPub,
-		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// --- add ---
-	addOut, err := runner.AddServer(ctx, tools.AddServerInput{
-		Alias:            "phase4",
-		Host:             "127.0.0.1",
-		Port:             sshContainerPort,
-		User:             remoteUser,
-		BootstrapKeyPath: bootstrapPriv,
+	// --- provision (human-only CLI path, mirrored in-test) ---
+	// Paste the dedicated key's PLAIN line into authorized_keys using the
+	// bootstrap key (the out-of-band step a human does before `sshgate add`),
+	// then Provision dials with the dedicated key itself and rewrites that
+	// plain line into the restricted forced-command line.
+	pasteSSHGatePlainLine(t, dedicatedPub)
+	addOut, err := tools.Provision(ctx, tools.ProvisionConfig{
+		GateBinaryPath: gateBin,
+		GatePubPath:    gatePub,
+		SSHGateKeyPath: dedicatedPriv,
+		SSHGatePubPath: dedicatedPub,
+		KnownHostsPath: khPath,
+		ServersPath:    regPath,
+	}, tools.ProvisionInput{
+		Alias: "phase4",
+		Host:  "127.0.0.1",
+		Port:  sshContainerPort,
+		User:  remoteUser,
 	})
 	if err != nil {
-		t.Fatalf("AddServer: %v", err)
+		t.Fatalf("Provision: %v", err)
 	}
 	if !addOut.VerifiedOK {
-		t.Fatalf("VerifiedOK=false after AddServer")
+		t.Fatalf("VerifiedOK=false after Provision")
+	}
+	// Provision creates its OWN registry from ServersPath and writes the
+	// alias there; the Runner's in-memory `servers` won't see it until we
+	// reload from the same file.
+	if err := servers.Load(); err != nil {
+		t.Fatalf("reload registry after Provision: %v", err)
 	}
 
 	// --- read goes through ---
