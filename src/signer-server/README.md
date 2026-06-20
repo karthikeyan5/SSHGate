@@ -20,8 +20,8 @@ one laptop. v2 is the answer to "what happens when":
   write") become a hard requirement.
 - An LLM explainer renders better in a web page than in a Telegram chat.
 
-Full motivation is in `docs/specs/2026-05-19-sshgate-design.md`
-§"v2 vision: Centralized signer server."
+Full motivation is in `docs/design.md`
+§"Approval Tier 2 — separate hosted signer" and `docs/approval-architecture.md`.
 
 ## Architecture
 
@@ -120,8 +120,7 @@ block) redirects approval traffic.
 
 ## Wire protocol
 
-Full reference: `docs/specs/2026-05-19-sshgate-design.md` §"v2 vision →
-Wire protocol." Summary:
+Full reference: `docs/design.md` §"Signed-write wire format." Summary:
 
 | Method | Path                  | Auth   | Status codes              |
 |--------|-----------------------|--------|---------------------------|

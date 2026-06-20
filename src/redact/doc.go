@@ -31,7 +31,7 @@
 // next Write. Close flushes the remaining tail.
 //
 // The threat model is in
-// docs/audits/secrets-redaction-architecture-2026-05-19.md
+// docs/redaction-architecture.md
 // §"Threat model". Honest framing: redaction is defense-in-depth,
 // not a perimeter. A truly hostile LLM can craft evasions. The
 // redactor catches the typical-case accidental leak, not adversarial

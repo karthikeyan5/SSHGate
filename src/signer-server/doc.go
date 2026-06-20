@@ -21,8 +21,8 @@
 //	store/         — Store interface + SQLite implementation
 //	install/       — VPS deploy script + systemd unit template
 //
-// The reference for the wire protocol is the design spec at
-// docs/specs/2026-05-19-sshgate-design.md §"v2 vision → Wire protocol";
+// The reference for the wire protocol is the design doc at
+// docs/design.md §"Signed-write wire format";
 // the swap-point on the signer side is
 // src/signer/backend/hosted.go (commit 3 of the v2 scaffold series).
 package signerserver

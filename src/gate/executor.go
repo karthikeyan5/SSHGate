@@ -36,7 +36,7 @@ type ExecOpts struct {
 // It blocks until the child exits or ctx is cancelled, whichever comes first.
 //
 // The redactor lives at the gate boundary by design (see
-// docs/audits/secrets-redaction-architecture-2026-05-19.md §"Where
+// docs/redaction-architecture.md §"Where
 // it lives") — the MCP-side trust boundary is bypassable; the gate
 // is the only physical choke point.
 //

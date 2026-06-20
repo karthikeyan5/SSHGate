@@ -1,6 +1,6 @@
 // Command signer-server is the hosted v2 signing service. It serves
-// the HTTPS API described in docs/specs/2026-05-19-sshgate-design.md
-// §"v2 vision → Wire protocol": SSHGate plugins on any machine submit
+// the HTTPS API described in docs/design.md §"Signed-write wire format"
+// and docs/approval-architecture.md: SSHGate plugins on any machine submit
 // a sign request, a human approves it (v2.1+ adds WebAuthn/TOTP UI),
 // and the server returns signed payloads compatible with gate.
 //

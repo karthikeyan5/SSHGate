@@ -8,7 +8,7 @@ import (
 // a file-writing action (`-fprint`, `-fprintf`, `-fprint0`, `-fls`) or an
 // interactive exec (`-ok`, `-okdir`). Conservative: ANY `-fprint*` arg
 // is a write. Cited as BLOCKER-2 in
-// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+// docs/security-readonly-bypass.md.
 func findRule(args []string) Kind {
 	for _, a := range args {
 		switch a {
@@ -38,7 +38,7 @@ func findRule(args []string) Kind {
 // NOT scanned — that avoids false positives like `/etc/hosts` matching
 // `/e`. False positives in scripts (e.g. a regex literally containing
 // `/e`) fall safely to WRITE. Cited as BLOCKER-1 in
-// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+// docs/security-readonly-bypass.md.
 func sedRule(args []string) Kind {
 	scripts := sedScripts(args)
 	for _, a := range args {
@@ -47,7 +47,7 @@ func sedRule(args []string) Kind {
 		// sed has no other long option starting with `--in`, so any
 		// `--in<anything>` arg is `--in-place` (or its `=VALUE` form).
 		// Cited as MAJOR-4 in
-		// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+		// docs/security-readonly-bypass.md.
 		if a == "-i" || strings.HasPrefix(a, "--in") {
 			return KindWrite
 		}
@@ -263,7 +263,7 @@ func sedSCommandExecsOrWrites(script string) bool {
 // awkRule: `awk` is read iff the program (any non-flag arg) does NOT
 // contain a shell-execution or file-write primitive. Substring-scan only
 // — false positives fall safely to WRITE. Cited as BLOCKER-4 in
-// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+// docs/security-readonly-bypass.md.
 //
 // Dangerous substrings:
 //   - "system"   — system("cmd") forks a shell

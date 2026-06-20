@@ -14,11 +14,11 @@ follow the manual path.
 
 Launch Claude Code normally with `claude`. SSHGate is a regular MCP
 plugin and does **not** need `--dangerously-load-development-channels`.
-That flag is for plugins (like c3) that push channel notifications INTO
+That flag is for plugins that stream channel notifications INTO
 the Claude conversation. SSHGate only uses standard MCP tool calls; its
 approvals flow OUT to your phone via Telegram, not into the conversation.
-If you've installed c3 and habit-launched with the dev-channels flag,
-that's fine — it's a no-op for SSHGate — but it's not required.
+If you've habit-launched with the dev-channels flag for some other
+plugin, that's fine — it's a no-op for SSHGate — but it's not required.
 
 ---
 
@@ -57,7 +57,7 @@ trust you want to delegate.
   on the host (e.g. has `sudo`) could read the signing key directly and
   bypass approval. For a guarantee that holds against a privileged rogue
   agent, run the signer on a separate machine (the hosted-signer tier).
-  See `decisions/2026-06-18-signer-approval-architecture.md`. Every write
+  See `approval-architecture.md`. Every write
   requires your active tap on Telegram. The bot's `allowed_user_id` pins the
   channel to your account.
 - **Use when:** you want active human-in-the-loop approvals; you're

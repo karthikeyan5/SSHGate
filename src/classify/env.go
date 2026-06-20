@@ -10,7 +10,7 @@ import (
 // `KEY=VAL` prefix on a command, the whole command is classified WRITE
 // regardless of head — the wrapped binary cannot be trusted to ignore
 // the smuggled env. Cited in
-// docs/audits/security-research-readonly-bypass-2026-05-19.md (BLOCKER-3).
+// docs/security-readonly-bypass.md (BLOCKER-3).
 var dangerousEnvVars = map[string]bool{
 	"GIT_EXTERNAL_DIFF":   true,
 	"GIT_SSH_COMMAND":     true,
@@ -62,7 +62,7 @@ var dangerousEnvVars = map[string]bool{
 // `--unset`, `--split-string`, `--chdir`, `--block-signal`, etc.) is
 // treated as WRITE because each of them can smuggle execution or
 // significantly change the wrapper's behavior. Cited as MAJOR-1 in
-// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+// docs/security-readonly-bypass.md.
 func envRule(args []string) Kind {
 	if len(args) == 0 {
 		return KindRead

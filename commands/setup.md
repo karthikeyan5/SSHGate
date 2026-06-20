@@ -178,7 +178,7 @@ Options (header / description):
    sudo for the rest of the flow. Recommended for first try."`
 2. `"Local Telegram signer"` / `"Tier 2 — install sshgate-signer-telegram +  master
    key + Telegram bot. Writes require a phone-tap approval. Adds
-   ~5 minutes of setup."`
+   ~10 minutes of setup."`
 3. `"Hosted server signer"` / `"Tier 3 — NOT YET AVAILABLE. The
    hosted signer needs the v2.x web UI + WebAuthn flow. Pick read-only
    or local-telegram for now."`
@@ -568,7 +568,7 @@ If the list is empty, skip to T2.7 — there's nothing to upgrade.
 > routine that pushes gate.pub and clears the read-only flag
 > (`UpgradeServerToSigning`) exists in the code but is not yet bound to any
 > MCP tool or slash command (tracked as a follow-up — see
-> `docs/decisions/2026-06-14-autonomous-run-log.md`). Until it is wired, a
+> `docs/ROADMAP.md`). Until it is wired, a
 > server registered read-only stays read-only; deploy a signed-write
 > server by registering it (with the signer already set up) rather than
 > upgrading an existing read-only entry.

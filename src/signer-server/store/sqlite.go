@@ -18,7 +18,7 @@ import (
 // schema is the single source of truth for the requests table. The
 // migration story for v2.0 is "drop + recreate"; v2.1 adds a real
 // migrations runner (golang-migrate or our own table). The schema is
-// duplicated in docs/specs §"v2 vision → Wire protocol" — keep them
+// duplicated in docs/design.md §"Signed-write wire format" — keep them
 // in lockstep.
 const schema = `
 CREATE TABLE IF NOT EXISTS requests (

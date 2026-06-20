@@ -14,8 +14,8 @@ import (
 )
 
 // HostedServerBackend speaks the v2 wire protocol against a hosted
-// signer-server (see docs/specs/2026-05-19-sshgate-design.md
-// §"v2 vision → Wire protocol"). It is the swap-point that lets a
+// signer-server (see docs/design.md §"Signed-write wire format" and
+// docs/approval-architecture.md). It is the swap-point that lets a
 // signer laptop daemon delegate approval to a centralized HTTPS
 // service instead of running a local Telegram bot.
 //

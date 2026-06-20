@@ -28,7 +28,7 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 ---
 
-## Three components
+## Components
 
 **gate** (`sshgate-gate`) — the remote-side Go binary. ~500 LOC. Lives at `~/.sshgate-gate/gate` on each server you register. OpenSSH calls it via `command="..."` forcing in `authorized_keys`, so every connection on the SSHGate key routes through it. gate classifies the command, verifies the `SSHGATE_SIG:` prefix if present, and runs or denies. The classifier is compiled in; gate stores no config.
 
@@ -46,9 +46,9 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 - Restart services, install packages, edit configs with one tap on your phone. Your laptop and your phone are the two trust domains; the agent is neither.
 - Bulk-approve a sequence of writes in one tap. Claude queues `apt update && apt install nginx && systemctl enable nginx && systemctl start nginx` as a single approval. Each command is still individually signed for audit; the "bulk" is purely the UI.
 - Register a new server with the human-only `sshgate` CLI: `sshgate pubkey` prints the key line to paste into the target's `authorized_keys`, then `sshgate add prod-db ubuntu@prod-db.example.com` installs gate, locks that pasted line down to the restricted `authorized_keys` entry, and verifies end-to-end with a probe. The agent never runs this — provisioning stays in human hands so the agent can only operate within boundaries you set.
-- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. For a guarantee that holds against a privileged rogue agent, run the signer on a separate machine (the hosted-signer tier). See [docs/decisions/2026-06-18-signer-approval-architecture.md](docs/decisions/2026-06-18-signer-approval-architecture.md).
+- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. For a guarantee that holds against a privileged rogue agent, run the signer on a separate machine (the hosted-signer tier). See [docs/approval-architecture.md](docs/approval-architecture.md).
 
-**Approval architecture (two tiers):** see [docs/decisions/2026-06-18-signer-approval-architecture.md](docs/decisions/2026-06-18-signer-approval-architecture.md).
+**Approval architecture (two tiers):** see [docs/approval-architecture.md](docs/approval-architecture.md).
 
 ---
 
@@ -68,7 +68,7 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 SSHGate is a Claude Code plugin. Anthropic-marketplace publication is on the v1.x roadmap; until then, install from a local clone.
 
-> **Launch Claude Code normally with `claude`.** SSHGate does NOT require `--dangerously-load-development-channels`. That flag is for plugins (like c3) that push notifications INTO Claude's context. SSHGate only uses standard MCP tool calls; its approvals flow OUT to your phone via Telegram, not into the conversation.
+> **Launch Claude Code normally with `claude`.** SSHGate does NOT require `--dangerously-load-development-channels`. That flag is for plugins that stream channel notifications INTO Claude's context. SSHGate only uses standard MCP tool calls; its approvals flow OUT to your phone via Telegram, not into the conversation.
 
 **The 30-second install.** In any Claude Code session, paste:
 
@@ -82,26 +82,9 @@ The agent clones the repo, builds the binaries onto your `$PATH`, and walks you 
 
 You'll be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only). The whole flow is ~2 minutes for Tier 1, ~10 minutes for Tier 2.
 
-**Manual install.** Clone the repo, build the binaries onto your `$PATH`, then add the plugin:
-
-```
-git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate
-cd ~/src/SSHGate && make install-local      # sshgate-mcp + sshgate-signer-telegram -> ~/go/bin; gate -> ~/.config/sshgate/bin
-# persist ~/go/bin to your LOGIN profile, then relaunch Claude Code from a PATH-correct shell:
-echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zprofile   # zsh; use ~/.bash_profile for bash
-/plugin marketplace add ~/src/SSHGate
-/plugin install sshgate@sshgate
-# now QUIT and RELAUNCH Claude Code — not /reload-plugins (see below)
-/sshgate:setup
-```
-
-(`make install-local` is required because Claude Code's `/plugin install` copies only the plugin subtree into its cache — not `src/`, `Makefile`, or `bin/` — so the MCP binary must be on your `$PATH`, not under the cache. Persist `~/go/bin` to your LOGIN profile — `~/.zprofile`/`~/.bash_profile`/`~/.zshenv`, not just `~/.zshrc`/`~/.bashrc` — because Claude Code spawns plugin MCP servers with its launch-time env, so a `command -v` pass in the terminal alone won't get `~/go/bin` to the spawned server.)
-
-After `/plugin install`, **fully quit and relaunch Claude Code** — this is unconditional, not a PATH edge-case. `/reload-plugins` activates the slash commands and skills, but the new plugin's stdio MCP server (`sshgate-mcp`) only spawns on a fresh Claude Code start. Once relaunched, run `/mcp` and confirm an `sshgate` server appears connected before running `/sshgate:setup`; if it doesn't, relaunch again, and if still missing run `sshgate-mcp </dev/null` in a shell to read the startup error.
+**Manual install.** Clone the repo, run `make install-local` to put the binaries on your `$PATH`, persist `~/go/bin` to your LOGIN profile, add the plugin (`/plugin marketplace add <clone>` then `/plugin install sshgate@sshgate`), **fully quit and relaunch Claude Code** (not `/reload-plugins` — the stdio MCP server only spawns on a fresh start), confirm `/mcp` lists `sshgate` connected, then run `/sshgate:setup`. The canonical step-by-step — with the exact PATH/relaunch sequence and copy-paste shell blocks for each tier — lives in one place: [`docs/install-step-by-step.md`](docs/install-step-by-step.md).
 
 `/sshgate:setup` walks you through Tier 1 first (read-only), and offers the Tier 2 upgrade in the same flow when you're ready. It probes on-disk state on every run, so re-running it is safe.
-
-Full step-by-step (for users without Claude Code, or anyone who wants to read what `/sshgate:setup` does under the hood): [`docs/install-step-by-step.md`](docs/install-step-by-step.md).
 
 Requirements: Go 1.25+; Linux with systemd (Tier 2 only — Tier 1 needs no systemd), sudo (Tier 2 only), a Telegram account (Tier 2 only). Remote servers must be reachable over SSH and run Linux.
 
@@ -165,19 +148,18 @@ Tap approve. All four run in order. If any fails, the rest stop.
 
 ## Status
 
-v1 + v1.1 shipped. Three audit gates clean (code review, PII, security), plus a Docker-backed integration suite. All four phases of the v1 plan landed: cryptographic loop, real Telegram approval with bulk, auto-setup of new servers, the polish layer (list/status/revoke + skill + slash commands).
+The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`) are shipped. Both write tiers work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction on reads is live. The test gate is clean (race-enabled unit suite plus a Docker-backed integration suite).
 
-v2 scaffold is wired but not deployable. The hosted `sshgate-signer-server` exists as an HTTP service with SQLite state and a swap-point client backend; the signer daemon can already route through it via one config change. What's missing for v2 to be usable: WebAuthn passkey + TOTP auth on the web UI, a web UI at all, and multi-operator approval logic. Tracked in `src/signer-server/README.md`.
+The hosted Tier-3 signer (a separate machine the agent cannot reach, with WebAuthn/TOTP web auth and multi-operator approval) is deferred. The backend is scaffolded in `src/signer-server/`; what remains is the web UI, the Telegram channel on the hosted signer, and deployment.
 
-- Design spec: [`docs/specs/2026-05-19-sshgate-design.md`](docs/specs/2026-05-19-sshgate-design.md)
-- Implementation plan: [`docs/plans/2026-05-19-sshgate-v1-implementation.md`](docs/plans/2026-05-19-sshgate-v1-implementation.md)
-- Morning review / decision log: [`docs/decisions/MORNING-REVIEW-2026-05-19.md`](docs/decisions/MORNING-REVIEW-2026-05-19.md)
+- Architecture and threat model: [`docs/design.md`](docs/design.md)
+- Roadmap and deferred work: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 
 ---
 
 ## Architecture
 
-Full diagram, trust-domain breakdown, wire protocol, and threat model: [`docs/specs/2026-05-19-sshgate-design.md`](docs/specs/2026-05-19-sshgate-design.md).
+Full diagram, trust-domain breakdown, wire protocol, and threat model: [`docs/design.md`](docs/design.md).
 
 Short version: three trust domains — your user (runs Claude + the MCP, holds the SSH client key), the `sshgatesigner` user (runs signer-telegram, holds the master signing key + bot token), and Telegram (authenticates your phone). Each remote server runs gate as the only thing the SSHGate SSH key can invoke, enforced by OpenSSH's `command=` forcing. Reads pass; writes need a fresh Ed25519 signature from signer-telegram, which signer-telegram only produces after a verified phone tap.
 

@@ -1,6 +1,6 @@
-# SSHGate output redactor — unified architecture — 2026-05-19
+# SSHGate output redactor — unified architecture
 
-> Supersedes `secrets-redaction-proposal-2026-05-19.md`. Integrates findings from `secrets-redaction-research-2026-05-19.md`. Operator's locked-in design decisions applied 2026-05-19.
+> Integrates findings from [`secrets-redaction-research.md`](secrets-redaction-research.md). This is the durable design reference for the gate-side output redactor.
 
 ## Summary
 
@@ -42,7 +42,7 @@ The research synthesised four industry-consensus mechanisms. SSHGate continues t
 
 ### Where it lives
 
-**Inside the gate binary on the remote host**, between the child process's stdout/stderr pipes and the SSH stream back to the MCP. Trust concentrates at the gate boundary — the MCP runs as user `karthi` on the laptop and is bypassable by any alternate SSH client; the gate is the only place bytes physically exit Claude's reach.
+**Inside the gate binary on the remote host**, between the child process's stdout/stderr pipes and the SSH stream back to the MCP. Trust concentrates at the gate boundary — the MCP runs as the operator's user on the laptop and is bypassable by any alternate SSH client; the gate is the only place bytes physically exit Claude's reach.
 
 Integration point: `src/gate/executor.go` lines 39–40 (`c.Stdout = os.Stdout; c.Stderr = os.Stderr`) become `c.Stdout = redact.NewWriter(os.Stdout, sessionKey, ruleset)` and similarly for stderr. `src/gate/cmd/sshgate-gate/main.go` plumbs the per-process session key (32 random bytes from `crypto/rand` at startup, never persisted) and the loaded ruleset into the executor. Because OpenSSH spawns a fresh `gate` process per command-with-forced-command, "per-process" is precisely "per-session" — no daemon state to manage, no cross-command key reuse.
 
@@ -325,7 +325,7 @@ A signed admin command. The gate iterates the redactlist + unredactlist, finds e
 
 ### At install time
 
-`/sshgate:add <alias> <user@host>` does the existing setup, then:
+Provisioning a host with the `sshgate` CLI (`sshgate add <alias> <user@host>`) does the existing setup, then:
 
 1. Runs `gate --service-probe` (read-only, classified as read by `classify`).
 2. Shows the detected services + mode selector:
@@ -366,7 +366,7 @@ A signed admin command. The gate iterates the redactlist + unredactlist, finds e
 
 ### Adding a new positive pattern (more redaction)
 
-1. Agent (or Karthi) drafts a regex.
+1. Agent (or the operator) drafts a regex.
 2. MCP issues `sshgate.add_redact_pattern(server, pattern)` → wraps as **unsigned** `SSHGATE_CMD::{"cmd":"redact.add","args":{"kind":"pattern","value":"..."}}`.
 3. Gate runs the 6-step auto-validation pipeline.
 4. On pass: gate appends the entry with full provenance metadata to `redactlist.append-only` and returns success.
@@ -378,7 +378,7 @@ Note: `redact.add` is **unsigned** because more redaction is safe. No Telegram t
 
 1. Agent encounters `[SSHGATE_REDACTED key=...]` on a value the operator confirms is benign.
 2. MCP issues `sshgate.add_unredact_pattern(server, pattern|anchor|file|unmask)` → wraps as **signed** `SSHGATE_CMD:<sig>:{"cmd":"unredact.add","args":{...}}`.
-3. Karthi gets a Telegram DM:
+3. The operator gets a Telegram DM:
 
    ```
    Unredact (reveal) on prod-db?
@@ -422,7 +422,7 @@ Note: `redact.add` is **unsigned** because more redaction is safe. No Telegram t
 **Explicitly out-of-scope**:
 
 1. **Malicious gate binary.** Same trust boundary as signed-write verification.
-2. **Compromised MCP / laptop / Karthi.** The signer key is uncompromised by assumption.
+2. **Compromised MCP / laptop / operator.** The signer key is uncompromised by assumption.
 3. **Side-channel exfiltration via timing or output structure.** A 4096-byte response → PEM-RSA-2048 length inference. Not defended.
 4. **Cross-session correlation via the redacted output text.** 32-bit HMAC collides at scale. Intentional.
 5. **A truly hostile LLM that crafts evasions.** Bypass is structurally possible. The honesty banner says so.
@@ -507,7 +507,7 @@ LOC ~400 + ~500 test.
 
 ### R6 — First-run UX (service probe + mode selection + honesty banner)
 
-Files: MCP-side `/sshgate:add` flow + signer-side bulk-approval UI.
+Files: MCP-side provisioning flow + signer-side bulk-approval UI.
 
 LOC ~280 + ~280 test.
 

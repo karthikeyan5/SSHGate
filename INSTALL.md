@@ -21,7 +21,8 @@
 > failure. Don't paraphrase commands — run them exactly. Every step is
 > idempotent (safe to re-run).
 
-> **Launch flag — NOT required.** Unlike c3, SSHGate does NOT need
+> **Launch flag — NOT required.** Unlike plugins that stream channel
+> notifications into the conversation, SSHGate does NOT need
 > `--dangerously-load-development-channels`. SSHGate is a regular MCP plugin
 > that exposes tool calls; approvals flow OUT to the user's phone via
 > Telegram, never INTO the Claude conversation. Plain `claude` works.
@@ -48,7 +49,7 @@ machine this is a safety rail, not a hard wall — an agent that can escalate
 privileges on the host (e.g. has `sudo`) could read the signing key directly
 and bypass approval. For a guarantee that holds against a privileged rogue
 agent, run the signer on a separate machine (the hosted-signer tier). See
-`docs/decisions/2026-06-18-signer-approval-architecture.md`. The
+`docs/approval-architecture.md`. The
 cryptographic gate is enforced on each remote server independently.
 
 ### What we're about to set up
@@ -307,10 +308,11 @@ never installed.
 
 > "Installation complete.
 >
-> **No special launch flag needed** — plain `claude` is fine. (Unlike c3,
-> SSHGate doesn't push channel notifications into the conversation; all
-> tool I/O is normal MCP request/response, and approvals flow to your
-> phone via Telegram.)
+> **No special launch flag needed** — plain `claude` is fine. (Unlike
+> plugins that stream channel notifications into the conversation,
+> SSHGate doesn't push anything into the conversation; all tool I/O is
+> normal MCP request/response, and approvals flow to your phone via
+> Telegram.)
 >
 > Add a server — this is a human-only CLI step (I, the agent, can't do it; provisioning is deliberately off my tool surface):
 >

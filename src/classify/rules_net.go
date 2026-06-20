@@ -25,7 +25,7 @@ func curlRule(args []string) Kind {
 			// `-K FILE` reads curl directives from FILE; that file can
 			// specify `--output FILE`, `--upload-file`, `-X POST`, etc.
 			// The config file is opaque to us. Cited as MAJOR-5 in
-			// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+			// docs/security-readonly-bypass.md.
 			return KindWrite
 		case "-o", "--output":
 			// `-o FILE` writes to disk; `-o -` is stdout (still read).

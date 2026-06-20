@@ -2,7 +2,7 @@
 // rule sets into the single slice the gate binary compiles in.
 //
 // Per the v1.2 architecture (locked in
-// docs/audits/secrets-redaction-architecture-2026-05-19.md
+// docs/redaction-architecture.md
 // §"Rule library — vendored, not imported"), the two source dirs
 // (`gitleaks/` and `sshgate/`) live side-by-side and a generator
 // step emits the combined file the gate consumes. R1 ships the

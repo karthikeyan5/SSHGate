@@ -1,13 +1,12 @@
-# Security research — read-only gate bypass landscape — 2026-05-19
+# Security research — read-only gate bypass landscape
 
-**Researcher:** Claude Opus 4.7 (research-only; no code changed)
-**Purpose:** Feed a follow-up SSHGate v1 security audit. Survey the industry pattern of "let SSH through but only execute reads", catalog the bypass categories the pattern has historically failed under, then cross-reference each against SSHGate's `classify.Classify` + gate dispatch.
+A durable reference surveying the industry pattern of "let SSH through but only execute reads", cataloguing the bypass categories the pattern has historically failed under, then cross-referencing each against SSHGate's `classify.Classify` + gate dispatch.
 
 ## Summary
 
 - **Tools surveyed:** 5 top + 5 brief notes (rbash/rzsh, scponly, Cursor "Agent SSH", Hoop.dev session brokers, Sandfly).
 - **SSHGate-applicable findings: 2 BLOCKER, 5 MAJOR, 6 MINOR, 4 NIT.**
-- **Overall verdict:** SSHGate's classifier is in roughly the same shape as lshell / OpenClaw v1 — it gets the "obvious" shell metacharacters right (subst, redirect, pipe), but the read-side surface has at least two **direct, no-clever-shell-tricks** vehicles to arbitrary code execution (sed `e` flag, find `-fprintf`/`-fprint`), plus environment-variable smuggling that GNU long-option abbreviation will let through. None of these require Karthi to mistype. Two of them survive even after the v1.1 Task B tightening. **Not safe to publish v1 against a hostile-LLM threat model without closing the BLOCKERs.** Safe enough for personal use today *iff* Karthi accepts that an LLM that figures out `sed e` or `find -fprintf` has full RCE despite the gate.
+- **Overall verdict:** SSHGate's classifier is in roughly the same shape as lshell / OpenClaw v1 — it gets the "obvious" shell metacharacters right (subst, redirect, pipe), but the read-side surface has at least two **direct, no-clever-shell-tricks** vehicles to arbitrary code execution (sed `e` flag, find `-fprintf`/`-fprint`), plus environment-variable smuggling that GNU long-option abbreviation will let through. None of these require the operator to mistype. Two of them survive even after the v1.1 Task B tightening. **Not safe to publish v1 against a hostile-LLM threat model without closing the BLOCKERs.** Safe enough for personal use today *iff* the operator accepts that an LLM that figures out `sed e` or `find -fprintf` has full RCE despite the gate.
 
 The single most useful insight from the OpenClaw arxiv paper [3, 4]: "The exec allowlist was designed as a string-matching system operating on static representations of command text, while the actual security boundary requires reasoning about command **semantics** — how the shell will interpret the string at runtime, what executable the invocation will actually dispatch to, and what the effective set of active options will be after GNU abbreviation expansion." SSHGate's classifier sits exactly in that gap.
 
@@ -66,7 +65,7 @@ The single most useful insight from the OpenClaw arxiv paper [3, 4]: "The exec a
 - **Known bypass categories / CVEs:**
   1. **CVE-2025-49825 (CVSS 9.8)** — full SSH authentication bypass against OpenSSH-integration and Git proxy modes. Patched June 2025. Demonstrates: even a heavily-audited, security-focused vendor ships a complete auth-bypass in the *boring layer* (signature verification / state machine).
   2. **Session-recording bypass via RemoteCommand / exec mode** — Boundary has the same caveat: command-exec sessions don't get full session-recording asciicasts. [Documented as design limitation]
-- **Lessons for SSHGate:** (a) Even mature audited code ships pre-auth bypasses — SSHGate's signature-verification path (`src/gate/verify.go`) deserves extra fuzzing; (b) recording/visibility is a separate axis from gating — Karthi's Telegram approvals provide the audit log SSHGate has no other source of truth for.
+- **Lessons for SSHGate:** (a) Even mature audited code ships pre-auth bypasses — SSHGate's signature-verification path (`src/gate/verify.go`) deserves extra fuzzing; (b) recording/visibility is a separate axis from gating — the operator's Telegram approvals provide the audit log SSHGate has no other source of truth for.
 
 ### Brief notes on other relevant tools
 - **rbash / rzsh** — `bash --restricted` and zsh equivalent. Bypassable via every "allowed binary's internal shell escape" trick; well-known to be a porous defense. Used historically by ISPs. [8]
@@ -214,7 +213,7 @@ This is the highest-yield bypass class — every entry below is a direct, no-cle
 - **Status:** **VULNERABLE — MAJOR.** Per OpenClaw [3, 4]: GNU getopt accepts `--in` for `--in-place`. sedRule (classifier.go:407-417) checks exact strings `-i`, `--in-place`, and `--in-place=` prefix. **`sed --in-pl 's/x/y/g' file`** — `--in-pl` is an unambiguous prefix of `--in-place`. GNU sed accepts it. classifier sees no match for `-i*` family. → READ. → file mutated. **BLOCKER-adjacent**, calling MAJOR because the win is "mutate one file via sed" not "arbitrary RCE." Combined with B4/B10a it's BLOCKER.
 
 ### B22 — Signature payload re-entry
-- **Status:** **COVERED.** Audit S7 (security-audit-2026-05-19.md) verified that the trailing-cmd in the wire format never reaches execution; `payload.Cmd` is the only source. **COVERED.**
+- **Status:** **COVERED.** The follow-up security audit verified that the trailing-cmd in the wire format never reaches execution; `payload.Cmd` is the only source. **COVERED.**
 
 ### B23 — Stdin smuggling
 - Gate forwards `os.Stdin` to /bin/sh (executor.go:41). If the client sends a here-string via `ssh host 'cat' <<< 'data'`, the data arrives on cat's stdin. Cat prints it. No write. **COVERED** for cat-class commands.
@@ -285,7 +284,7 @@ I'm classifying this BLOCKER because the exploit string is one-line, no chaining
 ### MINOR-1 — `no-pty` not explicitly documented in authorized_keys writer
 - **File:line:** `src/mcp/tools/add_server.go:284-294` (per existing audit S8).
 - **Exploit:** Without `no-pty`, every classified-read pager (`less`, `more`, `journalctl`, `git log`, `systemctl status`) gains its interactive escape (`!sh`, `v`-to-editor). With `no-pty`, those are short-circuited.
-- **Fix sketch:** Add `no-pty` to the canonical authorized_keys line. Verify by reading the file. (I haven't loaded it in this research; flagging for the auditor.)
+- **Fix sketch:** Add `no-pty` to the canonical authorized_keys line. Verify by reading the file; flagging for the auditor.
 
 ### MINOR-2 — Read-side `find /tmp/* -fprint*` write categories not in corpus
 - **File:line:** `tests/testdata/classifier-corpus.txt`.
@@ -315,8 +314,8 @@ I'm classifying this BLOCKER because the exploit string is one-line, no chaining
 ## Open research questions
 
 1. **Does the gate's `/bin/sh` ever symlink to bash?** On Debian/Ubuntu it's dash; on RHEL it's bash. Bash in `sh` mode honors `ENV=$file` which adds another RCE-via-env vector (covered by BLOCKER-3's fix). Confirm on the install target distro mix.
-2. **Does sshd `AcceptEnv` default block all client env?** Default is empty (block); but Karthi's install script doesn't explicitly set it. Verify by reading the install scripts.
-3. **`no-pty` audit**: I did not load `src/mcp/tools/add_server.go` in this research. The follow-up auditor should verify the canonical `command="..."` line includes `no-pty` and reject any add_server flow that writes a line without it. MINOR-1 hinges on this.
+2. **Does sshd `AcceptEnv` default block all client env?** Default is empty (block); but the install script doesn't explicitly set it. Verify by reading the install scripts.
+3. **`no-pty` audit**: the follow-up auditor should verify the canonical `command="..."` line in `src/mcp/tools/add_server.go` includes `no-pty` and reject any provisioning flow that writes a line without it. MINOR-1 hinges on this.
 4. **`sigwire` payload size limits / canonical JSON re-marshaling determinism.** Out-of-scope here but: `json.Marshal(payload)` (verify.go:42) round-trips through Go's encoder. If a future Go version changes encoder behavior (e.g. omitempty handling, map ordering, escape policy), signatures stop verifying. This is unrelated to this research's classifier-bypass scope but worth raising.
 5. **Are there other Linux tools in the allowlist with an "exec on read" hidden feature that I haven't caught?** Candidates to audit: `wc -L --files0-from=...`, `du --files0-from=...`, `find ... -newer`, `dig +sigchase` (DNS exec hooks), `lsof` (none known). The exhaustive sweep needs a per-binary read of GTFOBins + manpage.
 6. **Carriage return + line-continuation inside SSH_ORIGINAL_COMMAND**: did not exhaustively test what happens when the classified line ends with `\` and continues on the next "line" (sshd typically joins to one line, but `tr` and quoting can re-introduce). OpenClaw's line-continuation CVE [3, 4] suggests this surface is non-empty; corpus needs coverage.

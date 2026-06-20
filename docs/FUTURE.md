@@ -1,8 +1,8 @@
-# SSHGate — future work and deferred features
+# SSHGate — deferred directions and honest limitations
 
-Status snapshot at 2026-05-19. Updated as features land or new deferrals are accepted.
+This document catalogues deferred architectural directions and the honest limitations of the shipped surface, so contributors don't have to re-discover them by reading every reference doc. It is the durable "what we chose not to do, and why" companion to the roadmap.
 
-This document is the single source of truth for "what's not in this release and when might it land." Operator-facing limitations are catalogued here so contributors don't have to re-discover them by reading every audit and every spec.
+For the active, sequenced, priority-ordered work, see [`ROADMAP.md`](ROADMAP.md) — that is the single canonical list of what's being built next. This file does not re-list roadmap items; it records the deferred design space and the limitations the operator should know about.
 
 ## Architectural directions (planned but unscheduled)
 
@@ -31,22 +31,17 @@ This document is the single source of truth for "what's not in this release and 
 - **Estimated scope:** medium. Tokenizer-library dependency (cl100k_base, several MB embedded) is the cost in our hot path. Per-token wall-clock measurement would need to confirm it does not blow the per-chunk budget.
 - **Open questions:** is the tokenizer dependency acceptable for a single statically-linked binary deployed to every remote? (Probably yes; cl100k_base data is ~1.5 MB.)
 
-### v2 hosted velsigner-server (WebAuthn + TOTP + Web UI)
+### v2 hosted sshgate-signer-server (WebAuthn + TOTP + Web UI)
 - **Why:** v1 ships Telegram-bot-as-signer; v2 vision is a self-hosted HTTP signer service so the approval path isn't tied to a single chat platform. Lets operators bring their own auth (WebAuthn passkey + TOTP), see history in a browser, and federate across multiple operators.
 - **Status:** scaffolded in `src/signer-server/` from v1 cascade; full implementation deferred indefinitely.
 - **Estimated scope:** large. HTTP API (POST /v1/sign, GET /v1/poll, GET /v1/audit); Postgres or SQLite state; WebAuthn + TOTP libs; minimal static-HTML + htmx UI; deploy script with VPS setup notes; `HostedServerBackend` implementation in `signer` so the swap is one line.
-- **Trigger condition:** request from a second operator (or Karthi's own use of two signing devices).
-- See the decided two-tier approval architecture: [2026-06-18-signer-approval-architecture.md](decisions/2026-06-18-signer-approval-architecture.md).
+- **Trigger condition:** request from a second operator (or the maintainer's own use of two signing devices).
+- See the decided two-tier approval architecture: [approval-architecture.md](approval-architecture.md).
 
 ### macOS native install (launchd plist)
 - **Why:** SSHGate's installer is Linux-systemd-only today. macOS operators can run the MCP and signer, but the install script needs launchd plist generation for the signer service.
 - **Status:** deferred to v1.1 cascade or v1.2.1+.
 - **Estimated scope:** small. Mirror `scripts/install.sh` with `~/Library/LaunchAgents/` + `launchctl bootstrap`. No code changes to the signer or MCP — the gate binary stays Linux-only since remote hosts are Linux.
-
-### In-place read-only → signed-write upgrade (roadmap #17)
-- **Why:** provisioning moved to the human-only `sshgate` CLI, and the SSHGate key on a registered host is already locked to the forced command. There is no in-place "promote a tier-1 server to tier-2" path yet. Today the operator must `/sshgate:revoke <alias>` (which keeps its Telegram approval) and re-provision with `sshgate add <alias> <user@host>` (no `--read-only`). That works but is heavier than necessary.
-- **Status:** open design item, tracked as **#17** (see [`decisions/2026-06-15-open-items-and-roadmap.md`](decisions/2026-06-15-open-items-and-roadmap.md)). Under the CLI model an upgrade is a re-provision (the key is already gated), so the smoother path is a dedicated `sshgate` subcommand (e.g. `sshgate upgrade <alias>`) that pushes `gate.pub` to an already-gated host idempotently without a full revoke/re-add cycle.
-- **Estimated scope:** small-medium. Reuses the existing gate-deploy + `gate.pub`-push logic; the work is the in-place codepath + CLI surface + tests.
 
 ### Cross-session HMAC-key recovery for legitimate audit
 - **Why:** per-session HMAC keys are non-persistent by design, so even legitimate audit needs (post-incident forensic correlation of redacted spans across sessions) cannot reverse-correlate. A signed admin command that derives a deterministic per-host audit key (separate from per-session) and writes audit-only logs under a master-key-only-readable path could unlock this without breaking the threat model.
@@ -77,7 +72,7 @@ This document is the single source of truth for "what's not in this release and 
 
 ## Operator-facing limitations (known and documented)
 
-These are honest limitations of the shipped v1.2 surface. The install banner names the major ones; this list is the exhaustive set.
+These are honest limitations of the redactor design. **Inline secret redaction on the read path is shipped and live** (standard-mode named-format detection, the file-mode heuristic, per-session HMAC markers). The signed *rule-management* layer described in some items below — operator-curated `redactlist`/`unredactlist` with signed envelopes, and the `redact.*` wire commands — is part of the deferred redactor architecture (see [`redaction-architecture.md`](redaction-architecture.md)), **not** a shipped MCP tool surface; the agent surface is exactly the five tools. The install banner names the major shipped-side limitations; this list is the exhaustive set across the design.
 
 1. **Detection has false-positive surface on log-shaped content.** gitleaks-class rules sit at ~46% precision on broad corpora per independent benchmarks. SSHGate's named-only `standard` mode does better but does not eliminate it. Use per-host `unmask:` and unredact entries.
 2. **Multi-line secrets can straddle buffer boundaries.** 4 KiB safe-prefix + PEM accumulator + 64 KiB ring cap. A 6 KB+ non-PEM secret (rare) could in theory split.
@@ -90,7 +85,7 @@ These are honest limitations of the shipped v1.2 surface. The install banner nam
 9. **Removing a pattern requires a signed envelope.** Intentional friction.
 10. **ReDoS is mitigated but not impossible.** Go's `regexp` is RE2 (no backreferences, no catastrophic backtracking by design). The 6-step auto-validation catches the bulk of bad regexes. A per-chunk wall-clock budget (default 50 ms) as a runtime safety net is a v1.2.1 backlog item.
 11. **The honest framing — rat race.** Redaction is defense-in-depth, not a perimeter. The model is assumed not rogue. The right long-term answer is kernel-level read enforcement (Landlock) — see above.
-12. **Read-only-gate bypass categories survive v1.2.** Per `security-research-readonly-bypass-2026-05-19.md`: `sed e` flag, `find -fprintf`, GNU long-option abbreviation, environment-variable smuggling (`LD_PRELOAD`, `IFS`), busybox/toybox multiplexer dispatch, and wrapper-binary unwrap gaps (`env`, `nice`, `nohup`, `time`, `taskset`, `chroot`, `unshare`, `setsid`) — at least four of these are present in the classifier today. Tracked separately under "Read-only gate hardening" below.
+12. **Read-only-gate bypass categories survive v1.2.** Per [`security-readonly-bypass.md`](security-readonly-bypass.md): `sed e` flag, `find -fprintf`, GNU long-option abbreviation, environment-variable smuggling (`LD_PRELOAD`, `IFS`), busybox/toybox multiplexer dispatch, and wrapper-binary unwrap gaps (`env`, `nice`, `nohup`, `time`, `taskset`, `chroot`, `unshare`, `setsid`) — at least four of these are present in the classifier today. Tracked separately under "Read-only gate hardening" below.
 13. **PTY assumption.** `authorized_keys` enforces `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`. If any deployment is missing `no-pty`, `less`/`man`/`vim` of a large file becomes interactive and `!sh` escapes the gate. Verify on every add.
 14. **No debug mode, no `--no-redact` flag, no environment override.** A signed `redact.why <key>` is the only way to learn what a marker references — and it returns only the *source* rule and provenance, never plaintext. Operators who need plaintext for forensics must use the master key path out-of-band.
 15. **Cross-session correlation is intentionally lost.** The per-session HMAC salt is rotated per `gate` process. Two markers with the same `key` in different sessions are coincidental, not correlated. 32-bit HMAC collides at scale; if cross-session correlation matters, see "Cross-session HMAC-key recovery for legitimate audit" above.
@@ -98,10 +93,10 @@ These are honest limitations of the shipped v1.2 surface. The install banner nam
 
 ## Read-only gate hardening (deferred MINORs/MAJORs from security research)
 
-Tracked from `docs/audits/security-research-readonly-bypass-2026-05-19.md`. None are in v1.2 scope; all are open as v1.2.1+ work.
+Tracked from [`security-readonly-bypass.md`](security-readonly-bypass.md). None are in v1.2 scope; all are open as v1.2.1+ work.
 
 - **`sed -e` / `awk -e` arbitrary expression execution.** sed's `e` flag is direct RCE on a read-allowlisted binary. Same for `find -fprintf` / `-fprint`. v1.2.1 work item: per-binary sub-feature classification (binary + flag → kind).
-- **GNU long-option abbreviation.** `--compress-prog` accepted when `--compress-program` denied. **Status (2026-06-03): partially closed, structurally UNSOLVED — Karthi flagged this as "needs figuring out."** `ad74ef8` added prefix-matching for the *known-dangerous* long-options (`--in*` → `--in-place`, `--rot*` → `--rotate`, etc.), so the catalogued bypasses are blocked. The open problem: an *unlisted* dangerous long-option still slips through, because the classifier doesn't model each binary's real getopt grammar. The structural fix is one of: (a) parse the full GNU getopt grammar per binary, or (b) maintain per-binary canonical-option tables and resolve any abbreviation against them. Both are non-trivial and unscheduled. Until then this stays an accepted, tracked gap (defense-in-depth, model-assumed-not-rogue framing).
+- **GNU long-option abbreviation.** `--compress-prog` accepted when `--compress-program` denied. **Status: partially closed, structurally UNSOLVED.** A prefix-matching pass added coverage for the *known-dangerous* long-options (`--in*` → `--in-place`, `--rot*` → `--rotate`, etc.), so the catalogued bypasses are blocked. The open problem: an *unlisted* dangerous long-option still slips through, because the classifier doesn't model each binary's real getopt grammar. The structural fix is one of: (a) parse the full GNU getopt grammar per binary, or (b) maintain per-binary canonical-option tables and resolve any abbreviation against them. Both are non-trivial and unscheduled. Until then this stays an accepted, tracked gap (defense-in-depth, model-assumed-not-rogue framing).
 - **Environment-variable smuggling.** `LD_PRELOAD=… cmd`, `IFS=…`, `PATH=…`, `GIT_SSH_COMMAND=…`, `PAGER=…`, `EDITOR=…` passed via `FOO=bar cmd` prefix escape argument filters.
 - **Wrapper-binary unwrap gaps.** `env`, `nice`, `nohup`, `time`, `taskset`, `chroot`, `unshare`, `setsid` strip the leading wrapper — the real command is what executes. Classifier needs to recursively unwrap.
 - **Busybox / toybox multiplexer dispatch.** `busybox sh -c '…'` allowlisted because `busybox` is "known safe". Multiplexer dispatch is direct shell access.
@@ -110,11 +105,10 @@ Tracked from `docs/audits/security-research-readonly-bypass-2026-05-19.md`. None
 ## Process improvements
 
 ### Pre-publish PII cleanup
-The Telegram user_id `12345678` is the primary PII risk. v1 audit confirmed it lives only in env-loaded config, but pre-publish needs a second sweep across `testdata/`, comments, and audit reports. The `pii-wordlist.txt` should be appended-to for any new SSHGate-project-specific terms.
+A real operator's Telegram user_id is the primary PII risk; it lives only in env-loaded config (the placeholder `12345678` is illustrative). Any pre-publish pass should re-sweep `testdata/`, comments, and reference docs for project-specific terms.
 
 ### Marketplace publishing path
-SSHGate is a Claude Code plugin and should ship to the marketplace eventually. Open work:
-- README rewrite as marketplace-facing one-pager (the current README is install-step-by-step).
+SSHGate is a Claude Code plugin and should ship to the Anthropic marketplace eventually. Open work:
 - Plugin manifest validation against the latest Claude Code plugin schema.
 - Signed-release pipeline for `bin/sshgate-gate-linux-amd64` so operators can verify the binary they're deploying.
 - Reproducible builds: pin the Go toolchain version, lock the build environment in CI, publish a build attestation alongside each release.
@@ -139,13 +133,13 @@ These are the conditions under which a deferred item gets promoted to active wor
 - **`thorough` mode** — promoted on (a) a v1.2 user reporting a missed-secret category that named-format-only doesn't catch, OR (b) audit-workflow demand (someone running SSHGate manually to scan a corpus, where over-redaction is acceptable).
 - **`verified` mode** — promoted only when (a) `thorough` is already shipped AND (b) a verified-mode use case appears (audit team wants "this AWS key — is it actually live?"). Otherwise it stays parked indefinitely; the value-per-engineering-week is low.
 - **BPE token scoring** — promoted if `thorough` ships and FPR is still too high for audit use. Otherwise parked.
-- **v2 hosted velsigner** — promoted when a second operator appears, OR Karthi wants two signing devices (phone + tablet).
+- **v2 hosted signer** — promoted when a second operator appears, OR the maintainer wants two signing devices (phone + tablet).
 - **macOS install** — promoted on first macOS operator request. Small enough to do reactively.
 - **`redact.list` UX** — promoted once a v1.2 host crosses ~50 redactlist entries and the operator says "I can't see what's in there." Cheap to ship.
-- **Read-only gate hardening** — promoted *immediately* upon any confirmed in-the-wild bypass. The MAJORs from `security-research-readonly-bypass-2026-05-19.md` are tracked separately as a hardening sprint, not as feature releases.
+- **Read-only gate hardening** — promoted *immediately* upon any confirmed in-the-wild bypass. The MAJORs from [`security-readonly-bypass.md`](security-readonly-bypass.md) are tracked separately as a hardening sprint, not as feature releases.
 
 ## How this document is maintained
 
 - When a feature lands → move its entry from "deferred" / "parked" to a footnote citing the implementing PR / task ID; eventually delete after one release cycle.
 - When a new deferral is accepted (e.g. a code review surfaces a MAJOR that won't fit the current release) → append a new section with the same `Why / Status / Estimated scope / Open questions / Trigger` structure.
-- Audit-doc references (`docs/audits/*.md`) are the authoritative source for *why* something is deferred. This file is the index; the audit is the rationale.
+- The durable reference docs in `docs/` (the architecture, security-research, and redaction references) are the authoritative source for *why* something is deferred. This file is the index; those references carry the rationale.

@@ -1,4 +1,4 @@
-# Secret-redaction research — 2026-05-19
+# Secret-redaction research
 
 Survey of the state-of-the-art for redacting secrets/keys from output streams
 before they reach a downstream consumer (an agent, an LLM, a logger). No

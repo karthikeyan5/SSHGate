@@ -1,7 +1,6 @@
-# SSHGate — approval channels and the two security tiers (2026-06-18)
+# SSHGate — approval channels and the two security tiers
 
-This is the current, decided plan for how a write gets approved. It supersedes
-the earlier "signer over c3" analysis.
+This is the current, decided plan for how a write gets approved.
 
 ## The one idea that decides everything
 

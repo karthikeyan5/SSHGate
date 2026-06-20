@@ -9,7 +9,7 @@ import (
 // release var-log, update the catalog, or generate FSS keys. GNU long
 // options accept unambiguous prefixes, so we use prefix-match against
 // each dangerous flag stem. Cited as MAJOR-2 in
-// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+// docs/security-readonly-bypass.md.
 func journalctlRule(args []string) Kind {
 	for _, a := range args {
 		if journalctlFlagIsDangerous(a) {
@@ -360,7 +360,7 @@ func gitRule(args []string) Kind {
 	// arbitrary shell command), and so on. Rather than maintain a
 	// denylist (which inevitably misses a key), classify ANY `git -c ...`
 	// invocation as WRITE. Cited as MAJOR-3 in
-	// docs/audits/security-research-readonly-bypass-2026-05-19.md.
+	// docs/security-readonly-bypass.md.
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "-c" || a == "--config-env" ||
