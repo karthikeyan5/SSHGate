@@ -124,7 +124,7 @@ type TelegramOptions struct {
 // reads as "use the default api.telegram.org", byte-for-byte today's
 // behavior. This is the production hook for routing the approval bot
 // through a maintainer-owned reverse proxy when api.telegram.org is
-// IP-blocked (mirrors c3's api_base_url). The base is validated so a typo
+// IP-blocked (an existing reverse-proxy override pattern). The base is validated so a typo
 // can never send the bot token — interpolated into the request path — to
 // a non-TLS or malformed host. The proxy must preserve Telegram's path
 // shape (<base>/bot<token>/<method> -> api.telegram.org/bot<token>/<method>).
@@ -142,8 +142,7 @@ func APIEndpointForBase(base string) (string, error) {
 // validateAPIBaseURL rejects a base URL that could leak the bot token to a
 // bad host: it must parse, carry a host, and be https:// — with the single
 // exception of http:// for an explicit localhost host (a local reverse
-// proxy). The error names only the base, never the token. Mirrors c3's
-// telegram.validateAPIBaseURL.
+// proxy). The error names only the base, never the token.
 func validateAPIBaseURL(base string) error {
 	u, err := url.Parse(base)
 	if err != nil {

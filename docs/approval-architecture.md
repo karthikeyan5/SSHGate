@@ -21,8 +21,10 @@ So SSHGate offers two tiers, and is honest about what each one buys.
 
 ## Tier 1 — same machine (convenience; best-effort)
 
-Approvals are routed through the user's **existing c3** Telegram setup. If c3
-isn't configured, the user is prompted to set up c3 and enable the route.
+Approvals are routed through an **existing same-machine Telegram channel** the
+operator already runs (a Telegram bot they already have, rather than a dedicated
+one registered just for this). If no such channel is configured, the user is
+prompted to set one up and enable the route.
 
 **Caveat shown to the user (load-bearing — not optional):**
 
@@ -33,8 +35,8 @@ isn't configured, the user is prompted to set up c3 and enable the route.
 > **naïve prompt-injection**; it does **not** stop a determined, privileged
 > rogue agent. If you need a real guarantee, use Tier 2.
 
-Tier 1 is deliberately the *easy* path: reuse c3, no dedicated bot to register,
-no separate signing infrastructure. The OS-level user separation the signer
+Tier 1 is deliberately the *easy* path: reuse an existing bot, nothing dedicated
+to register, no separate signing infrastructure. The OS-level user separation the signer
 still uses (separate Unix user, `0600` key, `ptrace_scope=1`) raises the bar
 against an *unprivileged* rogue agent, but it is not sold as a wall — because on
 one machine it isn't one.
@@ -60,27 +62,29 @@ remains is the web UI, the Telegram channel, and deployment.
 
 Both tiers share **one signer core** — the approval logic, the signed-command
 wire format, the timeout chain (`sigwire/timeouts.go`), and the audit log. What
-differs is only the **channel**: c3-Telegram for Tier 1; web UI + Telegram for
-Tier 2. This is the same channel-pluggable shape c3 itself uses.
+differs is only the **channel**: the existing-Telegram channel for Tier 1; web UI
++ Telegram for Tier 2. This is the same channel-pluggable shape the underlying
+approval transport itself uses.
 
 ## What this means for the work in flight
 
-- **Tier 1 build** is small: a c3 approval channel plus the caveat banner.
+- **Tier 1 build** is small: an existing-Telegram approval channel plus the caveat banner.
 - **Tier 2 build** is the larger, recommended investment: web UI + a Telegram
   channel on the hosted signer + deployment.
 - **The current same-machine signer** (the dedicated `@sshgate_example_bot` + the
   `tg-api.example.com` proxy stood up on 2026-06-18) is a working same-machine
   implementation. It is adequate as a *trusted-agent review UX* — good enough to
   drive the imminent server-consolidation migration, where the human simply taps
-  to approve each batch. The c3 route is the direction to adopt for Tier 1
+  to approve each batch. The existing-Telegram route is the direction to adopt for Tier 1
   afterward; it is not a blocker for the migration.
 
 ## Previously considered and rejected (kept brief on purpose)
 
 We explored keeping the same-machine signer's bot **isolated from the AI** (a
-"dedicated bot, never via c3" stance) and a detailed trade-off between
+dedicated, isolated approval bot) and a detailed trade-off between
 broker-mediated, untrusted-transport, and shared-library ways of doing that.
 That entire axis is moot on one machine: a privileged agent bypasses all of them
 by reading the key directly. So it is dropped in favour of the model above —
-**easy c3 + an honest caveat for the same machine (Tier 1); real isolation only
-by running the signer on a separate machine (Tier 2).**
+**an easy existing-Telegram channel + an honest caveat for the same machine
+(Tier 1); real isolation only by running the signer on a separate machine
+(Tier 2).**

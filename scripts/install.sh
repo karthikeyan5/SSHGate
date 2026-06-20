@@ -271,8 +271,8 @@ fi
 log "sshgate-signer-telegram is active"
 
 # Step 10: stage gate.pub into the invoking user's MCP distribution
-# path so /sshgate:add (read-write) can find it without a manual copy.
-# add_server reads ~/.config/sshgate/pubkey-distrib/gate.pub (audit B6).
+# path so `sshgate add` (read-write) can find it without a manual copy.
+# `sshgate add` reads ~/.config/sshgate/pubkey-distrib/gate.pub (audit B6).
 PUBKEY_SRC="$SIGNER_HOME/keys/gate.pub"
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "$PUBKEY_SRC" ]; then
     USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
@@ -280,7 +280,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "$PUBKEY_SRC" ]
         # Assumes the default ~/.config location; an operator who runs SSHGate
         # with a custom $XDG_CONFIG_HOME must stage gate.pub there manually
         # (sudo scrubs XDG_CONFIG_HOME, so install.sh cannot see it).
-        # add_server's read-only fallback fails safe if the path mismatches.
+        # `sshgate add`'s read-only fallback fails safe if the path mismatches.
         DISTRIB_DIR="$USER_HOME/.config/sshgate/pubkey-distrib"
         # Derive the user's real primary group — it is NOT always a
         # per-user group named after the user (that's a Debian/RedHat

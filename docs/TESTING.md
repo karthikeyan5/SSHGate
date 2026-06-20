@@ -71,7 +71,7 @@ is structurally avoided:
 | --- | --- | --- | --- |
 | Unix socket to the signer daemon | `startFakeSigner` (unix listener on `t.TempDir()/sock`) | `src/mcp/sign` | `sign/client_test.go:28` |
 | …raw-bytes control of that socket | `startRawSigner` (write fragments, no `\n`, drive EOF) | `src/mcp/sign` | `sign/rawsigner_test.go:28` |
-| `net.Dialer.DialContext("unix", …)` | `dialWithCtx` package-var override (inject `net.Conn`, e.g. `writeFailConn`) | `src/mcp/sign` | `sign/client.go:211` (prod), `sign/client_internal_test.go:56` (swap) |
+| `net.Dialer.DialContext("unix", …)` | `dialWithCtx` package-var override (inject `net.Conn`, e.g. `writeFailConn`) | `src/mcp/sign` | `sign/client.go` `var dialWithCtx` (prod), `sign/client_internal_test.go:56` (swap) |
 | Telegram Bot API (HTTPS) | `newFakeTelegram` → `httptest.Server` | `src/signer/backend` | `backend/telegram_test.go:79` |
 | OpenAI-compatible LLM (`/v1/chat/completions`) | `newFakeChat` → `httptest.Server` | `src/signer/backend` | `backend/explainer_test.go:43` |
 | Hosted v2 signer server (`/v1/sign`, `/v1/poll/<id>`) | `newFakeServerBackend` → `httptest.Server` | `src/signer/backend` | `backend/hosted_test.go:191` |
@@ -80,7 +80,7 @@ is structurally avoided:
 | Remote sshd for the gate-deploy path | `fakeBootstrapSession` via `newBootstrapSession` seam | `src/mcp/tools` | `tools/add_server_bootstrap_test.go` (fake), `tools/add_server.go` `var newBootstrapSession` (seam) |
 | `ssh-agent` unix socket | `dialAgentSock` package-var override (`net.Pipe()`) | `src/mcp/tools` | `tools/add_server.go` (`var dialAgentSock`) |
 | `ssh.ParsePrivateKey` | `parsePrivateKey` package-var override | `src/mcp/tools` | `tools/add_server.go` (`var parsePrivateKey`) |
-| Entropy / nonce RNG | `randRead` package-var (`= rand.Read`) | `src/signer` | `signer/daemon.go:297` |
+| Entropy / nonce RNG | `randRead` package-var (`= rand.Read`) | `src/signer` | `signer/daemon.go` `var randRead` |
 | Real sshd (in-process, for the ssh client pkg) | `testServer` — minimal SSH server on `127.0.0.1:0` | `src/mcp/ssh` | `ssh/client_test.go:36` |
 | MCP transport | SDK in-memory transport `mcpsdk.NewInMemoryTransports()` | `src/mcp` | `server_test.go:61` |
 | Audit log sink | `NewMemAuditLog` (os.Pipe, drained by goroutine) | `src/signer` | `signer/audit.go:75` |
@@ -95,9 +95,9 @@ is structurally avoided:
 original → assign → restore via `defer`/`t.Cleanup`). Used for narrow,
 single-call indirections:
 
-- `gateDirFn` / `homeDirFn` — `src/gate/cmd/sshgate-gate/main.go:205,209`
-- `dialWithCtx` — `src/mcp/sign/client.go:211`
-- `randRead` — `src/signer/daemon.go:297`
+- `gateDirFn` / `homeDirFn` — `src/gate/cmd/sshgate-gate/main.go` (`var gateDirFn`, `var homeDirFn`)
+- `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
+- `randRead` — `src/signer/daemon.go` (`var randRead`)
 - `dialAgentSock`, `parsePrivateKey` — `src/mcp/tools/add_server.go` (package vars)
 
 **Pattern B — interface + factory `var`.** When the thing being faked is a
@@ -123,8 +123,8 @@ an attacker who controlled the environment could point the gate at a `gate.pub`
 they own and **forge signatures** — every "signed" admin command would verify.
 So the seam exists *only* so in-package tests can point resolution at a
 `t.TempDir()` without re-exec'ing the test binary; production always uses
-`defaultGateDir` (`os.Executable()`-relative). The comment at
-`src/gate/cmd/sshgate-gate/main.go:196` documents this. Same rationale for any
+`defaultGateDir` (`os.Executable()`-relative). The comment on
+`var gateDirFn` in `src/gate/cmd/sshgate-gate/main.go` documents this. Same rationale for any
 future trust-anchor location: test seam yes, env override never.
 
 ---
@@ -198,7 +198,7 @@ remote). Tested entirely unprivileged.
 ### 4.1 The `gateDirFn` / `homeDirFn` seam
 
 `var gateDirFn = defaultGateDir` and `var homeDirFn = os.UserHomeDir`
-(`main.go:205,209`). `run_test.go` helpers `withGateDir(t, dir)` and
+(`main.go`). `run_test.go` helpers `withGateDir(t, dir)` and
 `withHomeDir(t, dir)` repoint them at a `t.TempDir()` so `run()` / `doRevoke()`
 can be exercised (incl. their exit-code mapping) without re-exec'ing the test
 binary. See §2.3 for why this is a package var, not an env var.
@@ -265,7 +265,7 @@ that is a documented environmental assumption, not a privilege requirement.)
 - Fixed clock: the test daemon sets `NowFunc: func() time.Time { return
   time.Unix(1000, 0) }`, so signed payloads have deterministic `ts` (asserted
   e.g. `payload.TS == 1000`).
-- `randRead` seam (`daemon.go:297`): `TestSignAll_NonceFailure`
+- `randRead` seam (`var randRead` in `daemon.go`): `TestSignAll_NonceFailure`
   (`daemon_internal_test.go:25`, *not* parallel — mutates a package var) swaps
   it for a reader that returns an error, exercising the nonce-failure path
   (surfaces as a `sign: nonce` error, not a panic).
@@ -328,7 +328,7 @@ atomic write (`TestFileChatStore_SaveSetsMode0600`,
   is `TestTelegram_StartFromAllowedUserCapturesChatID`, and
   `TestTelegram_WrongUserCallbackIgnored` covers approval callbacks from the
   wrong user.
-- *Credential redaction* — `sanitiseExplainerErr` (`telegram.go:609`), tested by
+- *Credential redaction* — `sanitiseExplainerErr` (`telegram.go`), tested by
   `TestSanitiseExplainerErr` (`internal_test.go:29`): errors containing bearer
   tokens or `http(s)://…` URLs collapse to `"upstream error"`, so signer-side
   credentials never reach a Telegram DM; plain messages pass through.
@@ -338,7 +338,7 @@ atomic write (`TestFileChatStore_SaveSetsMode0600`,
   (`internal_test.go:118`) — a `panicExplainer` is caught, `PanicsTotal`
   increments, and an error (not nil) is returned so rendering proceeds. The
   explainer can never take down an approval.
-- *`maskUserID`* (`telegram.go:687`), tested by `TestMaskUserID`
+- *`maskUserID`* (`telegram.go`), tested by `TestMaskUserID`
   (`internal_test.go:80`): ≤4 digits fully masked, longer IDs show first-2 +
   stars + last-2 (`12345 → 12*45`); the full id never appears verbatim.
 
@@ -359,10 +359,10 @@ the whole backend suite (the telegram-bot-api shutdown channel is benign).
   (write a partial line, no trailing `\n`, then close) to drive the client's
   `bufio.ReadBytes('\n')` EOF path deterministically
   (`TestSign_ReadSideEOF_PartialLine_ReadResponseError`).
-- `dialWithCtx` seam (`client.go:211`) lets internal tests inject a
+- `dialWithCtx` seam (`var dialWithCtx` in `client.go`) lets internal tests inject a
   `writeFailConn` etc. to exercise write-side failures with no real socket.
-- Error classification (`client.go`): `ErrUnreachable` (line 27) vs
-  `ErrSignerPermission` (line 36).
+- Error classification (`client.go`): `var ErrUnreachable` vs
+  `var ErrSignerPermission`.
   - `TestSign_UnreachableMissingSocket` — missing socket file →
     `errors.Is(err, sign.ErrUnreachable)`.
   - `TestSign_PermissionDenied_MapsToSignerPermission`

@@ -128,7 +128,7 @@ For each row: **status** = COVERED / VULNERABLE / PARTIAL, with the citation in 
 - `<>` — file open for read+write. classifier walks bytes: at `<`, next byte must be `(` for it to trip substitution; `>` follows but `<` already incremented past. Then `>` triggers `hasTopLevelRedirect` → write. **COVERED.**
 
 ### B9 — Editor / pager interactive escapes (`less !sh`, `vim :!sh`, `man → less !sh`, `git log → less !sh`, `journalctl → less !sh`)
-- **Status:** **BLOCKER if PTY is enabled, MITIGATED if `no-pty` is enforced.** SSHGate's `add_server` writes `command="...",no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (audit S8, src/mcp/tools/add_server.go:284-294). **The audit does not mention `no-pty`.** Without `no-pty`, every one of these works against the v1 gate:
+- **Status:** **BLOCKER if PTY is enabled, MITIGATED if `no-pty` is enforced.** SSHGate's `sshgate add` provisioning writes `command="...",no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (audit S8, `commandForcingFmt` in src/mcp/tools/authorizedkeys.go). **The audit does not mention `no-pty`.** Without `no-pty`, every one of these works against the v1 gate:
   - `less /var/log/syslog` — classifier returns READ → shell runs less. On a PTY, type `v` → opens `$EDITOR` (default vim) → `:!rm /tmp/x` → RCE. Or `!sh` directly.
   - `git log` — same path, `git` pipes to less.
   - `journalctl -u nginx` — same.
@@ -282,7 +282,7 @@ I'm classifying this BLOCKER because the exploit string is one-line, no chaining
 - **Fix sketch:** Add `-K`, `--config` to curlRule; require operand to be `-` (stdin) only, else write.
 
 ### MINOR-1 — `no-pty` not explicitly documented in authorized_keys writer
-- **File:line:** `src/mcp/tools/add_server.go:284-294` (per existing audit S8).
+- **File:** `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go` (per existing audit S8).
 - **Exploit:** Without `no-pty`, every classified-read pager (`less`, `more`, `journalctl`, `git log`, `systemctl status`) gains its interactive escape (`!sh`, `v`-to-editor). With `no-pty`, those are short-circuited.
 - **Fix sketch:** Add `no-pty` to the canonical authorized_keys line. Verify by reading the file; flagging for the auditor.
 
