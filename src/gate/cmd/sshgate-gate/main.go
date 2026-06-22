@@ -39,6 +39,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/hostkey"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -130,7 +131,21 @@ func run() int {
 
 	innerCmd := raw
 	if signed {
-		ic, err := gate.VerifySigned(raw, pubkey, time.Now())
+		// Self-derive THIS gate's host-key fingerprints so VerifySigned can
+		// enforce the per-server binding: a signature approved for server X
+		// must name X's pinned host key, so it cannot be replayed on server Y.
+		// Reading the world-readable static /etc/ssh/ssh_host_*.pub files at
+		// process start is identity, not decision state — the gate stays
+		// stateless. An empty set fails closed inside VerifySigned
+		// (ErrHostMismatch), which is the correct outcome when the gate cannot
+		// identify itself; we surface a clearer error here when the glob itself
+		// errored.
+		selfHostFPs, herr := hostKeyFPsFn()
+		if herr != nil {
+			logf("derive host-key fingerprints: %v", herr)
+			return exitSoftware
+		}
+		ic, err := gate.VerifySigned(raw, pubkey, time.Now(), selfHostFPs)
 		if err != nil {
 			logf("%v", err)
 			return exitDataErr
@@ -215,6 +230,15 @@ var gateDirFn = defaultGateDir
 // homeDirFn resolves the operator's home directory. Same test-seam
 // rationale as gateDirFn; defaults to os.UserHomeDir.
 var homeDirFn = os.UserHomeDir
+
+// hostKeyFPsFn returns THIS gate's own SSH host-key fingerprints, used to
+// enforce the per-server host-key binding on the signed-write path. It is a
+// package-level var so in-package tests can inject a controlled set without an
+// /etc/ssh on the test box; production reads the real host keys from
+// hostkey.DefaultHostKeyGlob (/etc/ssh/ssh_host_*.pub). Like gateDirFn this is
+// deliberately NOT driven by any environment variable: letting the environment
+// redirect which host keys the gate trusts would be a binding-forgery surface.
+var hostKeyFPsFn = hostkey.LoadHostFingerprints
 
 // defaultGateDir returns the directory holding the gate binary and the
 // binary's own absolute path, both derived from os.Executable().

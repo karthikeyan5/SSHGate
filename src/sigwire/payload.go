@@ -27,6 +27,19 @@ type SigPayload struct {
 	TS    int64  `json:"ts"`
 	Exp   int64  `json:"exp"`
 	Nonce string `json:"nonce"`
+	// Host binds this signed payload to ONE target server's SSH host-key
+	// fingerprint (OpenSSH "SHA256:..." form). The signer copies it in from
+	// the MCP's sign request — which reads it from the TRUSTED registry, not
+	// from any agent parameter — so an "approve on server X" signature is
+	// cryptographically un-replayable on server Y: the gate self-derives its
+	// own host-key fingerprints and rejects any signed write whose Host does
+	// not match one of them (ErrHostMismatch).
+	//
+	// omitempty keeps a Host-less payload byte-identical to the pre-binding
+	// wire format (so the golden test holds and an older verifier still
+	// accepts legacy reads). On the SIGNED-WRITE path, however, an empty Host
+	// is rejected fail-closed by the gate — binding is mandatory there.
+	Host string `json:"host,omitempty"`
 }
 
 // sigEncoding is the base64 alphabet used for both halves of the wire

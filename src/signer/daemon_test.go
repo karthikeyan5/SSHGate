@@ -129,6 +129,58 @@ func TestDaemon_ApprovePath_SignaturesVerify(t *testing.T) {
 	}
 }
 
+// TestDaemon_SignsHostBinding pins that the daemon copies each command's
+// host-key fingerprint from the request into the SIGNED payload's Host field.
+// The MCP reads that fingerprint from its trusted registry (never an agent
+// parameter) and the gate enforces it, so this binding is what makes an
+// "approve on server X" signature un-replayable on server Y. A regression that
+// dropped the field would silently un-bind every signature.
+func TestDaemon_SignsHostBinding(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, pub, audit, _ := newDaemon(t, mock)
+	defer audit.Close()
+
+	const wantHost = "SHA256:prodServerHostKeyFingerprintAAAAAAAAAAAAAAAA"
+	req := `{"kind":"sign","request_id":"r_h1","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60,"host":"` + wantHost + `"}]}`
+	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
+	mock.Approve("r_h1", "karthi")
+
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest: %v", err)
+	}
+
+	var resp struct {
+		Status     string `json:"status"`
+		Signatures []struct {
+			Cmd string `json:"cmd"`
+			Sig string `json:"sig"`
+		} `json:"signatures"`
+	}
+	if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%q", err, conn.out.String())
+	}
+	if resp.Status != "approved" {
+		t.Fatalf("Status = %q; want approved", resp.Status)
+	}
+	if len(resp.Signatures) != 1 {
+		t.Fatalf("got %d sigs; want 1", len(resp.Signatures))
+	}
+	sig, payload, err := sigwire.DecodeSigned(resp.Signatures[0].Sig)
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+	if payload.Host != wantHost {
+		t.Errorf("payload.Host = %q; want %q (daemon must sign the request's host binding in)", payload.Host, wantHost)
+	}
+	// The binding is part of the SIGNED bytes, not just appended: re-marshal
+	// and verify against the public key.
+	signedBytes, _ := json.Marshal(payload)
+	if !ed25519.Verify(pub, signedBytes, sig) {
+		t.Errorf("signature does not verify over the host-bound payload")
+	}
+}
+
 func TestDaemon_DenyPath(t *testing.T) {
 	t.Parallel()
 	mock := backend.NewMockBackend()

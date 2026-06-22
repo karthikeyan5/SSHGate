@@ -27,4 +27,12 @@ var (
 	// ErrEmptyCmd means the signed payload's cmd field was empty after
 	// decoding. gate refuses to execute a zero-length command.
 	ErrEmptyCmd = errors.New("signed payload has empty cmd")
+
+	// ErrHostMismatch means the signed payload's host-key binding (the
+	// payload's host fingerprint) did not match any of THIS gate's own SSH
+	// host-key fingerprints — or the payload carried no binding at all. It
+	// makes a signature approved for one server un-replayable on another, and
+	// is enforced fail-closed: an empty binding, or an empty set of gate host
+	// keys, is a mismatch.
+	ErrHostMismatch = errors.New("signed payload host-key binding does not match this gate")
 )

@@ -45,9 +45,16 @@ type signRequest struct {
 }
 
 type signRequestCmd struct {
-	Server  string `json:"server"`
-	Cmd     string `json:"cmd"`
-	TTLSec  int64  `json:"ttl_seconds"`
+	Server string `json:"server"`
+	Cmd    string `json:"cmd"`
+	TTLSec int64  `json:"ttl_seconds"`
+	// Host is the target server's SSH host-key fingerprint
+	// ("SHA256:..."), supplied by the MCP from its TRUSTED registry (never
+	// an agent parameter). The daemon copies it verbatim into the signed
+	// payload's Host field so the gate can enforce the per-server binding.
+	// omitempty keeps the wire shape unchanged for any legacy caller that
+	// does not send it.
+	Host string `json:"host,omitempty"`
 }
 
 // signResponse is the wire-format response. Status is one of "approved",
@@ -242,6 +249,9 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 			TS:    now,
 			Exp:   now + c.TTLSec,
 			Nonce: nonce,
+			// Bind the signature to the target's pinned host key. The MCP
+			// sourced this from its trusted registry; the gate enforces it.
+			Host: c.Host,
 		}
 		// Sign the exact bytes that DecodeSigned will reconstruct on
 		// the verifier side; sigwire.EncodeSigned + verify.go both go

@@ -318,11 +318,16 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	}
 
 	if err := servers.Add(in.Alias, registry.Entry{
-		Host:     in.Host,
-		Port:     port,
-		User:     in.User,
-		AddedAt:  time.Now().UTC(),
-		ReadOnly: in.ReadOnly,
+		Host:    in.Host,
+		Port:    port,
+		User:    in.User,
+		AddedAt: time.Now().UTC(),
+		// Persist the TOFU-pinned host-key fingerprint captured on the dial so
+		// the MCP can later bind sign requests to this exact host (the gate
+		// enforces the binding). Sourced here, in provisioning, never from the
+		// agent.
+		Fingerprint: hostFingerprint,
+		ReadOnly:    in.ReadOnly,
 	}); err != nil {
 		if !idempotent {
 			return ProvisionOutput{}, provisionRollback(ctx, &r, bootSess, existing, in.User, in.Host,

@@ -151,6 +151,40 @@ func TestRun_WriteCommandSignsThenSSH(t *testing.T) {
 	}
 }
 
+// TestRun_WritePassesRegistryFingerprint pins that the write path binds the
+// sign request to the server's host-key fingerprint READ FROM THE REGISTRY,
+// not from any agent-supplied value. This is the confused-deputy guard: the
+// agent invokes run(alias, command) and can never influence which host the
+// approved signature binds to — the MCP sources it from the trusted registry
+// entry. A regression that dropped this would let an "approve on X" signature
+// be minted unbound (and thus replayable anywhere the gate fails open).
+func TestRun_WritePassesRegistryFingerprint(t *testing.T) {
+	t.Parallel()
+	const wantFP = "SHA256:prodHostKeyFingerprintAAAAAAAAAAAAAAAAAAAAAA"
+	r := newRegistryWith(t, "h1", registry.Entry{
+		Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now(),
+		Fingerprint: wantFP,
+	})
+	payload := sigwire.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc", Host: wantFP}
+	wire, err := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "rm /tmp/x", Sig: wire}}}
+	ssh := &fakeSSH{stdout: []byte("ok\n"), exit: 0}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	if _, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(sign.gotCmds) != 1 {
+		t.Fatalf("got %d cmds; want 1", len(sign.gotCmds))
+	}
+	if sign.gotCmds[0].Host != wantFP {
+		t.Errorf("sign CmdReq.Host = %q; want %q (must come from the registry entry, not the agent)", sign.gotCmds[0].Host, wantFP)
+	}
+}
+
 func TestRun_WriteDenied(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now()})

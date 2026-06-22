@@ -11,21 +11,35 @@ import (
 
 // VerifySigned parses line as a SSHGATE_SIG envelope, verifies its
 // Ed25519 signature against pubkey, and enforces the spec's time
-// bounds:
+// bounds and per-server host-key binding:
 //
 //   - exp must be strictly greater than now (now >= exp ⇒ ErrExpired)
 //   - exp - ts must not exceed sigwire.MaxSigValidity
 //   - the inner cmd must be non-empty
+//   - the payload's Host fingerprint must match one of selfHostFPs (the
+//     gate's OWN host-key fingerprints, derived from /etc/ssh/ssh_host_*.pub
+//     at process start) ⇒ otherwise ErrHostMismatch
+//
+// The host binding makes a signature approved for one server cryptographically
+// un-replayable on another: the signer copies the target's pinned host
+// fingerprint into the payload, and each gate independently verifies that the
+// binding names ITSELF. It is fail-closed — an empty payload.Host, or an empty
+// selfHostFPs set, is a mismatch (a signed write must always carry a binding
+// that the executing gate recognises).
+//
+// selfHostFPs are the fingerprints in canonical hostkey.Fingerprint form
+// ("SHA256:..."). The host check runs LAST, after signature and time
+// verification, so an unauthenticated caller cannot probe the gate's host set.
 //
 // On success, the inner cmd string is returned for execution. On
 // failure, the returned error wraps one of the package's sentinels
 // (ErrBadFormat, ErrBadSig, ErrExpired, ErrValidityTooLong,
-// ErrEmptyCmd) so callers can match with errors.Is.
+// ErrEmptyCmd, ErrHostMismatch) so callers can match with errors.Is.
 //
 // VerifySigned is the only correct way to unwrap a SSHGATE_SIG line —
 // callers MUST NOT execute the inner cmd from sigwire.DecodeSigned
 // alone, because DecodeSigned does not verify the signature.
-func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time) (innerCmd string, err error) {
+func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time, selfHostFPs []string) (innerCmd string, err error) {
 	sig, payload, err := sigwire.DecodeSigned(line)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrBadFormat, err)
@@ -68,5 +82,27 @@ func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time) (innerCm
 	if payload.Exp-payload.TS > int64(sigwire.MaxSigValidity/time.Second) {
 		return "", ErrValidityTooLong
 	}
+
+	// Per-server host-key binding (LAST, after authenticity + time). The
+	// payload's Host must name one of THIS gate's own host keys. Enforced
+	// fail-closed: an empty binding or an empty self set is a mismatch, so a
+	// signature minted for another server — or with no binding — can never run
+	// here. Empty Host is checked explicitly so it cannot match an (also empty)
+	// stray entry.
+	if payload.Host == "" || !containsFP(selfHostFPs, payload.Host) {
+		return "", ErrHostMismatch
+	}
 	return payload.Cmd, nil
+}
+
+// containsFP reports whether want is present in fps. A linear scan is correct
+// here: a host has only a handful of host keys (ed25519/rsa/ecdsa), and the
+// comparison is a constant short fingerprint string.
+func containsFP(fps []string, want string) bool {
+	for _, fp := range fps {
+		if fp == want {
+			return true
+		}
+	}
+	return false
 }

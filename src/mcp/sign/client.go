@@ -51,11 +51,16 @@ type Client struct {
 // CmdReq is a single command in a sign request. Server is the alias
 // from the MCP registry (recorded in the audit log); Cmd is the
 // literal shell command; TTLSec is the signature validity window in
-// seconds (bounded by sigwire.MaxSigValidity on the daemon side).
+// seconds (bounded by sigwire.MaxSigValidity on the daemon side); Host
+// is the target's TOFU-pinned SSH host-key fingerprint ("SHA256:..."),
+// sourced by the caller from the trusted registry (never an agent
+// parameter), which the daemon copies into the signed payload's Host
+// field so the gate can enforce the per-server binding.
 type CmdReq struct {
 	Server string
 	Cmd    string
 	TTLSec int64
+	Host   string
 }
 
 // Signed is one signed result returned from signer on approval.
@@ -74,6 +79,7 @@ type signRequestCmd struct {
 	Server string `json:"server"`
 	Cmd    string `json:"cmd"`
 	TTLSec int64  `json:"ttl_seconds"`
+	Host   string `json:"host,omitempty"`
 }
 
 type signRequest struct {
@@ -151,7 +157,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 		Commands:  make([]signRequestCmd, len(cmds)),
 	}
 	for i, cmd := range cmds {
-		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec}
+		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host}
 	}
 	wire, err := json.Marshal(body)
 	if err != nil {

@@ -200,7 +200,13 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// the signer audit log), not the underlying hostname. Passing
 	// the alias keeps audit-log archaeology stable across hostname
 	// changes and matches the format the audit-log examples use.
-	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl}})
+	//
+	// Host binds the signature to THIS server's TOFU-pinned host key. It is
+	// read from the trusted registry entry IN CODE — the agent supplies only
+	// (alias, command) and can never influence which host the approval binds
+	// to. The gate self-derives its own host fingerprint and rejects a
+	// signature whose binding names a different server (confused-deputy guard).
+	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl, Host: e.Fingerprint}})
 	if err != nil {
 		// Preserve the sentinel for the MCP layer, but enrich the
 		// message with actionable remediation (permission vs Tier-1 vs

@@ -113,10 +113,16 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			// (recorded in the signer audit log), not the
 			// underlying hostname. Passing the alias keeps audit-log
 			// archaeology stable across hostname changes.
+			//
+			// Host binds each signature to this server's TOFU-pinned host
+			// key, read from the trusted registry entry IN CODE (never an
+			// agent parameter), so the gate can enforce the per-server
+			// binding and a bulk approval cannot be replayed on another host.
 			writeCmds = append(writeCmds, signpkg.CmdReq{
 				Server: in.Alias,
 				Cmd:    cmd,
 				TTLSec: BatchWriteTTLSec,
+				Host:   entry.Fingerprint,
 			})
 			writeIdx = append(writeIdx, i)
 		}
