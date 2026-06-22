@@ -16,8 +16,9 @@ import (
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
-// fakeSign is a Runner.Sign stub. signCalled records whether Sign was
-// invoked; respond is the canned outcome.
+// fakeSign is a Runner.Sign / SignClient stub. signCalled records whether
+// Sign was invoked; respond is the canned outcome. The grant* fields
+// capture and drive the RequestGrant / RevokeGrant paths.
 type fakeSign struct {
 	mu         sync.Mutex
 	signCalled bool
@@ -25,6 +26,23 @@ type fakeSign struct {
 	gotCmds    []signpkg.CmdReq
 	signed     []signpkg.Signed
 	err        error
+
+	// RequestGrant capture + canned result.
+	grantCalled      bool
+	grantReqID       string
+	grantAlias       string
+	grantScope       string
+	grantCommands    []string
+	grantDurationSec int64
+	grantID          string
+	grantExpiryUnix  int64
+	grantErr         error
+
+	// RevokeGrant capture + canned result.
+	revokeGrantCalled bool
+	revokeGrantReqID  string
+	revokeGrantAlias  string
+	revokeGrantErr    error
 }
 
 func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error) {
@@ -34,6 +52,27 @@ func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.Cm
 	f.gotReqID = requestID
 	f.gotCmds = cmds
 	return f.signed, f.err
+}
+
+func (f *fakeSign) RequestGrant(ctx context.Context, requestID, alias, scope string, commands []string, durationSec int64) (string, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grantCalled = true
+	f.grantReqID = requestID
+	f.grantAlias = alias
+	f.grantScope = scope
+	f.grantCommands = commands
+	f.grantDurationSec = durationSec
+	return f.grantID, f.grantExpiryUnix, f.grantErr
+}
+
+func (f *fakeSign) RevokeGrant(ctx context.Context, requestID, alias string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokeGrantCalled = true
+	f.revokeGrantReqID = requestID
+	f.revokeGrantAlias = alias
+	return f.revokeGrantErr
 }
 
 // fakeSSH is a Runner.SSH stub.

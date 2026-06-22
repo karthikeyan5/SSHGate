@@ -34,6 +34,13 @@ func (f *batchSign) Sign(_ context.Context, requestID string, cmds []signpkg.Cmd
 	return f.signed, f.err
 }
 
+// RequestGrant / RevokeGrant satisfy SignClient; batch tests never use
+// the grant paths.
+func (f *batchSign) RequestGrant(_ context.Context, _, _, _ string, _ []string, _ int64) (string, int64, error) {
+	return "", 0, nil
+}
+func (f *batchSign) RevokeGrant(_ context.Context, _, _ string) error { return nil }
+
 // batchSSH records every Run call so tests can verify ordering, count,
 // and per-command output mapping.
 type batchSSH struct {

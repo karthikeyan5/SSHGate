@@ -31,11 +31,23 @@ func TestMain(m *testing.M) {
 type fakeSign struct {
 	signed []signpkg.Signed
 	err    error
+
+	grantID         string
+	grantExpiryUnix int64
+	grantErr        error
+	revokeGrantErr  error
 }
 
 func (f *fakeSign) Sign(_ context.Context, _ string, _ []signpkg.CmdReq) ([]signpkg.Signed, error) {
 	return f.signed, f.err
 }
+
+// RequestGrant / RevokeGrant satisfy SignClient. The grant* fields let a
+// test drive the request_grant / revoke_grant tool handlers.
+func (f *fakeSign) RequestGrant(_ context.Context, _, _, _ string, _ []string, _ int64) (string, int64, error) {
+	return f.grantID, f.grantExpiryUnix, f.grantErr
+}
+func (f *fakeSign) RevokeGrant(_ context.Context, _, _ string) error { return f.revokeGrantErr }
 
 // fakeSSH returns canned output.
 type fakeSSH struct {
@@ -231,7 +243,8 @@ func TestServer_CallToolUnknownAliasReturnsToolError(t *testing.T) {
 // TestServe_RegistersExactlyAgentTools drives the REAL Serve() over a
 // pair of pipes and asserts the production tool registration is exactly
 // the agent-facing set {run, run_batch, list_servers, status,
-// revoke_server} — and, critically, that add_server is NOT among them.
+// revoke_server, request_grant, revoke_grant} — and, critically, that
+// add_server is NOT among them.
 // Provisioning was removed from the agent surface (it is now the
 // human-only `sshgate` CLI); this test is the regression guard that the
 // MCP server never re-exposes it.
@@ -279,6 +292,8 @@ func TestServe_RegistersExactlyAgentTools(t *testing.T) {
 		mcp.ToolNameListServers:  true,
 		mcp.ToolNameStatus:       true,
 		mcp.ToolNameRevokeServer: true,
+		mcp.ToolNameRequestGrant: true,
+		mcp.ToolNameRevokeGrant:  true,
 	}
 	if len(res.Tools) != len(want) {
 		t.Errorf("registered %d tools; want %d (%v)", len(res.Tools), len(want), got)

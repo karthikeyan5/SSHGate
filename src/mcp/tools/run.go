@@ -67,6 +67,13 @@ type RunOutput struct {
 // signer socket.
 type SignClient interface {
 	Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error)
+	// RequestGrant asks the signer to mint a standing grant (one human
+	// approval → auto-sign matching writes for the window). Returns the
+	// grant id + Unix expiry on approval.
+	RequestGrant(ctx context.Context, requestID, alias, scope string, commands []string, durationSec int64) (grantID string, expiryUnix int64, err error)
+	// RevokeGrant drops the standing grant for alias (de-escalation; no
+	// approval needed).
+	RevokeGrant(ctx context.Context, requestID, alias string) error
 }
 
 // SSHRunner is the subset of ssh.Client that Runner needs. It

@@ -42,6 +42,13 @@ func (f *hookFakeSign) Sign(_ context.Context, _ string, cmds []signpkg.CmdReq) 
 	return out, nil
 }
 
+// RequestGrant / RevokeGrant satisfy SignClient; the live-log hook tests
+// never use the grant paths.
+func (f *hookFakeSign) RequestGrant(_ context.Context, _, _, _ string, _ []string, _ int64) (string, int64, error) {
+	return "", 0, nil
+}
+func (f *hookFakeSign) RevokeGrant(_ context.Context, _, _ string) error { return nil }
+
 func liveRecords(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	f, err := os.Open(path)

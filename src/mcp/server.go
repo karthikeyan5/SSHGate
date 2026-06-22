@@ -74,6 +74,16 @@ const ToolNameStatus = "status"
 // Code's surface name is "mcp__sshgate__revoke_server".
 const ToolNameRevokeServer = "revoke_server"
 
+// ToolNameRequestGrant requests a STANDING GRANT on a server: ONE human
+// Telegram approval lets the signer auto-sign matching writes for the
+// window without further taps. Claude Code's surface name is
+// "mcp__sshgate__request_grant".
+const ToolNameRequestGrant = "request_grant"
+
+// ToolNameRevokeGrant drops a server's standing grant (de-escalation; no
+// approval). Claude Code's surface name is "mcp__sshgate__revoke_grant".
+const ToolNameRevokeGrant = "revoke_grant"
+
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
@@ -157,6 +167,25 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolNameRevokeServer,
 		Description: "Revoke a registered server. Signs SSHGATE_REVOKE (one approval), gate strips its authorized_keys line and removes ~/.sshgate-gate/, MCP removes the alias. Backup kept at ~/.ssh/authorized_keys.sshgate-revoke-backup.",
 	}, s.revokeServerHandler)
+
+	// request_grant — REQUESTS a standing grant. It needs a human Telegram
+	// approval of a distinct "STANDING GRANT" message; the agent cannot
+	// self-grant. Once approved, matching writes auto-sign for the window.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name: ToolNameRequestGrant,
+		Description: "Request a STANDING GRANT on a server so matching writes auto-sign for a window (1-24h) without a tap each. " +
+			"This REQUIRES a human to approve a distinct \"STANDING GRANT\" Telegram message — you CANNOT create a grant yourself; you only request one. " +
+			"scope=\"commands\" auto-signs ONLY the exact command strings you list (exact match, no patterns) — prefer this. " +
+			"scope=\"all\" auto-signs EVERY write on the alias — use it ONLY for a throwaway/dedicated target, never a server holding anything that matters. " +
+			"The grant dies on signer restart and can be revoked with revoke_grant. Always show the user the exact scope + commands before requesting.",
+	}, s.requestGrantHandler)
+
+	// revoke_grant — drops a standing grant. Pure de-escalation: it only
+	// shrinks capability, so it needs no approval and is always safe.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameRevokeGrant,
+		Description: "Revoke (drop) a server's standing grant so writes prompt for approval again. De-escalation only — always safe, needs no approval, and is a no-op if no grant exists.",
+	}, s.revokeGrantHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -364,6 +393,53 @@ func formatRevokeServerSummary(out tools.RevokeServerOutput) string {
 		fmt.Fprintf(&b, "\ngate: %s", out.Message)
 	}
 	return b.String()
+}
+
+// requestGrantHandler is the typed handler for sshgate.request_grant. A
+// denial/timeout from the human (or a validation error) surfaces as an
+// MCP tool error so Claude sees exactly why the grant was not minted; on
+// approval the structured RequestGrantOutput carries the grant id +
+// expiry.
+func (s *Server) requestGrantHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RequestGrantInput) (*mcpsdk.CallToolResult, tools.RequestGrantOutput, error) {
+	out, err := s.Runner.RequestGrant(ctx, in)
+	if err != nil {
+		s.Logger.Printf("request_grant alias=%s scope=%s err=%v", in.Alias, in.Scope, err)
+		return nil, tools.RequestGrantOutput{}, err
+	}
+	s.Logger.Printf("request_grant alias=%s scope=%s grant_id=%s expiry=%d",
+		out.Alias, out.Scope, out.GrantID, out.ExpiryUnix)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatRequestGrantSummary(out)}},
+	}, out, nil
+}
+
+// formatRequestGrantSummary renders a short human summary for the
+// fallback TextContent block.
+func formatRequestGrantSummary(out tools.RequestGrantOutput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "standing grant minted on %s: scope=%s grant_id=%s", out.Alias, out.Scope, out.GrantID)
+	if out.Scope == "commands" {
+		for _, c := range out.Commands {
+			fmt.Fprintf(&b, "\n  - %s", c)
+		}
+	}
+	fmt.Fprintf(&b, "\nexpires_unix=%d (auto-signs matching writes until then; dies on signer restart)", out.ExpiryUnix)
+	return b.String()
+}
+
+// revokeGrantHandler is the typed handler for sshgate.revoke_grant. Only
+// a true infrastructure error (nil dependency, transport failure)
+// surfaces as a Go error; a successful revoke carries Revoked=true.
+func (s *Server) revokeGrantHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RevokeGrantInput) (*mcpsdk.CallToolResult, tools.RevokeGrantOutput, error) {
+	out, err := s.Runner.RevokeGrant(ctx, in)
+	if err != nil {
+		s.Logger.Printf("revoke_grant alias=%s err=%v", in.Alias, err)
+		return nil, tools.RevokeGrantOutput{}, err
+	}
+	s.Logger.Printf("revoke_grant alias=%s revoked=%v", out.Alias, out.Revoked)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: fmt.Sprintf("standing grant on %s revoked (writes will prompt again)", out.Alias)}},
+	}, out, nil
 }
 
 // listServersHandler is the typed handler for sshgate.list_servers.
