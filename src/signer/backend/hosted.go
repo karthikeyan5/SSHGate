@@ -331,6 +331,18 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 	}
 }
 
+// RequestGrant fails CLOSED on the hosted (Tier-3) backend. The v2 wire
+// protocol + web UI do not yet carry the distinct "STANDING GRANT" banner
+// (alias + scope + duration + the "auto-signs WITHOUT further taps"
+// warning), so a grant routed here could be rendered as an ordinary
+// approval and minted unknowingly. We reject it BEFORE any HTTP call —
+// exactly like reveal (see Request) — so no future v2 build silently
+// ships an un-bannered grant. Re-enable only once the hosted approval UI
+// carries the grant semantics end-to-end (out of scope here).
+func (h *HostedServerBackend) RequestGrant(_ context.Context, _ GrantApprovalRequest) (<-chan Result, error) {
+	return nil, errors.New("hosted: standing grants are not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
+}
+
 // validate returns the first config error, if any.
 func (h *HostedServerBackend) validate() error {
 	if h.BaseURL == "" {

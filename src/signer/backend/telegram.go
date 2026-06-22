@@ -525,6 +525,70 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 	return ch, nil
 }
 
+// RequestGrant implements Backend's standing-grant approval. It mirrors
+// Request — same chatStore load, same t.pending registration keyed by
+// RequestID, same approve:/deny: callback wiring, timer + ctx watcher,
+// and resolve path (handleCallback/resolve are generic over RequestID, so
+// a grant pending resolves through the identical code). The ONLY
+// difference is the message body: formatGrantApprovalMessage renders a
+// distinct, scary "STANDING GRANT" banner so the human cannot mistake it
+// for a one-shot write — approving it auto-signs the scoped commands for
+// the whole window without further taps.
+func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalRequest) (<-chan Result, error) {
+	chatID, ok, err := t.chatStore.Load()
+	if err != nil {
+		return nil, fmt.Errorf("chatstore load: %w", err)
+	}
+	if !ok {
+		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
+	}
+
+	text := formatGrantApprovalMessage(req, t.reqTimeout)
+	msg := tgbotapi.NewMessage(chatID, text)
+	// A standing grant gets its own unmistakable approve label so the
+	// operator cannot tap through on muscle memory. Callback data is the
+	// same "approve:<reqID>" / "deny:<reqID>" — the grant semantics live
+	// in the signer's in-memory table, not in the button.
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✓ Approve STANDING GRANT", "approve:"+req.RequestID),
+			tgbotapi.NewInlineKeyboardButtonData("✗ Deny", "deny:"+req.RequestID),
+		),
+	)
+	sent, err := t.bot.Send(msg)
+	if err != nil {
+		return nil, fmt.Errorf("telegram send: %w", err)
+	}
+
+	ch := make(chan Result, 1)
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	stopTimer := func() {
+		stopOnce.Do(func() { close(done) })
+	}
+
+	ps := &pendingState{
+		ch:        ch,
+		chatID:    chatID,
+		messageID: sent.MessageID,
+		stopTimer: stopTimer,
+	}
+	t.pending.Store(req.RequestID, ps)
+
+	go func() {
+		timer := time.NewTimer(t.reqTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			t.timeout(req.RequestID, ps)
+		case <-ctx.Done():
+			t.timeout(req.RequestID, ps)
+		case <-done:
+		}
+	}()
+	return ch, nil
+}
+
 // resolve sends r on ps.ch exactly once and tears down the watcher
 // goroutine. Subsequent resolves are silent no-ops (handled by
 // sync.Once).
@@ -760,6 +824,41 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 	}
 	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
 	fmt.Fprintf(&b, "Expires in %s\n", timeout)
+	return b.String()
+}
+
+// formatGrantApprovalMessage renders the STANDING GRANT approval body.
+// It is deliberately alarming and explicit: approving it lets the signer
+// auto-sign the scoped commands for the WHOLE window with no further taps,
+// which is a strictly bigger authorisation than a one-shot write — so the
+// banner, scope, duration, and computed expiry are all spelled out. Plain
+// text (no Markdown/HTML parse-mode) for the same reason as
+// formatApprovalMessage: commands can contain '*', '_', '`'.
+//
+// Expiry is computed as time.Now()+Duration in UTC. It is display-only
+// (the signer records the authoritative expiry off its own injected
+// clock); a few-ms skew between this render and the stored expiry is
+// irrelevant.
+func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration) string {
+	var b strings.Builder
+	b.WriteString("⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.\n\n")
+	fmt.Fprintf(&b, "🟠 SSHGate STANDING GRANT — %s\n\n", req.Alias)
+	switch req.Scope {
+	case "all":
+		fmt.Fprintf(&b, "Scope: ALL commands on %s\n", req.Alias)
+	case "commands":
+		b.WriteString("Scope: ONLY these exact commands:\n")
+		for i, c := range req.Commands {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, c)
+		}
+	default:
+		fmt.Fprintf(&b, "Scope: %s\n", req.Scope)
+	}
+	fmt.Fprintf(&b, "Duration: %s\n", req.Duration)
+	expires := time.Now().Add(req.Duration).UTC().Format(time.RFC3339)
+	fmt.Fprintf(&b, "Expires at: %s\n\n", expires)
+	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
+	fmt.Fprintf(&b, "Approval expires in %s\n", timeout)
 	return b.String()
 }
 

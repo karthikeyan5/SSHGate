@@ -16,6 +16,28 @@ type ApprovalRequest struct {
 	Submitted time.Time
 }
 
+// GrantApprovalRequest is the unit of work submitted to a Backend's
+// RequestGrant: a request for the human to mint a STANDING GRANT. Unlike
+// an ApprovalRequest (which approves specific commands once), approving a
+// grant authorises the signer to auto-sign matching commands for the
+// whole Duration WITHOUT further taps — so the backend MUST render it
+// with a distinct, scary UX that makes that consequence unmistakable.
+//
+//   - Scope == "all"      → any command on Alias auto-signs.
+//   - Scope == "commands" → only the exact strings in Commands auto-sign.
+//
+// Duration is the requested window; the signer caps it at 24h before
+// calling and records expiry = now + Duration on approval. RequestID
+// correlates the result and keys the audit row, exactly like
+// ApprovalRequest.
+type GrantApprovalRequest struct {
+	RequestID string
+	Alias     string
+	Scope     string
+	Commands  []string
+	Duration  time.Duration
+}
+
 // CommandReq is a single command awaiting approval. Server is the human-
 // readable alias from the MCP's registry (e.g. "prod-db"); Cmd is the
 // literal shell command line; TTLSec is the spec's signature validity
@@ -109,4 +131,13 @@ type Result struct {
 // a more specific status if defined later).
 type Backend interface {
 	Request(ctx context.Context, req ApprovalRequest) (<-chan Result, error)
+
+	// RequestGrant submits a STANDING-GRANT approval request and returns
+	// a channel yielding exactly one Result, with the same contract and
+	// concurrency guarantees as Request. The Result's Signatures field is
+	// unused for grants (the daemon mints per-command signatures later, on
+	// demand). A backend that cannot safely render the distinct grant UX
+	// MUST fail closed by returning an error (the hosted backend does this
+	// until its web UI carries the grant banner).
+	RequestGrant(ctx context.Context, req GrantApprovalRequest) (<-chan Result, error)
 }

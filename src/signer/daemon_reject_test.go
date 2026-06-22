@@ -286,3 +286,7 @@ type errBackend struct{ err error }
 func (b errBackend) Request(_ context.Context, _ backend.ApprovalRequest) (<-chan backend.Result, error) {
 	return nil, b.err
 }
+
+func (b errBackend) RequestGrant(_ context.Context, _ backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+	return nil, b.err
+}

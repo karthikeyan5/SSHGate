@@ -22,3 +22,12 @@ func (StubBackend) Request(_ context.Context, _ ApprovalRequest) (<-chan Result,
 	close(ch)
 	return ch, nil
 }
+
+// RequestGrant mirrors Request: every standing-grant request is denied,
+// so a daemon shipped against StubBackend mints no grants.
+func (StubBackend) RequestGrant(_ context.Context, _ GrantApprovalRequest) (<-chan Result, error) {
+	ch := make(chan Result, 1)
+	ch <- Result{Status: StatusDenied}
+	close(ch)
+	return ch, nil
+}
