@@ -107,9 +107,25 @@ var watchRoots = []string{
 // (substring match is fine) and keep them conservative: excluding too
 // much would blind the tripwire.
 var watchExcludes = []string{
-	watchDir + "/events\\.log",   // never alert on our own append-only log
-	watchDir + "/inotify\\.pid",  // the monitor's own pidfile
-	"/etc/s6-overlay",            // linuxserver s6 supervision runtime (mid-run tick guard)
+	watchDir + "/events\\.log",  // never alert on our own append-only log
+	watchDir + "/inotify\\.pid", // the monitor's own pidfile
+	// The gate's OWN authoritative audit log (Tier-6a). The gate appends one
+	// JSON line to gateDir/audit.log for EVERY command it processes — reads
+	// INCLUDED — by design (src/gate/audit.go: AuditPath default =
+	// gateDir/defaultAuditFile "audit.log"; DefaultAuditLevel == AuditAllMeta
+	// logs reads too). In this rig the gate is installed at
+	// /config/.sshgate-gate/gate (deployGate in container.go), so the gate
+	// dir resolves (os.Executable → filepath.Dir) to /config/.sshgate-gate and
+	// the log lands at /config/.sshgate-gate/audit.log — under the watched
+	// /config home root. That write is a LEGITIMATE, expected gate-internal
+	// accountability record, NOT a read-only bypass, so it must not trip the
+	// wire. The exclude is pinned to this EXACT file (anchored to the gate
+	// dir + the literal "audit.log" name); any OTHER write under the gate dir
+	// or elsewhere in /config still fires, so a real bypass (e.g. an attacker
+	// dropping a key in /config/.ssh/authorized_keys, or any other file under
+	// .sshgate-gate) is NOT masked.
+	containerHome + "/\\.sshgate-gate/audit\\.log",
+	"/etc/s6-overlay", // linuxserver s6 supervision runtime (mid-run tick guard)
 	"/etc/services\\.d",          // s6 service dir (mid-run tick guard)
 	"/etc/cont-init\\.d",         // s6 init scripts (mid-run tick guard)
 	"/etc/ssh/ssh_host_",         // host keys (boot-regenerated; guard)
