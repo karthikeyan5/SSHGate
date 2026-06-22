@@ -93,8 +93,12 @@ type Runner struct {
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —
-// long enough to cover dial+exec, well under sigwire.MaxSigValidity.
-const DefaultWriteTTLSec = 120
+// long enough to cover dial+exec, well under sigwire.MaxSigValidity. Kept
+// tight (60s) to shrink the window in which an approved signature could be
+// replayed between the human's approval and gate execution; the gate still
+// independently caps every window at sigwire.MaxSigValidity. Matches
+// BatchWriteTTLSec so single and bulk writes share the same default window.
+const DefaultWriteTTLSec = 60
 
 // Run resolves the alias from the registry, classifies the command,
 // and dispatches:

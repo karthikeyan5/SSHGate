@@ -295,3 +295,27 @@ func TestRun_SSHErrorSurfaces(t *testing.T) {
 		t.Errorf("err = %v; want wrap of %v", err, sshErr)
 	}
 }
+
+// TestRun_DefaultWriteTTL pins the default write signature window at 60s.
+// A tighter default shrinks the replay window between human approval and gate
+// execution; the gate still independently caps it at MaxSigValidity. When the
+// Runner's WriteTTLSec is unset, the write path must request exactly this TTL.
+func TestRun_DefaultWriteTTL(t *testing.T) {
+	t.Parallel()
+	if tools.DefaultWriteTTLSec != 60 {
+		t.Fatalf("DefaultWriteTTLSec = %d; want 60", tools.DefaultWriteTTLSec)
+	}
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now(), Fingerprint: "SHA256:x"})
+	payload := sigwire.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc", Host: "SHA256:x"}
+	wire, _ := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "rm /tmp/x", Sig: wire}}}
+	ssh := &fakeSSH{stdout: []byte("ok\n")}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh} // WriteTTLSec unset → default
+
+	if _, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(sign.gotCmds) != 1 || sign.gotCmds[0].TTLSec != 60 {
+		t.Errorf("requested TTLSec = %v; want 60 (the default)", sign.gotCmds)
+	}
+}
