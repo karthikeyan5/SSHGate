@@ -23,3 +23,8 @@ gate-redteam-report.jsonl
 # Claude Code local scratch: subagent git worktrees, session-local settings.
 # Never committed (worktrees contain a full repo checkout + live .git pointers).
 /.claude/
+
+# Local operator workspace: migration playbooks, per-server inventories, run
+# logs, and any other operational notes about Karthi's own machines. NEVER
+# committed (this repo mirrors to public GitHub and these hold infra specifics).
+/local-workspace/

@@ -28,6 +28,18 @@ For the security model these items extend, see [design.md](design.md) and
 
 These are the highest-priority forward items.
 
+- **Standing grants, secret-reveal, per-server binding, audit trail (in progress).**
+  A bundle that all touches the signed payload, so it ships as one wire change:
+  signer-issued **standing grants** (scope `all` or an exact command-set, ≤24h,
+  server-bound, revocable) for unattended write windows; an approved
+  **secret-reveal** that bypasses output redaction for a single signed command;
+  **per-server identity** binding each signature to the target's SSH host-key
+  fingerprint (closes cross-server replay); a **two-tier audit trail** — a
+  gate-side, separate-user, append-only authoritative log plus an MCP-side
+  rolling full-output live view; plus a tighter 60s default signature window and
+  `servers.json` 0600. Design at
+  [docs/proposed/feature3-grants-reveal-audit-binding.md](proposed/feature3-grants-reveal-audit-binding.md).
+
 - **Argv-exec structural classifier fix (#22).** Replace the fail-closed shell
   heuristic on the read path with direct execution from a parsed `argv`
   (`execve`, no intervening `/bin/sh`), so the classifier's view of a command is
@@ -89,6 +101,13 @@ These are the highest-priority forward items.
   this is the handshake that tells the agent to go get approval and resubmit.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
+
+- **Gate auto-update (`SSHGATE_UPDATE`).** A signed control verb to update the
+  gate binary in place (a stub handler already exists in the gate). Deferred
+  until its security is designed separately: an update path is a code-execution
+  path, so it must be at least as strict as the signing model — signed,
+  versioned, fail-closed, and audited. Until then, a changed gate is redeployed
+  via the `sshgate` CLI (revoke + re-add).
 
 - **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
   posture and merge the deferred redactor work.
