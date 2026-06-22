@@ -55,6 +55,8 @@ The **"executor ID" Karthi described = the OS PID** (or a per-job dir with a fla
 
 **Default window → 60s (your call):** change `DefaultWriteTTLSec` 120→60 and keep `BatchWriteTTLSec` 60. Because the gate checks `now < exp` only at **receipt** (then runs unbounded), 60s is plenty for any single command (it's received instantly after signing, then runs as long as it needs). Longer windows are only needed for *sequential batches of long commands* — which the agent requests explicitly (5/10-min, with a reason) or covers via a standing grant. Shrinks the replay window 2×.
 
+**Replay protection is intentionally NOT enforced (accepted, Karthi 2026-06-22).** The signed payload mints a `Nonce`, but the gate **never checks it** — enforcing single-use would require the gate to remember spent nonces, i.e. gate state, which violates the hard stateless invariant (§0). So replay of an already-approved write is possible **within its validity window** (60s default, 300s ceiling); the tight default window is the bound on that exposure (and host-binding, §3, keeps a replay from crossing machines). True single-use enforcement would live in the Tier-3 hosted (stateful) signer, not here.
+
 ---
 
 ## 3. Per-server identity & spoof-resistance (the "robust" requirement)

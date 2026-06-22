@@ -4,14 +4,17 @@ The cross-tool source of truth is `AGENTS.md`. Read it now — Codex and any oth
 
 ## SSHGate-specific notes for Claude Code
 
-This is a Claude Code plugin. The agent (MCP) tool surface is exactly **five
-tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`:
+This is a Claude Code plugin. The agent (MCP) tool surface is exactly **seven
+tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
+`request_grant`, `revoke_grant`:
 
 - `sshgate.run(alias, command)` — run one command on a registered server
 - `sshgate.run_batch(alias, commands[])` — run several commands; writes bulk-approve in one Telegram tap
 - `sshgate.list_servers()` — list registered aliases
 - `sshgate.status()` — health of the signer + reachability of each server
 - `sshgate.revoke_server(alias)` — uninstall gate from a server (requires Telegram approval)
+- `sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)` — request a standing grant so matching writes auto-sign for a window (≤ 24h); needs a distinct human Telegram approval, the agent can only request one
+- `sshgate.revoke_grant(alias)` — drop a server's standing grant (de-escalation only — always safe, no approval)
 
 **Provisioning is NOT an agent tool.** There is deliberately no `add_server`
 on the MCP surface: a new machine is onboarded by a human at a terminal with

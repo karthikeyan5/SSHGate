@@ -6,9 +6,11 @@ description: This skill should be used when the user asks to debug, diagnose, or
 # Debugging remote servers with SSHGate
 
 SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly five tools — `sshgate.run`, `sshgate.run_batch`,
-`sshgate.list_servers`, `sshgate.status`, and `sshgate.revoke_server` — and
-debugging mostly uses the first three. Read commands run instantly. Write
+tool surface is exactly seven tools — `sshgate.run`, `sshgate.run_batch`,
+`sshgate.list_servers`, `sshgate.status`, `sshgate.revoke_server`,
+`sshgate.request_grant`, and `sshgate.revoke_grant` — and debugging mostly
+uses the first three (the grant pair is for unattended write windows; see
+**Standing grants** below). Read commands run instantly. Write
 commands need the user to tap a Telegram approval button on their phone.
 Optimise for: fast diagnosis, one approval per fix, no surprises.
 
@@ -49,6 +51,30 @@ probably away from the laptop; each prompt is a small interruption.
 
 Read commands cost nothing. Run as many as you need to understand
 the situation.
+
+## Standing grants — a tap-free write window
+
+When you expect **many writes** on one server over a stretch where the
+user can't tap each (an overnight maintenance run, a migration, a long
+unattended build), ask for a **standing grant** instead of N approvals:
+
+- **`sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)`**
+  *requests* a grant — it does **not** create one. The user must approve a
+  distinct "STANDING GRANT" Telegram message (alias + scope + duration). You
+  can never self-grant. Once approved, matching writes **auto-sign for the
+  window with no further tap**.
+- **`scope`:** prefer `commands` — only the exact command strings you list
+  (exact match, no patterns) auto-sign; everything else still prompts. Use
+  `scope=all` (every write auto-signs) **only** for a throwaway/dedicated
+  target, never a live box that holds anything that matters.
+- **Bounds:** `duration_hours` ≤ 24h, and the grant lives **in-memory in the
+  signer** — it dies on signer restart. **Reveal never auto-signs** — a
+  secret-read always prompts even under a grant.
+- **`sshgate.revoke_grant(alias)`** drops the grant early. Pure
+  de-escalation: always safe, no approval, no-op if none exists. Drop a grant
+  as soon as the window's work is done.
+
+Always show the user the exact scope + command set before requesting.
 
 ## Diagnostics — the free part
 
