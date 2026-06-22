@@ -10,6 +10,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/karthikeyan5/sshgate/src/mcp/livelog"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
 )
 
@@ -92,9 +93,15 @@ The gate FAILS CLOSED: a command is treated as a read ONLY when every part of it
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
 // channel).
+//
+// LiveLog is the Tier-6b MCP-side rolling live log (the convenience /
+// `tail -f` view). It is OPTIONAL — a nil LiveLog is a valid no-op (Log
+// does nothing), so tests and a "disabled" config both leave it nil. It
+// is NOT the system of record; that is the gate-side authoritative log.
 type Server struct {
-	Runner *tools.Runner
-	Logger *log.Logger
+	Runner  *tools.Runner
+	Logger  *log.Logger
+	LiveLog *livelog.Log
 }
 
 // Serve runs the MCP server over the provided stdio pipes. It
@@ -177,6 +184,17 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 		return nil, tools.RunOutput{}, err
 	}
 	s.Logger.Printf("run alias=%s kind=%s approved=%v exit=%d", in.Alias, out.Kind, out.Approved, out.ExitCode)
+	// Tier 6b — append the full command + full output to the MCP-side
+	// rolling live log (the convenience surface). nil LiveLog is a no-op.
+	s.LiveLog.Log(livelog.Entry{
+		Server:         in.Alias,
+		Command:        in.Command,
+		Classification: out.Kind,
+		ExitCode:       out.ExitCode,
+		Approved:       out.Approved,
+		Stdout:         out.Stdout,
+		Stderr:         out.Stderr,
+	})
 	// Also pack a TextContent block so older MCP clients (without
 	// structured content support) see a human-readable result.
 	return &mcpsdk.CallToolResult{
@@ -195,6 +213,23 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		return nil, tools.RunBatchOutput{}, err
 	}
 	s.Logger.Printf("run_batch alias=%s n=%d approved=%v denied=%v reason=%s", in.Alias, len(out.Results), out.Approved, out.Denied, out.Reason)
+	// Tier 6b — append one live-log entry per command result (full output).
+	// Skipped commands (stop_on_error) and a wholly-denied batch (empty
+	// Results) simply produce fewer/no entries. nil LiveLog is a no-op.
+	for _, r := range out.Results {
+		if r.Skipped {
+			continue
+		}
+		s.LiveLog.Log(livelog.Entry{
+			Server:         out.Server,
+			Command:        r.Command,
+			Classification: r.Kind,
+			ExitCode:       r.ExitCode,
+			Approved:       out.Approved && r.Kind == "write",
+			Stdout:         r.Stdout,
+			Stderr:         r.Stderr,
+		})
+	}
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatRunBatchSummary(out)}},
 	}, out, nil
