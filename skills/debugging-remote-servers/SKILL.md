@@ -90,6 +90,33 @@ when it comes back. After a successful batch, run one more diagnostic
 read (`systemctl status nginx`, `nginx -t`, whatever proves the fix)
 to confirm.
 
+## Long-running tasks — launch detached, then poll (don't block)
+
+For anything that runs more than ~a minute (DB dumps/restores, `rsync`,
+backups, builds, package installs), do **not** call a blocking
+`sshgate.run` and wait. A synchronous `run` holds your whole turn for the
+duration **and** dies if the SSH pipe drops (the remote job gets SIGHUP and
+is killed). Instead launch it **detached** and poll:
+
+1. **Launch** (one write — the redirect/`&` make it a write; under a standing
+   grant on that server it auto-approves with no tap):
+   `sshgate.run <alias> "nohup <cmd> >~/job.log 2>&1 & echo $!"` → returns the
+   **PID** immediately. For an exit code, launch as
+   `nohup sh -c '<cmd>; echo done:$? >~/job.done' &`.
+2. **Poll with reads** (free, no tap): `sshgate.run <alias> "tail -n 40 ~/job.log"`,
+   `sshgate.run <alias> "ps -p <pid> -o pid=,stat=,etime="`, or
+   `sshgate.run <alias> "cat ~/job.done"` for completion.
+3. **Cancel** (your "Ctrl-C"): `sshgate.run <alias> "kill <pid>"` (a write).
+
+The detached job **survives a dropped pipe**; a synchronous long `run` does
+not. State lives in the OS + the logfile on the target, so nothing is lost if
+your session is interrupted — reconnect and `tail` the log.
+
+> A first-class `job_run` / `job_status` / `job_kill` tool family (gate verbs
+> `SSHGATE_JOB_RUN` / `SSHGATE_JOB_STATUS` / `SSHGATE_JOB_KILL`) is planned —
+> see the roadmap. When it ships, prefer it over hand-rolled `nohup`; until
+> then, use the `nohup` + poll pattern above.
+
 ## Read-only (Tier-1) servers — writes refused before any tap
 
 A server can be provisioned **read-only** (a human ran

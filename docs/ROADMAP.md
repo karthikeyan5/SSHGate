@@ -100,8 +100,12 @@ These are the highest-priority forward items.
   and classifies/approves **only the inner command**; `status`/`output` are
   reads, `kill` of an own-job is a low-risk control op. State lives in OS
   processes + a job dir on the target, so the gate stays stateless. Proposed
-  agent tools: `run_job` (→ job handle + PID), `job_status` (→ running/exited +
-  exit code + log tail), `job_kill`. **Recommended right after the
+  agent tools: `job_run` (→ job handle + PID), `job_status` (→ running/exited +
+  exit code + log tail), `job_kill` — with matching gate verbs `SSHGATE_JOB_RUN`
+  / `SSHGATE_JOB_STATUS` / `SSHGATE_JOB_KILL` (the `SSHGATE_` prefix keeps them
+  from colliding with a real command on the gate's command parse; the MCP tools
+  are already namespaced under the `sshgate` server, so they stay unprefixed and
+  consistent with `run`/`status`/`revoke_server`). **Recommended right after the
   grants/reveal/audit set, but NOT blocking the migration:** with a standing
   grant on the target box the manual `nohup` launch already auto-signs, so this
   is a UX upgrade rather than a prerequisite.
@@ -112,8 +116,11 @@ These are the highest-priority forward items.
     `MaxSessions`); there is no multiplexer to build. The only "a single agent
     shouldn't block on a long job" gap is closed by this async job handle, not by
     SSH multiplexing (the agent's turn is single-threaded). Live-output streaming
-    to a **human** (progress bars, %) is the MCP-side rolling audit log
-    (`tail -f`); full interactive Ctrl-C / PTY / "normal SSH terminal" is the
+    to a **human** (progress bars, %) needs the tier-6b *streaming* enhancement
+    — teeing the gate's already-redacted output to the live log as it arrives
+    (the basic rolling log only captures each command's final output *after* it
+    completes, so it is NOT a live intra-command view on its own); then
+    `tail -f` shows real-time progress; full interactive Ctrl-C / PTY / "normal SSH terminal" is the
     gated interactive session (#25) — this job verb is the non-interactive
     fire-and-poll complement to it, not a duplicate.
 
