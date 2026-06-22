@@ -123,7 +123,7 @@ The original "MCP-side only" plan was wrong: the agent shares the MCP's trust do
 
 ## 7. Minor / deferred
 
-- **`servers.json` → 0600** (approved): tighten the registry file perms; it's currently 0644 (world-readable host/user/port). Drop the spec's "encrypt at rest (age/kiln)" line — over-spec for non-secret metadata.
+- **`servers.json` perms — ALREADY 0600 (verified 2026-06-22).** The earlier "currently 0644" claim was **incorrect**: the registry has written 0600 since its original commit (`tmp.Chmod(0o600)` in the tmp+fsync+rename `persist()` path, `src/mcp/registry/servers.go:204`). So this is a no-op; the leaf just added perm-assertion coverage across all three persist paths (create / rewrite-in-place / remove). Encrypt-at-rest (age/kiln) dropped as over-spec for non-secret metadata.
 - **Auto-update (`SSHGATE_UPDATE`)** — defer; **add to the roadmap** as a next-feature-set item (sort out its security separately). For now, redeploy a changed gate via `sshgate` CLI (revoke + re-add).
 - **Live Command View** — now explicitly delivered by the **MCP-side rolling log (§6b)**: a real-time operator stream via `tail -f`. No dedicated UI unless Karthi wants one later.
 

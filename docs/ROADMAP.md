@@ -93,6 +93,30 @@ These are the highest-priority forward items.
   (`vim`, `mysql`, …) are handled by the per-service adapters (Feature 2) or
   blocked. **Depends on the #22 argv-exec foundation; build after it.**
 
+- **Background-job verb (launch / poll / kill).** A first-class long-job
+  capability so the agent can start a long command detached and poll it, instead
+  of hand-rolling `nohup … & echo $!` (which trips the write classifier on the
+  redirect/`&`). The gate owns the `nohup`/logfile/PID-dir plumbing (trusted)
+  and classifies/approves **only the inner command**; `status`/`output` are
+  reads, `kill` of an own-job is a low-risk control op. State lives in OS
+  processes + a job dir on the target, so the gate stays stateless. Proposed
+  agent tools: `run_job` (→ job handle + PID), `job_status` (→ running/exited +
+  exit code + log tail), `job_kill`. **Recommended right after the
+  grants/reveal/audit set, but NOT blocking the migration:** with a standing
+  grant on the target box the manual `nohup` launch already auto-signs, so this
+  is a UX upgrade rather than a prerequisite.
+  - *Context (settles three related questions):* multi-**connection**
+    concurrency already works natively — sshd forks a separate gate process per
+    connection and the gate is stateless per-connection, so multiple
+    users/sessions are handled independently (cap = sshd `MaxStartups`/
+    `MaxSessions`); there is no multiplexer to build. The only "a single agent
+    shouldn't block on a long job" gap is closed by this async job handle, not by
+    SSH multiplexing (the agent's turn is single-threaded). Live-output streaming
+    to a **human** (progress bars, %) is the MCP-side rolling audit log
+    (`tail -f`); full interactive Ctrl-C / PTY / "normal SSH terminal" is the
+    gated interactive session (#25) — this job verb is the non-interactive
+    fire-and-poll complement to it, not a duplicate.
+
 - **Friendlier gate responses (#26).** When the gate denies a write (or any
   command needing a signature), return a clear, structured, agent-friendly
   message stating *what* is needed and *how* to get it ("this is a write — it
