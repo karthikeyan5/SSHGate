@@ -87,10 +87,11 @@ func TestAuditLog_FileMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	// We accept 0640 or 0600 — umask may strip group bits — but reject
-	// any world-readable mode.
-	if got := info.Mode().Perm(); got&0o007 != 0 {
-		t.Errorf("audit log mode = %#o; world bits must be off", got)
+	// The signer audit log carries command text, so it is created 0600
+	// (owner-only). A tighter umask cannot make it more permissive, so an
+	// exact match is safe here.
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("audit log mode = %#o; want 0600 (owner-only)", got)
 	}
 }
 

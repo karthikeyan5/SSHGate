@@ -225,6 +225,23 @@ func TestAuditLogAppendOnly(t *testing.T) {
 	}
 }
 
+// TestAuditLogFileMode pins the on-disk mode of the gate-side audit log
+// at 0600 (owner-only). The log carries command text always, and raw
+// output at all+full, so it must never be group- or world-readable.
+func TestAuditLogFileMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	al := gate.NewAuditLogger(gate.AuditAllMeta, path)
+	al.Record(makeRecord("ls", "read", "unsigned", 0, &gate.AuditMeta{StdoutBytes: 1}))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("audit log mode = %#o; want 0600 (owner-only)", got)
+	}
+}
+
 // TestAuditLogFailOpen proves a logging failure (unwritable path) does
 // NOT panic or otherwise propagate as a blocking error — the caller
 // continues. We point the path at a location that cannot be created (a

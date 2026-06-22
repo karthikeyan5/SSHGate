@@ -101,6 +101,41 @@ func TestLogRollsDroppingOldest(t *testing.T) {
 	}
 }
 
+// TestLogFileMode pins the on-disk mode of the live log at 0600
+// (owner-only). It carries the full command always and full output by
+// design, so it must never be group- or world-readable.
+func TestLogFileMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit-live.log")
+	lg := New(path, 64*1024)
+	lg.Log(Entry{Server: "web1", Command: "ls", Classification: "read", Stdout: "x"})
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("live log mode = %#o; want 0600 (owner-only)", got)
+	}
+}
+
+// TestLogFileModeAfterRoll pins that the mode stays 0600 even after a roll
+// rewrites the file via the temp-file + rename path.
+func TestLogFileModeAfterRoll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit-live.log")
+	lg := New(path, 256) // small cap to force a roll
+	for i := 0; i < 30; i++ {
+		lg.Log(Entry{Server: "web1", Command: "echo", Classification: "read", Stdout: strings.Repeat("x", 64), Seq: i})
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("rolled live log mode = %#o; want 0600 (owner-only)", got)
+	}
+}
+
 func TestLogDisabledIsNoop(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit-live.log")
