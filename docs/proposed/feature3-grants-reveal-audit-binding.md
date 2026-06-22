@@ -10,7 +10,7 @@ This bundles features that all touch the **signed payload** (`sigwire.SigPayload
 
 ## 0. Invariants we preserve
 
-- **The gate stays stateless.** No runtime state, no nonce store, no job table. The only files the gate reads are its binary, `gate.pub`, and (new) the host's own SSH host public key. Grants and reveal are *signed payloads presented with each command*, never gate-side state. Long-running job state lives in the **OS process table + files on the target**, not in the gate.
+- **The gate stays stateless.** No runtime state, no nonce store, no job table — no state the gate *reads back* to make a decision. The only files the gate reads for decisions are its binary, `gate.pub`, and (new) the host's own SSH host public key; the audit log (§6) is append-**only** write, never read for a decision. Reveal is a flag inside the per-command signed payload; **grants are signer-side state** (§4 — never on the wire, never gate-side) that auto-mint *normal* per-command signatures, so the gate never sees a grant at all. Long-running job state lives in the **OS process table + files on the target**, not in the gate.
 - **Every elevated capability is encoded in the SIGNED payload** that the human approves. The agent can *request*; only the signer (on Karthi's tap) *grants*; the gate *enforces* against the verified signature. The agent can never self-elevate, and the gate can never self-grant.
 - **The gate is the authoritative enforcement point** (independent of the signer), as today.
 
@@ -75,16 +75,28 @@ The **"executor ID" Karthi described = the OS PID** (or a per-job dir with a fla
 
 ## 4. Standing grants (the keystone — replaces the spec's "Time-Scoped Tokens" §155)
 
-A **signed grant** the signer issues on one approval, carrying `{scope, window, host}`:
-- **Scope = `all`** → any command on that server runs without a fresh tap (used for the fresh **target** during the overnight build).
-- **Scope = exact command-set** → only the pre-shown, exact command strings auto-run (used for the **source** boxes: shutdown + backup + ship). *Exact-string match, no patterns* (Karthi's call — no ambiguity).
-- **Server-bound** via the host-key fingerprint (§3) → a target grant physically cannot run on a source.
-- **Window ≤ 24h** hard ceiling (Karthi's call; gate enforces the ceiling independent of the signer).
-- **Revocable:** stopping the signer kills all grants; plus an explicit revoke. The grant is presented with each command (stateless gate); revoking = the signer/MCP stops presenting it and/or a deny-list.
-- **Audited:** the grant issuance and every command run under it are logged (§6).
-- **Replay posture:** within the window a grant authorizes its scope by design; the mitigations are **server-binding** (can't cross machines) + **exact-command-set scope** on the sensitive source boxes (only the approved commands, nothing else). The `all` scope is reserved for the throwaway target.
+**Architecture: signer-side standing grant (auto-sign), NOT a gate-side grant blob.** (Decided 2026-06-22; this *revises* the section's earlier "grant presented on the wire" framing — rationale below.)
 
-"Extended-TTL" is the degenerate case (scope = a few commands, longer window) — same primitive.
+A **standing grant** is state the *signer* holds after one human approval; it never appears on the wire, and the **gate is completely unchanged and unaware of grants**. On Karthi's one Telegram approval, the signer records `{alias, scope, expiry ≤ 24h}` in memory. During the window, when the MCP requests a signature for a matching `(alias, command)`, the signer **auto-approves** (no tap) and emits a **normal per-command `SigPayload`** — host-bound (§3), `ts`/`exp` ≤ 60s/5min, exactly as today. The gate just verifies normal signatures, unchanged.
+
+- **Scope = `all`** → any command on that alias auto-signs (the fresh **target** during the overnight build).
+- **Scope = exact command-set** → only the pre-shown exact command strings auto-sign; everything else still prompts (the **source** boxes: shutdown + backup + ship). *Exact-string match, no patterns.*
+- **Server-bound:** the auto-signed per-command sig still carries `Host = fp(alias)` (§3), so the gate's host-binding makes a target grant physically unusable on a source.
+- **Window ≤ 24h** hard ceiling, enforced by the **signer** (it won't auto-sign past the grant's expiry). Each auto-signed sig is still independently capped at ≤ 5 min by the gate (unchanged), so the gate's replay window is unchanged.
+- **Revocable — "stop the signer kills grants":** the grant lives in the signer, kept **in-memory**, so a signer restart also drops every grant. An explicit revoke drops a standing grant. There is nothing for the agent to hold or replay — it never sees a grant, only normal per-command sigs minted on demand.
+- **Audited:** grant issuance + every command auto-signed under it are logged (the signer's approval log + the gate-side audit §6 records *every* command, grant or not).
+- **Self-elevation impossible:** the agent can *request* a grant (a new **`request_grant`** MCP tool → the agent surface becomes 6 tools), but only Karthi *creates* one by approving a distinct, scary grant message (showing alias + scope + duration). The agent can never self-grant; the gate can never self-grant.
+
+### Why signer-side (model I) over a gate-side grant blob (model II)
+- **The gate stays stateless AND untouched** — the hard invariant, maximally preserved; zero new gate code = zero new gate attack surface; the wire is unchanged.
+- **"Stop the signer → grants die" is natural** (the grant is signer state) — exactly the revocability asked for, for free.
+- **Every command under a grant is still host-bound, ≤ 5 min, and audited** — no weakening of per-command enforcement.
+- *Trade-off accepted:* the gate can't independently cap the 24h (it never sees a grant, only ≤ 5 min sigs); the 24h is signer-enforced. Fine — a rogue signer holds the key anyway, so a gate-side grant cap adds little; against a *buggy* signer the in-memory expiry + the gate's per-sig 5-min cap bound the blast radius.
+- *Model II — a signed grant blob presented with each command, gate verifies scope/window/host — was rejected:* it adds grant-parsing to the gate (new attack surface) and makes "stop signer kills grants" awkward, because the issued blob is already in the agent's hands until expiry.
+
+**Replay posture:** within the window a grant authorizes its scope by design; the mitigations are **server-binding** (a grant can't cross machines) + **exact-command-set scope** on the sensitive source boxes (only the approved strings auto-sign). `all` is reserved for the throwaway target.
+
+"Extended-TTL" (the agent asking for a longer single-command window) is the degenerate case — a one-command, slightly-longer grant — same primitive.
 
 ---
 
