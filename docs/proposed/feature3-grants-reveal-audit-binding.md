@@ -119,6 +119,29 @@ The original "MCP-side only" plan was wrong: the agent shares the MCP's trust do
 - `all+full` — everything incl. full output (verbose)
 - Rejections/denials always logged from `writes` up.
 
+### 6c. As-built notes (TDD landing, 2026-06-22)
+
+**Tier 6a — gate-side authoritative log** (`src/gate/audit.go`, wired in `src/gate/cmd/sshgate-gate/main.go`):
+- One append-only JSON-Lines record per command at the gate dispatch chokepoint — read, write, AND rejection. Fields: `ts` (UTC epoch), `command`, `classification` (read/write), `approval_status` (`signed` / `unsigned` / `denied`), `exit_code`, and `meta` (`stdout_bytes`/`stderr_bytes`/`lines`/`duration_ms`) at `all+meta`+. Raw `stdout`/`stderr` only at `all+full`.
+- **Leveling** read from `~/.sshgate-gate/audit-level` (one token per the list above); **default `all+meta`** when the file is absent/unreadable/garbage — `ParseAuditLevel` fails to the default, the gate never crashes on bad config. `Record` additionally blanks raw output below `all+full` (belt-and-braces: `all+meta` provably cannot leak raw output).
+- **Output metadata** comes from the widened executor (below). Counts are measured **post-redaction** — what the agent actually receives. `all+full` makes the executor tee a **capped** copy (256 KiB/stream, truncation-marked) so the level is meaningful without unbounded gate memory.
+- **Append-only + fsync**, opened `O_APPEND|O_CREATE|O_WRONLY` mode 0640, **open→append→fsync→close per invocation** (a fresh gate per `SSH_ORIGINAL_COMMAND`, so per-invocation == per-command). The gate never holds an FD between commands and **never reads the log back** — statelessness preserved.
+- **Path is configurable** via `~/.sshgate-gate/audit-path` (default `~/.sshgate-gate/audit.log`) so an admin can point it at a separate-user-owned append-only location.
+- **Fail-open:** every audit error (open/write/fsync/marshal) is swallowed — a logging failure NEVER blocks the command (the audit is a side effect, not a gate; the gate also has no safe out-of-band error sink, since stderr is the SSH stream). Tested with an unwritable path.
+- **Config-change protection:** the level/path files live in the gate dir. Changing them through a gate command is itself a WRITE (signed + approved); an admin with box access edits them directly. The agent cannot silently quiet its own audit.
+
+**Tamper-resistance posture — what is built vs deferred (IMPORTANT):**
+- The gate writes **append-only + fsync** regardless of who owns the directory — that is the best-effort baseline and it always holds.
+- **TRUE tamper-resistance requires a root-time setup that SSHGate does NOT automate:** a dedicated `sshgate-audit` user owning an append-only directory (`chattr +a`, or a journald/syslog sink the gate's run-as user cannot rewrite), with the gate's run-as user granted append-but-not-rewrite/delete. An admin provisions that out-of-band and points `audit-path` at it. **We deliberately do NOT build root provisioning automation here** (out of scope, and root-time host policy is the admin's call).
+- Absent that setup, the log degrades to **gate-user-owned best-effort append-only** — defense in depth, not perfection. Per Karthi's accepted limit: a full host compromise that nukes the folder is tolerable ("if they're in, the logs are the least of our problems").
+
+**Executor widening** (`src/gate/executor.go`): `ExecWithRedaction` now returns `(ExecResult, error)` instead of `(int, error)`. `ExecResult` carries `ExitCode` plus `StdoutBytes`/`StderrBytes`/`Lines`/`Duration` (and, only when `CaptureLimit>0`, a capped `Stdout`/`Stderr`). Counting writers sit **below** the redactor so byte/line counts reflect the post-redaction stream. Existing redaction + reveal behaviour is unchanged (the redactor wiring and the `Reveal`/`Rules` seam are untouched; only the destination is wrapped in a counting writer).
+
+**Tier 6b — MCP-side rolling live log** (`src/mcp/livelog/`, wired in `src/mcp/server.go` `runHandler`/`runBatchHandler`, configured in `src/mcp/cmd/sshgate-mcp/main.go`):
+- Size-capped **rolling** JSON-Lines at `~/.config/sshgate/audit-live.log`, holding the **whole** command + **full** output per command (one entry per `run`, one per non-skipped `run_batch` result). When the file exceeds the cap it is rewritten keeping only the newest suffix of complete lines (oldest dropped, terminal-scrollback style) via a temp-file + atomic rename.
+- **On by default**, cap = **5 MiB**, configurable via `~/.config/sshgate/audit-live-cap` (byte count; `0` disables — a nil log, a silent no-op). Fail-open like 6a.
+- This is the `tail -f` operator view and **subsumes "Live Command View"**; it is the convenience surface, **NOT** the system of record (that's 6a).
+
 ---
 
 ## 7. Minor / deferred
