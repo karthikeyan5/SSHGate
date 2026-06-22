@@ -55,6 +55,16 @@ type signRequestCmd struct {
 	// omitempty keeps the wire shape unchanged for any legacy caller that
 	// does not send it.
 	Host string `json:"host,omitempty"`
+	// Reveal requests a SECRET-REVEAL: when true, the daemon copies it into
+	// the signed payload's Reveal field so the gate runs the command output
+	// WITHOUT the redactor. Reason is the mandatory human justification (the
+	// MCP enforces non-empty Reason for reveal=true and shows it in the
+	// approval UX). Both omitempty so an ordinary write's wire shape is
+	// unchanged. Reason is NOT signed — it exists only for the human approval
+	// decision and audit; the gate-enforced capability is the signed Reveal
+	// bool.
+	Reveal bool   `json:"reveal,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // signResponse is the wire-format response. Status is one of "approved",
@@ -131,7 +141,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl > int64(sigwire.MaxSigValidity/time.Second) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
-		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl}
+		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason}
 	}
 
 	resultCh, err := d.Backend.Request(ctx, apReq)
@@ -252,6 +262,12 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 			// Bind the signature to the target's pinned host key. The MCP
 			// sourced this from its trusted registry; the gate enforces it.
 			Host: c.Host,
+			// Carry the SECRET-REVEAL capability INTO the signed bytes. Only a
+			// human-approved request reaches here, so signing reveal=true means
+			// the gate will run that one command's output un-redacted. The
+			// agent never sets this — it is authorised by the approval the
+			// signer is responding to.
+			Reveal: c.Reveal,
 		}
 		// Sign the exact bytes that DecodeSigned will reconstruct on
 		// the verifier side; sigwire.EncodeSigned + verify.go both go

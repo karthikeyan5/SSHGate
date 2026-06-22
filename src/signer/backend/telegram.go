@@ -465,9 +465,18 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 	explanations, explainErr := t.runExplainer(ctx, req.Commands)
 	text := formatApprovalMessage(req, t.reqTimeout, explanations, explainErr)
 	msg := tgbotapi.NewMessage(chatID, text)
+	// The approve button label makes a SECRET-REVEAL unmistakable: a normal
+	// write reads "✓ Approve all"; a reveal reads "✓ Approve SECRET-REVEAL" so
+	// the operator cannot tap through on muscle memory. The callback data
+	// ("approve:<reqID>") is identical either way — the gate-enforced
+	// capability lives in the signed payload, not in the button.
+	approveLabel := "✓ Approve all"
+	if requestHasReveal(req) {
+		approveLabel = "✓ Approve SECRET-REVEAL"
+	}
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✓ Approve all", "approve:"+req.RequestID),
+			tgbotapi.NewInlineKeyboardButtonData(approveLabel, "approve:"+req.RequestID),
 			tgbotapi.NewInlineKeyboardButtonData("✗ Deny", "deny:"+req.RequestID),
 		),
 	)
@@ -699,12 +708,34 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 	if len(req.Commands) > 0 {
 		server = req.Commands[0].Server
 	}
-	b.WriteString("🔐 SSHGate approval")
+	reveal := requestHasReveal(req)
+	if reveal {
+		// A SECRET-REVEAL gets a distinct, scary banner: the operator must
+		// instantly recognise that approving this lets RAW secret values
+		// escape redaction and reach the agent (and the AI provider, and this
+		// chat). This is deliberately alarming — it is not a normal write.
+		b.WriteString("⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.\n\n")
+	}
+	if reveal {
+		b.WriteString("🔓 SSHGate SECRET-REVEAL")
+	} else {
+		b.WriteString("🔐 SSHGate approval")
+	}
 	if server != "" {
 		b.WriteString(" — ")
 		b.WriteString(server)
 	}
 	b.WriteString("\n\n")
+	if reveal {
+		// Show the mandatory reason(s) right up top so the human knows WHY raw
+		// secrets are being requested before reading the command.
+		for _, c := range req.Commands {
+			if c.Reveal && c.Reason != "" {
+				fmt.Fprintf(&b, "Reason: %s\n", c.Reason)
+			}
+		}
+		b.WriteString("\n")
+	}
 	fmt.Fprintf(&b, "%d command", len(req.Commands))
 	if len(req.Commands) != 1 {
 		b.WriteByte('s')
@@ -730,6 +761,19 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
 	fmt.Fprintf(&b, "Expires in %s\n", timeout)
 	return b.String()
+}
+
+// requestHasReveal reports whether any command in the request is a
+// SECRET-REVEAL. The MCP enforces single-command-only for reveals, so in
+// practice a reveal request is exactly one command; this scans defensively so
+// the scary UX is shown if reveal appears anywhere.
+func requestHasReveal(req ApprovalRequest) bool {
+	for _, c := range req.Commands {
+		if c.Reveal {
+			return true
+		}
+	}
+	return false
 }
 
 // maskUserID renders an id like "1234567" as "12***67". The point is

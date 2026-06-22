@@ -23,17 +23,28 @@ import (
 // empty, both Stdout and Stderr pass through with no redaction —
 // equivalent to v1.0 behaviour, useful for tests that exercise the
 // raw executor.
+//
+// Reveal, when true, runs the command's output WITHOUT the redactor even
+// when Rules is non-empty — the SECRET-REVEAL path, where raw secret values
+// are intentionally allowed to flow to the agent. It is a SEPARATE, explicit
+// field (NOT conflated with "Rules is empty"): an empty ruleset is a
+// configuration state, whereas Reveal is a per-command, signed authorisation.
+// The gate sets Reveal only from the verified signed payload (see
+// gate.VerifySigned) on the signed path; the unsigned read path never sets it.
 type ExecOpts struct {
 	SessionSalt [32]byte
 	Rules       []redact.Rule
+	Reveal      bool
 }
 
 // ExecWithRedaction runs cmd via "/bin/sh -c <cmd>", streaming the child's
-// stdout and stderr to os.Stdout / os.Stderr. When opts.Rules is non-empty,
-// c.Stdout and c.Stderr are wrapped in redact.Writer instances so every byte
-// the child emits passes through the streaming scrubber before reaching the
-// SSH stream; when opts.Rules is empty both streams pass through unredacted.
-// It blocks until the child exits or ctx is cancelled, whichever comes first.
+// stdout and stderr to os.Stdout / os.Stderr. When opts.Rules is non-empty AND
+// opts.Reveal is false, c.Stdout and c.Stderr are wrapped in redact.Writer
+// instances so every byte the child emits passes through the streaming
+// scrubber before reaching the SSH stream; when opts.Rules is empty — or
+// opts.Reveal is true (the signed SECRET-REVEAL path) — both streams pass
+// through unredacted. It blocks until the child exits or ctx is cancelled,
+// whichever comes first.
 //
 // The redactor lives at the gate boundary by design (see
 // docs/redaction-architecture.md §"Where
@@ -67,7 +78,7 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (exitCode
 	// stdout — the spec is explicit: both streams pass through their
 	// own writer (no cross-stream coupling, no shared buffer).
 	var stdoutCloser, stderrCloser io.Closer
-	if len(opts.Rules) > 0 {
+	if !opts.Reveal && len(opts.Rules) > 0 {
 		ow := redact.NewWriter(os.Stdout, opts.SessionSalt, opts.Rules)
 		ew := redact.NewWriter(os.Stderr, opts.SessionSalt, opts.Rules)
 		c.Stdout = ow

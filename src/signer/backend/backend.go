@@ -20,10 +20,20 @@ type ApprovalRequest struct {
 // readable alias from the MCP's registry (e.g. "prod-db"); Cmd is the
 // literal shell command line; TTLSec is the spec's signature validity
 // window (`exp - ts`), bounded by sigwire.MaxSigValidity (5 minutes).
+//
+// Reveal marks this as a SECRET-REVEAL: if approved, the gate runs the
+// command's output WITHOUT the redactor (raw secrets flow to the agent). The
+// approval UX MUST render reveal distinctly and scarily. Reason is the
+// mandatory human-readable justification the operator sees; it is required
+// (enforced MCP-side) whenever Reveal is true, and shown in the approval
+// message so the human knows WHY raw secrets are being requested. Both are
+// zero for ordinary writes.
 type CommandReq struct {
 	Server string
 	Cmd    string
 	TTLSec int64
+	Reveal bool
+	Reason string
 }
 
 // ResultStatus is the outcome of an ApprovalRequest. The zero value is

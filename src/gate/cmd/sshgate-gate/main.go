@@ -121,7 +121,8 @@ func run() int {
 		}
 		kind := classify.Classify(raw)
 		if kind == classify.KindRead {
-			return execChild(raw)
+			// Tier-1 read-only: unsigned read, never revealed.
+			return execChild(raw, false)
 		}
 		// KindWrite or KindUnknown (empty/whitespace already handled
 		// upstream — anything else unknown falls through as write).
@@ -130,6 +131,12 @@ func run() int {
 	}
 
 	innerCmd := raw
+	// reveal is the verified SECRET-REVEAL capability. It can ONLY become true
+	// on the signed path below, from the authenticated payload — the unsigned
+	// read path leaves it false, so a read is never revealed (it is redacted
+	// like any other output). The agent cannot set this; only a human approval
+	// turned into a signature can.
+	reveal := false
 	if signed {
 		// Self-derive THIS gate's host-key fingerprints so VerifySigned can
 		// enforce the per-server binding: a signature approved for server X
@@ -145,12 +152,13 @@ func run() int {
 			logf("derive host-key fingerprints: %v", herr)
 			return exitSoftware
 		}
-		ic, err := gate.VerifySigned(raw, pubkey, time.Now(), selfHostFPs)
+		ic, rev, err := gate.VerifySigned(raw, pubkey, time.Now(), selfHostFPs)
 		if err != nil {
 			logf("%v", err)
 			return exitDataErr
 		}
 		innerCmd = ic
+		reveal = rev
 	}
 
 	// Administrative commands. Only valid when signed.
@@ -168,7 +176,10 @@ func run() int {
 	kind := classify.Classify(innerCmd)
 	switch kind {
 	case classify.KindRead:
-		return execChild(innerCmd)
+		// A signed READ may carry reveal=true (e.g. `cat secret.env`
+		// approved as a reveal): the verified flag flows through. An
+		// UNSIGNED read can never reach here (reveal stays false above).
+		return execChild(innerCmd, reveal)
 	case classify.KindWrite, classify.KindUnknown:
 		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
@@ -178,7 +189,7 @@ func run() int {
 			logf("write commands require a SSHGATE_SIG prefix")
 			return exitNoPermVal
 		}
-		return execChild(innerCmd)
+		return execChild(innerCmd, reveal)
 	default:
 		logf("unexpected classification: %v", kind)
 		return exitGeneric
@@ -189,8 +200,11 @@ func run() int {
 // received by gate are propagated to the child process group via
 // the context cancellation wired through Exec. The child's
 // stdout/stderr are wrapped in redact.Writer instances so every byte
-// the child emits passes Layer-1 redaction (v1.2 R1).
-func execChild(cmd string) int {
+// the child emits passes Layer-1 redaction (v1.2 R1) — UNLESS reveal is
+// true, the signed SECRET-REVEAL path, where the verified payload
+// authorised raw (un-redacted) output. reveal can only be true on the
+// signed path (see run()); it is never set for an unsigned read.
+func execChild(cmd string, reveal bool) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	// Compile the redaction ruleset lazily — only this execute path needs
@@ -203,6 +217,7 @@ func execChild(cmd string) int {
 	exit, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
 		SessionSalt: sessionSalt,
 		Rules:       rules,
+		Reveal:      reveal,
 	})
 	if err != nil {
 		logf("%v", err)

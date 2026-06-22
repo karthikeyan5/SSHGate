@@ -61,6 +61,13 @@ type CmdReq struct {
 	Cmd    string
 	TTLSec int64
 	Host   string
+	// Reveal requests a SECRET-REVEAL: the daemon signs reveal=true into the
+	// payload so the gate runs this one command's output WITHOUT the redactor.
+	// Reason is the mandatory human justification shown in the approval UX
+	// (the caller enforces non-empty Reason for reveal=true). Both are zero for
+	// ordinary writes. Reveal is single-command only — there is no batch reveal.
+	Reveal bool
+	Reason string
 }
 
 // Signed is one signed result returned from signer on approval.
@@ -80,6 +87,8 @@ type signRequestCmd struct {
 	Cmd    string `json:"cmd"`
 	TTLSec int64  `json:"ttl_seconds"`
 	Host   string `json:"host,omitempty"`
+	Reveal bool   `json:"reveal,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type signRequest struct {
@@ -157,7 +166,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 		Commands:  make([]signRequestCmd, len(cmds)),
 	}
 	for i, cmd := range cmds {
-		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host}
+		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host, Reveal: cmd.Reveal, Reason: cmd.Reason}
 	}
 	wire, err := json.Marshal(body)
 	if err != nil {
