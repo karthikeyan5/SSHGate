@@ -80,7 +80,12 @@ func TestRuleGoldens(t *testing.T) {
 			ruleID:   "sshgate-auth-bearer",
 			positive: "Authorization: Bearer abcdef1234567890",
 			secret:   "abcdef1234567890",
-			negative: "auth: token=anonymous",
+			// Negative: a bearer-keyword line with no token value. (The
+			// old "auth: token=anonymous" negative was retired when the
+			// broader sshgate-sensitive-assignment rule landed — a
+			// `token=<value>` assignment is now redacted on purpose, the
+			// bias-toward-redacting call.)
+			negative: "Authorization: Bearer",
 		},
 		{
 			name:     "sshgate-password-kv",

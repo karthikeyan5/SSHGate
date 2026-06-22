@@ -46,6 +46,30 @@ type Writer struct {
 
 	// pem is non-nil while the writer is inside a PEM block.
 	pem *pemAccumulator
+
+	// suppressing is set when a ringMax forced-flush truncated a match
+	// that still reached the buffer tail — i.e. a secret longer than
+	// ringMax whose anchor has scrolled out of the window. The held
+	// tail bytes are a continuation of that secret but no longer carry
+	// the rule's anchor, so the regex can never re-match them. While
+	// suppressing is true the writer drops (does not emit) all incoming
+	// non-delimiter bytes as continuation of the redacted secret, and
+	// clears the flag at the first whitespace/delimiter — the natural
+	// end of a single token. This is the safe failure mode: it
+	// over-redacts a pathological multi-megabyte single token rather
+	// than ever leaking its raw bytes.
+	suppressing bool
+}
+
+// isSecretDelimiter reports whether b terminates a contiguous secret
+// token. Used by the ringMax suppression continuation to find where an
+// anchor-less runaway secret ends.
+func isSecretDelimiter(b byte) bool {
+	switch b {
+	case ' ', '\t', '\r', '\n', '"', '\'', '`', ';', '&', '|', '<', '>', '(', ')', '{', '}', ',':
+		return true
+	}
+	return false
 }
 
 // NewWriter wraps dst. Every byte written through w passes Layer 1
@@ -76,6 +100,26 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
+	// ringMax suppression continuation: we are mid-way through dropping a
+	// secret longer than ringMax whose anchor scrolled out of the
+	// window. Drop bytes until the token ends at a delimiter, then
+	// resume normal processing on the remainder.
+	if w.suppressing {
+		i := 0
+		for i < len(p) && !isSecretDelimiter(p[i]) {
+			i++
+		}
+		w.scanner.suppressedBytes.Add(uint64(i))
+		if i >= len(p) {
+			// Entire chunk is continuation of the suppressed secret.
+			return len(p), nil
+		}
+		// Token ended; the delimiter and everything after rejoin the
+		// normal path.
+		w.suppressing = false
+		p = p[i:]
+	}
+
 	// PEM accumulator path: every byte goes into the accumulator
 	// until it completes or aborts. The accumulator is responsible
 	// for spilling unconsumed bytes back into the normal path.
@@ -104,13 +148,26 @@ func (w *Writer) Close() error {
 	}
 	w.closed = true
 	if w.pem != nil {
-		// Unterminated PEM at EOF — flush whatever we have through
-		// unchanged. A well-formed key that finished on the same
-		// Write would already have completed via feedPEM.
+		// Unterminated PEM at EOF. The accumulated bytes have NEVER
+		// passed through the Layer-1 scanner, so flushing them raw leaks
+		// secrets (BLOCKER 2). Two cases:
+		//   1. The span opens with a real `...PRIVATE KEY-----` header —
+		//      the stream ended mid-key. Redact the whole buffered span;
+		//      an unterminated private key at EOF is still a private key.
+		//   2. Otherwise it was a benign false BEGIN that simply never
+		//      saw its END before the stream closed. Scan it through
+		//      Layer 1 so any embedded named secret is caught while the
+		//      surrounding bytes survive.
 		buffered := w.pem.buf
 		w.pem = nil
 		if len(buffered) > 0 {
-			if _, err := w.dst.Write(buffered); err != nil {
+			if isPrivateKeyBegin(buffered) {
+				marker := FormatMarker(w.scanner.salt, buffered)
+				if _, err := w.dst.Write([]byte(marker)); err != nil {
+					return err
+				}
+				w.scanner.redactCount.Add(1)
+			} else if err := w.scanAndEmit(buffered); err != nil {
 				return err
 			}
 		}
@@ -141,10 +198,39 @@ func (w *Writer) feedPEM(chunk []byte) error {
 		return nil
 	case res.Aborted:
 		w.pem = nil
-		// Buffered bytes pass through verbatim — this was a false
-		// BEGIN. The agent gets to see whatever those bytes were.
-		if _, err := w.dst.Write(res.Buffered); err != nil {
+		// The accumulator gave up looking for `-----END` after
+		// pemMaxBuffer bytes. This span was NEVER seen by the Layer-1
+		// scanner, so we must not flush it raw — a real AWS key / PAT /
+		// password living in those bytes would leak verbatim (BLOCKER 1).
+		//
+		// Two recovery shapes:
+		//   1. The span opens with a real `...PRIVATE KEY-----` header —
+		//      treat it as a leaking key that simply lacks (so far) its
+		//      END line and redact the whole span. Biasing toward
+		//      redaction here is the safe call.
+		//   2. Otherwise it is a benign false BEGIN (a log line that
+		//      happened to contain `-----BEGIN `). Re-scan it (and the
+		//      abort tail) through Layer 1 so any embedded named secret
+		//      is still caught, while the surrounding noise passes
+		//      through.
+		if isPrivateKeyBegin(res.Buffered) {
+			marker := FormatMarker(w.scanner.salt, res.Buffered)
+			if _, err := w.dst.Write([]byte(marker)); err != nil {
+				return err
+			}
+			w.scanner.redactCount.Add(1)
+			if len(res.Tail) > 0 {
+				w.buf = append(w.buf, res.Tail...)
+				return w.processBuffer(false)
+			}
+			return nil
+		}
+		if err := w.scanAndEmit(res.Buffered); err != nil {
 			return err
+		}
+		if len(res.Tail) > 0 {
+			w.buf = append(w.buf, res.Tail...)
+			return w.processBuffer(false)
 		}
 		return nil
 	default:
@@ -203,22 +289,93 @@ func (w *Writer) processBuffer(flush bool) error {
 	// Scan the entire buffer (prefix + tail) for matches. A match
 	// whose start lies inside the prefix-to-emit is redacted on
 	// emission. A match that straddles the prefix/tail boundary
-	// (start before emitUpTo, end past emitUpTo) makes emitUpTo
+	// (start at-or-before emitUpTo, end past emitUpTo) makes emitUpTo
 	// retreat to the match's start — we retain the entire match in
 	// the tail so it can complete or be matched again next round.
+	//
+	// The boundary test is `m.Start <= emitUpTo` (inclusive): a match
+	// whose secret group begins exactly at emitUpTo and runs past it
+	// would otherwise be split — the head bytes of the secret (its
+	// anchor) emitted, the rest held with no anchor to re-match, so the
+	// remainder leaks raw on the next round. Inclusive retention keeps
+	// the whole match together.
 	matches := w.scanner.findMatches(w.buf)
 	for _, m := range matches {
-		if m.Start < emitUpTo && m.End > emitUpTo {
-			// Straddler: hold the whole thing in the tail.
-			emitUpTo = m.Start
+		if m.Start <= emitUpTo && m.End > emitUpTo {
+			// Straddler: hold the whole match — INCLUDING its anchor
+			// (m.MatchStart, the keyword/prefix before the secret group)
+			// — in the tail. Retreating only to m.Start (the secret
+			// group) would flush the anchor, leaving the held remainder
+			// un-re-matchable and so leaking raw next round.
+			emitUpTo = m.MatchStart
 			break
 		}
+	}
+
+	// ringMax enforcement (the documented hard cap). The straddler
+	// retreat above can drive emitUpTo back toward 0 round after round
+	// for an adversarial open-ended match that never terminates — that
+	// is the unbounded-growth bug ringMax exists to stop. Once the
+	// buffer crosses ringMax we MUST flush rather than grow without
+	// bound, and we must never flush a straddling secret raw.
+	if !flush && len(w.buf) > ringMax {
+		// Is there a match that reaches the very tail of the buffer
+		// (m.End == len(buf))? That means an open secret whose anchor is
+		// about to (or already did) scroll out of the window. Redact the
+		// whole match from its anchor to the buffer end, drop the entire
+		// buffer (retain nothing — a leftover anchor-less tail would leak
+		// raw next round), and enter suppression so the secret's
+		// continuation in the next Write is dropped until its delimiter.
+		tailMatchStart := -1
+		for _, m := range matches {
+			if m.End != len(w.buf) {
+				continue
+			}
+			if tailMatchStart < 0 || m.MatchStart < tailMatchStart {
+				tailMatchStart = m.MatchStart
+			}
+		}
+		if tailMatchStart >= 0 {
+			// Emit any clean prefix before the open match, with its own
+			// fully-contained matches redacted, then a single marker for
+			// the open secret, then suppress its continuation.
+			var headMatches []match
+			for _, m := range matches {
+				if m.End <= tailMatchStart {
+					headMatches = append(headMatches, m)
+				}
+			}
+			if err := w.emitWithMatches(w.buf[:tailMatchStart], headMatches); err != nil {
+				return err
+			}
+			marker := FormatMarker(w.scanner.salt, w.buf[tailMatchStart:])
+			if _, err := w.dst.Write([]byte(marker)); err != nil {
+				return err
+			}
+			w.scanner.redactCount.Add(1)
+			w.buf = w.buf[:0]
+			w.suppressing = true
+			return nil
+		}
+		// No tail-reaching match: a benign (or fully-contained-match)
+		// buffer simply grew past the cap. Force-flush down to the safe
+		// prefix, redacting any match that overlaps the flush boundary.
+		forced := len(w.buf) - safePrefix
+		if forced > emitUpTo {
+			emitUpTo = forced
+		}
+		if err := w.emitRedactingOverlap(emitUpTo, matches); err != nil {
+			return err
+		}
+		w.buf = append(w.buf[:0], w.buf[emitUpTo:]...)
+		return nil
 	}
 
 	if emitUpTo <= 0 {
 		// All matches straddle into the tail; hold the buffer for
 		// next round. (Edge case only triggered by adversarial input
-		// where a near-ring-max secret begins at offset 0.)
+		// where a near-ring-max secret begins at offset 0 — bounded by
+		// the ringMax flush above on the next Write.)
 		return nil
 	}
 
@@ -238,6 +395,33 @@ func (w *Writer) processBuffer(flush bool) error {
 	// Compact: move the held tail to the start of the buffer.
 	w.buf = append(w.buf[:0], w.buf[emitUpTo:]...)
 	return nil
+}
+
+// emitRedactingOverlap flushes w.buf[:emitUpTo], redacting every match
+// that overlaps the flushed region — including a match that straddles
+// emitUpTo, whose tail past the boundary is dropped (truncated at the
+// boundary). It is the ringMax safety valve: when the buffer is at the
+// hard cap we cannot hold a never-terminating secret any longer, and we
+// must never emit its bytes raw, so we redact the overlapping span up to
+// the flush point. The redacted secret may be partial; that is fine — a
+// partial marker is a redaction, not a leak.
+func (w *Writer) emitRedactingOverlap(emitUpTo int, matches []match) error {
+	var emitMatches []match
+	for _, m := range matches {
+		if m.Start >= emitUpTo {
+			continue // entirely in the retained tail
+		}
+		mm := m
+		if mm.End > emitUpTo {
+			// Truncate the straddling match at the flush boundary so we
+			// redact what we are about to emit; the remaining tail bytes
+			// stay in the buffer and are re-scanned next round.
+			mm.End = emitUpTo
+			mm.Secret = append([]byte(nil), w.buf[mm.Start:emitUpTo]...)
+		}
+		emitMatches = append(emitMatches, mm)
+	}
+	return w.emitWithMatches(w.buf[:emitUpTo], emitMatches)
 }
 
 // emitWithMatches writes span to dst with the given pre-computed
@@ -268,3 +452,21 @@ func (w *Writer) scanAndEmit(span []byte) error {
 func (w *Writer) Redactions() uint64 {
 	return w.scanner.Stats()
 }
+
+// Buffered reports the number of bytes currently held in the writer's
+// safe-prefix ring (plus any PEM accumulator). It exists so the
+// ringMax invariant (the buffer is bounded regardless of input) is
+// observable and testable. The returned figure is the live held-byte
+// count, not a high-water mark.
+func (w *Writer) Buffered() int {
+	n := len(w.buf)
+	if w.pem != nil {
+		n += len(w.pem.buf)
+	}
+	return n
+}
+
+// RingMax returns the writer's hard ring-buffer cap in bytes. Exposed
+// so tests can assert the documented bound without hard-coding the
+// constant.
+func RingMax() int { return ringMax }
