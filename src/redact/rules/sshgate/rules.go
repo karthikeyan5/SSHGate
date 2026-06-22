@@ -176,7 +176,7 @@ func Rules() []redact.Rule {
 		redact.CompileRule(
 			"sshgate-url-userinfo-password",
 			"Password embedded in a scheme://user:pass@host URL",
-			`(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|https?|ftp|ssh)://[^\s:/@]+:([^\s:/@]+)@`,
+			`(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|https?|ftp|ssh)://[^\s:/@]*:([^\s:/@]+)@`,
 			[]string{"://"},
 			1, 1, 4096,
 		),

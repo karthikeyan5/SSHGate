@@ -180,6 +180,7 @@ func TestURLEmbeddedCredentialsRedacted(t *testing.T) {
 		{"mysql", "mysql://root:my-mysql-pw@127.0.0.1:3306/db", "my-mysql-pw"},
 		{"mongodb", "mongodb://svc:mongoSecret123@cluster0/db", "mongoSecret123"},
 		{"https", "https://user:httpsecretpw@api.example.com/v1", "httpsecretpw"},
+		{"empty-user", "redis://:onlypasswordhere@host:6379", "onlypasswordhere"},
 	}
 	for _, tc := range cases {
 		tc := tc
