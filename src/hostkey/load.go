@@ -44,11 +44,19 @@ func LoadHostFingerprintsFromGlob(glob string) ([]string, error) {
 		return nil, fmt.Errorf("glob %s: %w", glob, err)
 	}
 	out := make([]string, 0, len(matches))
+	// Dedupe: a symlink plus its target (or any two paths) can both match the
+	// glob and resolve to the same key. Collapse repeats so the returned set is
+	// a clean set of distinct fingerprints. Insertion order is preserved.
+	seen := make(map[string]struct{}, len(matches))
 	for _, path := range matches {
 		fp, ok := fingerprintFile(path)
 		if !ok {
 			continue
 		}
+		if _, dup := seen[fp]; dup {
+			continue
+		}
+		seen[fp] = struct{}{}
 		out = append(out, fp)
 	}
 	return out, nil
@@ -58,6 +66,19 @@ func LoadHostFingerprintsFromGlob(glob string) ([]string, error) {
 // canonical fingerprint. It returns ok=false (no error) for any file that
 // cannot be read or parsed, so the caller can skip it without aborting the
 // whole load.
+//
+// NOTE — deliberate mode-check asymmetry vs gate/keystore.go LoadPubKey:
+// LoadPubKey refuses a group/world-WRITABLE gate.pub because that file is the
+// signature trust anchor (its bytes decide whether a write is authentic), so a
+// writable anchor is a takeover. The host-key files read here are different in
+// kind: /etc/ssh/ssh_host_*.pub are root-owned, world-readable STATIC IDENTITY
+// files (the machine's own published identity), NOT a trust anchor. The gate
+// only ever READS them, and writing /etc/ssh already requires root — i.e. full
+// host compromise, at which point the host-binding it protects is moot anyway.
+// Worse, a perms-quirk-driven mode-SKIP here could falsely drop a legitimate
+// host key from the set and, if it emptied the set, fail every signed write
+// closed (a self-inflicted DoS). So the mode check is deliberately OMITTED here
+// — this is intentional, not an oversight; do NOT add a mode-skip.
 func fingerprintFile(path string) (fp string, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {

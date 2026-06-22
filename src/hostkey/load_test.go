@@ -3,6 +3,7 @@ package hostkey
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,5 +87,50 @@ func TestLoadHostFingerprints_SkipsUnparseable(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != fpGood {
 		t.Errorf("got %v; want exactly [%q]", got, fpGood)
+	}
+}
+
+// TestLoadHostFingerprints_GlobErrorFailsClosed pins the SECURITY-relevant
+// fail-closed path: if the glob itself errors (e.g. a malformed pattern), the
+// loader must return an ERROR and NO fingerprints — never an empty-but-ok set
+// that the gate would (correctly) treat as "I have no identity" yet which would
+// hide the real fault. The gate's caller maps this error to exitSoftware
+// (fail-closed), so a glob failure can never silently open the gate. The
+// failing glob is injected through the filepathGlob seam.
+func TestLoadHostFingerprints_GlobErrorFailsClosed(t *testing.T) {
+	wantErr := errors.New("synthetic glob failure")
+	orig := filepathGlob
+	filepathGlob = func(string) ([]string, error) { return nil, wantErr }
+	defer func() { filepathGlob = orig }()
+
+	got, err := LoadHostFingerprintsFromGlob("/etc/ssh/ssh_host_*.pub")
+	if err == nil {
+		t.Fatalf("glob error was swallowed: got %v, want a wrapped error (fail-closed)", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error %v does not wrap the injected glob failure %v", err, wantErr)
+	}
+	if got != nil {
+		t.Errorf("got %v fingerprints on glob error; want nil (no fingerprints, fail-closed)", got)
+	}
+}
+
+// TestLoadHostFingerprints_Dedupes pins that two paths resolving to the SAME
+// key (e.g. a symlink and its target both matching the glob) collapse to a
+// single fingerprint rather than appearing twice.
+func TestLoadHostFingerprints_Dedupes(t *testing.T) {
+	dir := t.TempDir()
+	realPath, fp := writePubFile(t, dir, "ssh_host_ed25519_key.pub", 0o644)
+	linkPath := filepath.Join(dir, "ssh_host_ed25519_key_link.pub")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	got, err := LoadHostFingerprintsFromGlob(filepath.Join(dir, "ssh_host_*.pub"))
+	if err != nil {
+		t.Fatalf("LoadHostFingerprintsFromGlob: %v", err)
+	}
+	if len(got) != 1 || got[0] != fp {
+		t.Errorf("got %v; want exactly [%q] (duplicate via symlink must collapse)", got, fp)
 	}
 }

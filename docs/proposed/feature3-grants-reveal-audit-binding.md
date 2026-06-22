@@ -69,6 +69,7 @@ The **"executor ID" Karthi described = the OS PID** (or a per-job dir with a fla
 - **Stateless:** the gate reads an existing OS file; nothing new is synced (both sides derive from the host key). If the host key rotates (rebuild), the binding breaks → re-provision (a desirable property: a replaced machine must be re-trusted).
 - Applies to **every** signature (per-command and grants), closing cross-server replay generally.
 - *Alternative considered:* a provision-written `~/.sshgate-gate/server_id` file — simpler but a writable label and needs a new provision write; **host-key binding preferred.**
+- **Residual (inherent to host-key binding, not a defect):** two machines that genuinely **share** their `/etc/ssh` host keys (a cloned VM / golden image) are **one identity** to this mechanism — a signature bound to one verifies on the other. This is the standard property of host-key binding. **Migration implication:** confirm the source/target boxes have *distinct* host keys (they will, unless cloned from the same image); if any were cloned, regenerate host keys before relying on per-server binding to separate them.
 
 ---
 

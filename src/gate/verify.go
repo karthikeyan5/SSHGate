@@ -89,6 +89,13 @@ func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time, selfHost
 	// signature minted for another server — or with no binding — can never run
 	// here. Empty Host is checked explicitly so it cannot match an (also empty)
 	// stray entry.
+	//
+	// Residual (inherent to host-key binding, NOT a defect): two machines that
+	// genuinely SHARE their /etc/ssh host keys — a cloned VM / golden image —
+	// are ONE identity to this check, so a signature bound to one verifies on
+	// the other. This is the standard property of host-key binding; the
+	// mitigation is to regenerate host keys on clones. See
+	// docs/proposed/feature3-grants-reveal-audit-binding.md §3.
 	if payload.Host == "" || !containsFP(selfHostFPs, payload.Host) {
 		return "", ErrHostMismatch
 	}
