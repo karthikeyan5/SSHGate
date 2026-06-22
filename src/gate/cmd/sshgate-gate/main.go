@@ -299,8 +299,16 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	// Only buffer output when the audit level actually wants raw output
 	// (all+full). At every other level captureLimit stays 0 and the
 	// executor streams without buffering — zero added cost on the hot path.
+	//
+	// REVEAL EXCLUSION: a SECRET-REVEAL bypasses the redactor, so the child's
+	// output is the RAW secret. The audit log is accountability, not a secret
+	// store, and reveal's threat model never accepted persisting the secret to
+	// disk. So we DON'T EVEN CAPTURE it: captureLimit stays 0 for a revealed
+	// command regardless of level, meaning the raw secret is never buffered in
+	// the gate in the first place (defence in depth — there is nothing to
+	// accidentally serialise). The record still gets full metadata + revealed:true.
 	captureLimit := 0
-	if audit != nil && audit.Level() >= gate.AuditAllFull {
+	if audit != nil && audit.Level() >= gate.AuditAllFull && !reveal {
 		captureLimit = auditFullCaptureLimit
 	}
 	rc, res := execChild(cmd, reveal, captureLimit)
@@ -316,11 +324,14 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 			Lines:       res.Lines,
 			DurationMS:  res.Duration.Milliseconds(),
 		},
-		// res.Stdout/Stderr are populated ONLY when captureLimit>0 (all+full).
-		// AuditLogger.Record additionally blanks them below all+full, so
-		// all+meta provably cannot leak raw output even if this changed. On
-		// the reveal path the redactor was bypassed, so the captured bytes are
-		// the raw secret — only ever persisted at the explicit all+full level.
+		// Revealed marks a SECRET-REVEAL so the record shows revealed:true with
+		// metadata but no output — accountability without storing the secret.
+		Revealed: reveal,
+		// res.Stdout/Stderr are populated ONLY when captureLimit>0, i.e. at
+		// all+full AND not a reveal. For a reveal captureLimit is 0 (above), so
+		// these are empty — the raw secret is never even buffered, let alone
+		// persisted. AuditLogger.Record additionally blanks them below all+full,
+		// so all+meta provably cannot leak raw output either.
 		Stdout: res.Stdout,
 		Stderr: res.Stderr,
 	})

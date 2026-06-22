@@ -65,6 +65,31 @@ func TestRun_RevealThreadsRevealAndReason(t *testing.T) {
 	if out.Kind != "write" {
 		t.Errorf("Kind = %q; want write (reveal forces the signed path)", out.Kind)
 	}
+	// The output MUST carry Revealed=true so downstream audit surfaces (the
+	// live log) can blank the raw secret while still recording that a reveal
+	// happened.
+	if !out.Revealed {
+		t.Errorf("RunOutput.Revealed = false; want true for a reveal command")
+	}
+}
+
+// TestRun_NormalCommandRevealedFalse pins that an ordinary read leaves
+// RunOutput.Revealed=false — the indicator is reveal-only, so the live log
+// keeps logging normal output verbatim.
+func TestRun_NormalCommandRevealedFalse(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now()})
+	sign := &fakeSign{}
+	ssh := &fakeSSH{stdout: []byte("ok\n"), exit: 0}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "df -h"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Revealed {
+		t.Errorf("RunOutput.Revealed = true for a normal read; want false")
+	}
 }
 
 // TestRun_RevealRequiresReason pins the MCP-side validation: reveal=true with

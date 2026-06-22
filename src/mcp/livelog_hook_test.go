@@ -134,6 +134,83 @@ func TestRunBatchHandlerWritesLiveLog(t *testing.T) {
 	}
 }
 
+// TestRunHandlerRevealExcludesOutputFromLiveLog proves the Tier-6b hook in
+// runHandler NEVER persists a revealed command's raw output to the live log:
+// the entry records the command, classification, exit and revealed:true, but
+// stdout/stderr are blanked. The live log is accountability, not a secret store.
+func TestRunHandlerRevealExcludesOutputFromLiveLog(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit-live.log")
+	ll := livelog.New(logPath, 1<<20)
+	r := hookRegistry(t, "web1")
+	const secret = "SECRET=hunter2-RAW-REVEALED-VALUE"
+	runner := &tools.Runner{Servers: r, Sign: &hookFakeSign{}, SSH: &hookFakeSSH{stdout: []byte(secret + "\n"), stderr: []byte(secret + "-stderr\n")}}
+	srv := &Server{Runner: runner, Logger: log.New(io.Discard, "", 0), LiveLog: ll}
+
+	_, _, err := srv.runHandler(context.Background(), nil, tools.RunInput{
+		Alias:   "web1",
+		Command: "cat /etc/secret.env",
+		Reveal:  true,
+		Reason:  "verify the DB password",
+	})
+	if err != nil {
+		t.Fatalf("runHandler: %v", err)
+	}
+
+	// The raw secret must appear NOWHERE in the on-disk live log.
+	rawFile, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read live log: %v", err)
+	}
+	if strings.Contains(string(rawFile), secret) {
+		t.Fatalf("live log persisted the raw revealed secret:\n%s", rawFile)
+	}
+
+	recs := liveRecords(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("got %d live-log records, want 1", len(recs))
+	}
+	r0 := recs[0]
+	if r0["command"] != "cat /etc/secret.env" {
+		t.Errorf("command = %v; metadata must still be recorded", r0["command"])
+	}
+	if r0["revealed"] != true {
+		t.Errorf("revealed = %v; want true", r0["revealed"])
+	}
+	// stdout/stderr carry omitempty — a blanked field is absent, not "".
+	if v, ok := r0["stdout"]; ok && v != "" {
+		t.Errorf("revealed entry leaked stdout: %v", v)
+	}
+	if v, ok := r0["stderr"]; ok && v != "" {
+		t.Errorf("revealed entry leaked stderr: %v", v)
+	}
+}
+
+// TestRunHandlerNormalCommandKeepsOutputAndRevealedFalse proves a non-reveal
+// command's live-log entry is unchanged: full output present, revealed absent
+// (false). This guards against the reveal-exclusion over-blanking normal logs.
+func TestRunHandlerNormalCommandKeepsOutputAndRevealedFalse(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit-live.log")
+	ll := livelog.New(logPath, 1<<20)
+	r := hookRegistry(t, "web1")
+	runner := &tools.Runner{Servers: r, Sign: &hookFakeSign{}, SSH: &hookFakeSSH{stdout: []byte("FULL-READ-OUTPUT\n")}}
+	srv := &Server{Runner: runner, Logger: log.New(io.Discard, "", 0), LiveLog: ll}
+
+	if _, _, err := srv.runHandler(context.Background(), nil, tools.RunInput{Alias: "web1", Command: "cat /etc/hostname"}); err != nil {
+		t.Fatalf("runHandler: %v", err)
+	}
+	recs := liveRecords(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("got %d live-log records, want 1", len(recs))
+	}
+	r0 := recs[0]
+	if !strings.Contains(r0["stdout"].(string), "FULL-READ-OUTPUT") {
+		t.Errorf("normal entry must carry full output: %v", r0["stdout"])
+	}
+	if v, ok := r0["revealed"]; ok && v != false {
+		t.Errorf("normal entry revealed = %v; want false/absent", v)
+	}
+}
+
 // TestNilLiveLogHandlerSafe proves a nil LiveLog (disabled) does not
 // break the handlers.
 func TestNilLiveLogHandlerSafe(t *testing.T) {

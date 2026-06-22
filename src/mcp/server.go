@@ -186,14 +186,26 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 	s.Logger.Printf("run alias=%s kind=%s approved=%v exit=%d", in.Alias, out.Kind, out.Approved, out.ExitCode)
 	// Tier 6b — append the full command + full output to the MCP-side
 	// rolling live log (the convenience surface). nil LiveLog is a no-op.
+	//
+	// EXCEPTION: a SECRET-REVEAL bypasses the gate's redactor, so out.Stdout/
+	// Stderr carry the RAW secret. The live log's job is accountability — to
+	// record THAT a reveal ran (command, classification, exit, revealed:true)
+	// — NOT to be a secret store. So for a revealed command we blank the raw
+	// output here and never persist it. Reveal's accepted exposure is the
+	// agent + transcript + approval chat, not this on-disk log.
+	stdout, stderr := out.Stdout, out.Stderr
+	if out.Revealed {
+		stdout, stderr = "", ""
+	}
 	s.LiveLog.Log(livelog.Entry{
 		Server:         in.Alias,
 		Command:        in.Command,
 		Classification: out.Kind,
 		ExitCode:       out.ExitCode,
 		Approved:       out.Approved,
-		Stdout:         out.Stdout,
-		Stderr:         out.Stderr,
+		Revealed:       out.Revealed,
+		Stdout:         stdout,
+		Stderr:         stderr,
 	})
 	// Also pack a TextContent block so older MCP clients (without
 	// structured content support) see a human-readable result.
@@ -209,6 +221,13 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RunBatchInput) (*mcpsdk.CallToolResult, tools.RunBatchOutput, error) {
 	out, err := s.Runner.RunBatch(ctx, in)
 	if err != nil {
+		// NOTE: a batch that hit an SSH TRANSPORT error returns here, BEFORE
+		// the live-log loop below, so its partial results are not live-logged.
+		// This is intentional: the live log is a convenience surface, and the
+		// gate-side Tier-6a log on the host is the authoritative record of
+		// whatever actually executed. We do not restructure to live-log
+		// partials — keeping the error path simple is worth more than the
+		// transient convenience view of an aborted batch.
 		s.Logger.Printf("run_batch alias=%s err=%v", in.Alias, err)
 		return nil, tools.RunBatchOutput{}, err
 	}
@@ -220,14 +239,25 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		if r.Skipped {
 			continue
 		}
+		// run_batch NEVER reveals (bulk reveal is forbidden), so r.Revealed is
+		// always false today; we still honour it so a revealed result would
+		// blank its raw output, mirroring the single-command hook above.
+		stdout, stderr := r.Stdout, r.Stderr
+		if r.Revealed {
+			stdout, stderr = "", ""
+		}
 		s.LiveLog.Log(livelog.Entry{
 			Server:         out.Server,
 			Command:        r.Command,
 			Classification: r.Kind,
 			ExitCode:       r.ExitCode,
-			Approved:       out.Approved && r.Kind == "write",
-			Stdout:         r.Stdout,
-			Stderr:         r.Stderr,
+			// A read inside an approved batch is correctly Approved:false — the
+			// single bulk approval only authorised the batch's WRITES; the reads
+			// ran direct and were never part of the human tap.
+			Approved: out.Approved && r.Kind == "write",
+			Revealed: r.Revealed,
+			Stdout:   stdout,
+			Stderr:   stderr,
 		})
 	}
 	return &mcpsdk.CallToolResult{

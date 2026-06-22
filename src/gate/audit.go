@@ -192,7 +192,16 @@ type AuditRecord struct {
 	// Meta is output metadata (bytes/lines/duration). nil for rejections
 	// that never executed a child.
 	Meta *AuditMeta `json:"meta,omitempty"`
-	// Stdout/Stderr hold raw output, serialised ONLY at AuditAllFull.
+	// Revealed is true when the command ran as a SECRET-REVEAL (its output
+	// bypassed the gate redactor). The audit log is accountability, NOT a
+	// secret store: a revealed command is recorded with revealed:true and full
+	// metadata, but its raw output is NEVER captured (the gate does not even
+	// buffer it — see execAndAudit), so Stdout/Stderr stay empty here even at
+	// all+full. Reveal's accepted exposure is the agent + transcript + approval
+	// chat, not this on-disk record.
+	Revealed bool `json:"revealed,omitempty"`
+	// Stdout/Stderr hold raw output, serialised ONLY at AuditAllFull — and
+	// never for a revealed command (see Revealed).
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
 }
@@ -269,11 +278,12 @@ func (a *AuditLogger) Record(r AuditRecord) {
 	}
 	b = append(b, '\n')
 
-	// Append-only + fsync for tamper-resistance / durability. Mode 0640:
-	// owner-writable, group-readable so a `tail -f` is possible if a group
-	// is granted, world-blocked. Open failures (e.g. an append-only dir
-	// the gate user truly cannot write, or a full disk) are swallowed.
-	f, err := os.OpenFile(a.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	// Append-only + fsync for tamper-resistance / durability. Mode 0600:
+	// owner-only. The log carries command text always and raw output at
+	// all+full, so it must not be group- or world-readable. Open failures
+	// (e.g. an append-only dir the gate user truly cannot write, or a full
+	// disk) are swallowed.
+	f, err := os.OpenFile(a.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return // fail-open
 	}

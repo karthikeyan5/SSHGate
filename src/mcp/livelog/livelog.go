@@ -43,8 +43,16 @@ type Entry struct {
 	ExitCode int `json:"exit_code"`
 	// Approved is true when the command was a write that a human approved.
 	Approved bool `json:"approved"`
+	// Revealed is true when the command ran as a SECRET-REVEAL (its output
+	// bypassed the gate redactor). For a revealed entry the caller MUST leave
+	// Stdout/Stderr empty: the live log records THAT a reveal ran (command,
+	// classification, exit, revealed:true) but is never a secret store, so the
+	// raw revealed output is excluded here. reveal's accepted exposure is the
+	// agent + transcript + approval chat — not this on-disk log.
+	Revealed bool `json:"revealed,omitempty"`
 	// Stdout / Stderr carry the FULL output (no redaction-metadata
-	// substitution here — this is the live view).
+	// substitution here — this is the live view). They are blanked for a
+	// revealed entry (see Revealed).
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
 	// Seq is an optional monotonic counter used by tests to detect which
@@ -89,7 +97,7 @@ func (l *Log) Log(e Entry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return // fail-open
 	}
@@ -151,7 +159,7 @@ func (l *Log) rollIfNeeded() {
 		_ = os.Remove(tmpName)
 		return
 	}
-	if err := tmp.Chmod(0o640); err != nil {
+	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		return

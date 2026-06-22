@@ -31,6 +31,12 @@ type CommandResult struct {
 	// Skipped is true when stop_on_error=true and a previous command
 	// exited non-zero (so this one never ran).
 	Skipped bool `json:"skipped"`
+	// Revealed mirrors RunOutput.Revealed: true iff this command ran as a
+	// SECRET-REVEAL. run_batch NEVER reveals by design (bulk reveal is
+	// forbidden), so this is always false today — the field exists so the
+	// live-log hook treats batch and single-command results uniformly and
+	// stays correct if a batch reveal path is ever (wrongly) added.
+	Revealed bool `json:"revealed,omitempty"`
 }
 
 // RunBatchOutput is the structured result returned to the MCP client.

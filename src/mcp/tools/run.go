@@ -54,6 +54,12 @@ type RunOutput struct {
 	// Approved is true when a sign request was made and approved (i.e.
 	// for writes). Reads are always direct, never solicited approval.
 	Approved bool `json:"approved"`
+	// Revealed is true when this command ran as a SECRET-REVEAL (its output
+	// bypassed the gate's redactor). It is an indicator only — the raw output
+	// already reached the agent — so downstream audit surfaces (the live log)
+	// can record THAT a reveal happened while blanking the raw secret. Never
+	// set on the read or ordinary-write paths.
+	Revealed bool `json:"revealed,omitempty"`
 }
 
 // SignClient is the subset of sign.Client that Runner needs. It
@@ -253,14 +259,14 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 
 	stdout, stderr, exit, err := r.SSH.Run(ctx, e.Host, e.User, e.Port, wireCmd)
 	if err != nil {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true},
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal},
 			fmt.Errorf("ssh exec: %w", err)
 	}
 	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
 	// the well-known gate codes so the model gets remediation rather than
 	// a bare "exit 77/65".
 	if note := gateDenyNote(exit); note != "" {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true},
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal},
 			fmt.Errorf("tools: %s", note)
 	}
 	return RunOutput{
@@ -269,6 +275,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		ExitCode: exit,
 		Kind:     "write",
 		Approved: true,
+		Revealed: reveal,
 	}, nil
 }
 

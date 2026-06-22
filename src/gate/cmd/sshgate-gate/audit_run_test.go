@@ -206,6 +206,103 @@ func TestGateAuditLevelMatrix(t *testing.T) {
 	})
 }
 
+// TestGateAuditRevealExcludesOutputAtAllFull pins that, even at the most
+// verbose level (all+full), a REVEALED command's audit record carries
+// revealed:true and populated metadata but NEVER its raw (post-bypass) output.
+// Reveal's accepted exposure is the agent + transcript + approval chat; the
+// on-host audit log is accountability, not a secret store.
+func TestGateAuditRevealExcludesOutputAtAllFull(t *testing.T) {
+	dir := t.TempDir()
+	pub, priv := genKey(t)
+	seedPub(t, dir, pub, 0o644)
+	withGateDir(t, dir)
+	setAuditLevel(t, dir, "all+full")
+
+	// A signed reveal of a secret-bearing command. The secret lives in a FILE
+	// (read at runtime), never in the command text — so finding it on disk
+	// proves the OUTPUT was persisted, not merely the always-logged command.
+	// With reveal=true the gate bypasses the redactor, so the child's raw
+	// secret reaches stdout, but it must NOT be teed into the audit log.
+	const secret = "AKIA1234567890ABCDEF"
+	f := filepath.Join(dir, "secret.env")
+	if err := os.WriteFile(f, []byte("DBPASS="+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := freshPayload("cat " + f)
+	p.Reveal = true
+	line := signedLine(t, priv, p)
+	code, out, _ := runWith(t, line)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	// Sanity: the reveal bypass actually delivered the raw secret to the agent.
+	if !strings.Contains(out, secret) {
+		t.Fatalf("reveal=true should pass the raw secret to stdout; got %q", out)
+	}
+
+	// The audit log must NOT contain the secret anywhere on disk.
+	rawLog, _ := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if strings.Contains(string(rawLog), secret) {
+		t.Fatalf("all+full audit log persisted a revealed secret:\n%s", rawLog)
+	}
+
+	recs := auditRecords(t, dir)
+	if len(recs) != 1 {
+		t.Fatalf("got %d audit records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r["revealed"] != true {
+		t.Errorf("revealed = %v, want true", r["revealed"])
+	}
+	// Metadata IS still recorded — accountability without the secret.
+	meta, ok := r["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("revealed record must still carry meta: %v", r)
+	}
+	if meta["stdout_bytes"].(float64) <= 0 {
+		t.Errorf("meta.stdout_bytes = %v, want > 0 (metadata, not output)", meta["stdout_bytes"])
+	}
+	// No raw output keys.
+	if v, leaked := r["stdout"]; leaked && v != "" {
+		t.Errorf("revealed record leaked stdout: %v", v)
+	}
+	if v, leaked := r["stderr"]; leaked && v != "" {
+		t.Errorf("revealed record leaked stderr: %v", v)
+	}
+}
+
+// TestGateAuditNonRevealedStillCapturesAtAllFull proves the reveal-exclusion
+// does NOT regress the ordinary all+full behaviour: a non-revealed signed
+// command at all+full still captures its raw output (unchanged), and is not
+// marked revealed.
+func TestGateAuditNonRevealedStillCapturesAtAllFull(t *testing.T) {
+	dir := t.TempDir()
+	pub, priv := genKey(t)
+	seedPub(t, dir, pub, 0o644)
+	withGateDir(t, dir)
+	setAuditLevel(t, dir, "all+full")
+
+	const marker = "AUDIT-FULL-NONREVEAL-MARKER"
+	f := filepath.Join(dir, "x.txt")
+	_ = os.WriteFile(f, []byte(marker+"\n"), 0o644)
+	line := signedLine(t, priv, freshPayload("cat "+f))
+	code, _, _ := runWith(t, line)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if !strings.Contains(string(raw), marker) {
+		t.Errorf("non-revealed all+full must still capture raw output; log=%s", raw)
+	}
+	recs := auditRecords(t, dir)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	if v, ok := recs[0]["revealed"]; ok && v != false {
+		t.Errorf("non-revealed record revealed = %v; want false/absent", v)
+	}
+}
+
 // TestGateAuditAppendsAcrossInvocations proves records accumulate (the
 // log is append-only across separate gate spawns / run() calls).
 func TestGateAuditAppendsAcrossInvocations(t *testing.T) {
