@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,9 +379,13 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	// the reveal flag or its reason yet). If ANY command is a reveal, Request
 	// must error WITHOUT touching the server — so no future v2 web UI can
 	// render an un-bannered reveal a human approves unknowingly.
-	var hit bool
+	// hit is written by the httptest handler goroutine and read by the test
+	// goroutine, so it must be synchronized (atomic) to stay race-free under
+	// `go test -race`. The Request path itself is sequential — only this
+	// test-harness observation flag crosses goroutines.
+	var hit atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
+		hit.Store(true)
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"request_id":"r","poll_url":"/v1/poll/r"}`))
 	}))
@@ -412,7 +417,7 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	if !strings.Contains(err.Error(), "reveal") {
 		t.Errorf("err = %v; want a mention of reveal", err)
 	}
-	if hit {
+	if hit.Load() {
 		t.Error("server was contacted on a reveal request; must fail-closed BEFORE the HTTP call")
 	}
 
@@ -424,7 +429,7 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-reveal Request should succeed; got %v", err)
 	}
-	if !hit {
+	if !hit.Load() {
 		t.Error("server was NOT contacted on a non-reveal request; the guard over-rejected")
 	}
 	if ch2 != nil {
