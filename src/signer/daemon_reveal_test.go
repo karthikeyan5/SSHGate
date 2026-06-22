@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // TestDaemon_SignsRevealFlag pins that the daemon copies a command's reveal

@@ -118,6 +118,24 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 		return nil, err
 	}
 
+	// Fail-CLOSED on secret-reveal. The v2 wire structs (signRequestCmdV2
+	// here, signRequestCmd on the server) carry only server/cmd/ttl_seconds —
+	// they do NOT carry the reveal flag or its mandatory reason. If we let a
+	// reveal request through, the server would sign it as an ordinary
+	// (reveal=false) approval and a future v2 web UI could render it as a
+	// plain write — no scary banner, no reason shown — which a human could
+	// approve unknowingly. That is fail-SAFE only by accident today (the gate
+	// redactor still strips the output). We make it fail-CLOSED instead:
+	// reject reveal here, BEFORE any HTTP call, so no future v2 build can
+	// silently ship an un-bannered reveal. The hosted path may enable reveal
+	// only once the wire structs + web UI carry the reason and the scary
+	// approval banner end-to-end (that is the v2 feature work, out of scope).
+	for _, c := range req.Commands {
+		if c.Reveal {
+			return nil, errors.New("hosted: secret-reveal is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
+		}
+	}
+
 	pollWait := h.PollWait
 	if pollWait == 0 {
 		pollWait = 30 * time.Second
