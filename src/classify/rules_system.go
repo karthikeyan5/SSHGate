@@ -68,8 +68,12 @@ func dateRule(args []string) Kind {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a == "-s" || a == "--set" || strings.HasPrefix(a, "--set=") ||
+		case a == "-s" || matchesAbbrev(a, "set") ||
 			(strings.HasPrefix(a, "-s") && !strings.HasPrefix(a, "--") && len(a) > 2):
+			// `--set`/`--set=SPEC` and its unambiguous abbreviations (`--se`,
+			// `--s` — `set` is the ONLY date long option starting with `s`)
+			// SET the system clock. matchesAbbrev handles both the bare and
+			// `=VALUE` forms.
 			return KindWrite
 		case a == "-d" || a == "--date" || a == "-r" || a == "--reference" ||
 			a == "-f" || a == "--file":
@@ -220,8 +224,17 @@ func timedatectlRule(args []string) Kind {
 func dmesgRule(args []string) Kind {
 	for _, a := range args {
 		switch a {
-		case "--clear", "-C", "-c", "--read-clear", "-D", "--console-off",
-			"-E", "--console-on", "-n", "--console-level":
+		case "-C", "-c", "-D", "-E", "-n":
+			return KindWrite
+		}
+		// Long-option abbreviations: GNU getopt accepts any unambiguous prefix,
+		// so `--clea`/`--read-c`/`--console-of`/`--console-l` all fire the
+		// dangerous flag. Match the dangerous stems by abbreviation. The benign
+		// reads (`--color`, `--ctime`, `--decode`, ...) are NOT prefixes of any
+		// stem here, so they stay READ. `--console-level` takes the new level
+		// (e.g. `--console-l 1`); the flag alone marks WRITE.
+		if matchesAbbrev(a, "clear", "read-clear", "console-off", "console-on",
+			"console-level") {
 			return KindWrite
 		}
 	}
@@ -248,8 +261,12 @@ func hostnameRule(args []string) Kind {
 		}
 		if a[0] == '-' && a != "-" {
 			// `-F`/`--file` reads the new name from a file and SETS it — a
-			// write. Other flags here are display-only.
-			if a == "-F" || a == "--file" || strings.HasPrefix(a, "--file=") {
+			// write. Match `--file` by abbreviation (GNU getopt prefix): `--fi`
+			// is unambiguous for `--file` (`--fqdn` needs `--fq`), so `--fi`/
+			// `--fil`/`--file`/`--file=FILE` all SET. The display flags
+			// (`--fqdn`, `--short`, `--domain`, ...) are not prefixes of
+			// `file`, so they stay READ.
+			if a == "-F" || matchesAbbrev(a, "file") {
 				return KindWrite
 			}
 			continue
@@ -265,7 +282,13 @@ func hostnameRule(args []string) Kind {
 // entry, so `ss -K ...` ran unsigned. Cited by the 2026-06-14 review.
 func ssRule(args []string) Kind {
 	for _, a := range args {
-		if a == "-K" || a == "--kill" {
+		if a == "-K" {
+			return KindWrite
+		}
+		// `--kill` and its unambiguous abbreviations (`--kil`, `--ki`, `--k`)
+		// forcibly close matching sockets. No other ss long option starts with
+		// `k`, so any `--k...` prefix is `--kill`.
+		if matchesAbbrev(a, "kill") {
 			return KindWrite
 		}
 	}
@@ -278,7 +301,14 @@ func ssRule(args []string) Kind {
 func lastlogRule(args []string) Kind {
 	for _, a := range args {
 		switch a {
-		case "-C", "--clear", "-S", "--set":
+		case "-C", "-S":
+			return KindWrite
+		}
+		// `--clear`/`--set` and their unambiguous abbreviations (`--cl`,
+		// `--se`) WRITE the lastlog database. The benign long options
+		// (`--user`, `--before`, `--time`) do not start with `c`/`s`, so no
+		// READ form is over-classified.
+		if matchesAbbrev(a, "clear", "set") {
 			return KindWrite
 		}
 	}
@@ -295,10 +325,16 @@ func lastlogRule(args []string) Kind {
 func lessRule(args []string) Kind {
 	for _, a := range args {
 		switch a {
-		case "-o", "-O", "--log-file", "--LOG-FILE":
+		case "-o", "-O":
 			return KindWrite
 		}
-		if strings.HasPrefix(a, "--log-file=") || strings.HasPrefix(a, "--LOG-FILE=") {
+		// `--log-file FILE` / `--LOG-FILE FILE` (and `=FILE`) write a copy of
+		// the input to FILE. GNU getopt accepts abbreviations: `--log` is
+		// unambiguous for `--log-file` (the only other `--log*`/`--lo*` is
+		// `--long-prompt`, which `--log` is NOT a prefix of), so match by
+		// abbreviation. The case-distinct `--LOG-FILE` overwrites without
+		// prompting; match it too. (less is case-sensitive on these.)
+		if matchesAbbrev(a, "log-file") || matchesAbbrev(a, "LOG-FILE") {
 			return KindWrite
 		}
 		// Bundled short form: -o<file> / -O<file>.
@@ -392,9 +428,15 @@ func gitRule(args []string) Kind {
 func gitBranchKind(args []string) Kind {
 	for _, a := range args {
 		switch a {
-		case "-d", "-D", "--delete",
-			"-m", "-M", "--move",
-			"-c", "-C", "--copy":
+		case "-d", "-D", "-m", "-M", "-c", "-C":
+			return KindWrite
+		}
+		// `--delete`/`--move`/`--copy` and their GNU abbreviations (`--del`,
+		// `--mov`, `--cop`) delete/rename/copy a ref. The listing flags
+		// (`--list`, `--all`, `--verbose`, `--color`, `--column`,
+		// `--contains`, `--merged`, `--remotes`, ...) are NOT prefixes of any
+		// of these stems, so they stay READ.
+		if matchesAbbrev(a, "delete", "move", "copy") {
 			return KindWrite
 		}
 	}
@@ -432,9 +474,19 @@ func gitStashKind(args []string) Kind {
 // reads are read.
 func gitConfigKind(args []string) Kind {
 	for _, a := range args {
-		switch a {
-		case "--set", "--unset", "--unset-all", "--add", "--replace-all",
-			"--remove-section", "--rename-section", "-e", "--edit":
+		if a == "-e" {
+			return KindWrite
+		}
+		// Write subflags and their GNU abbreviations (`--rep`→replace-all,
+		// `--uns`→unset, `--unset-a`→unset-all, `--rem`→remove-section,
+		// `--ren`→rename-section, `--ed`→edit, ...). The read flags
+		// (`--get*`, `--list`, `--global`, `--system`, `--local`, `--file`,
+		// `--show-origin`) are NOT prefixes of any dangerous stem, so bare
+		// reads and `git config --get x` stay READ. Note `r*` (replace-all/
+		// remove-section/rename-section) is wholly write, so every `--r...`
+		// abbreviation is correctly WRITE.
+		if matchesAbbrev(a, "set", "unset", "unset-all", "add", "replace-all",
+			"remove-section", "rename-section", "edit") {
 			return KindWrite
 		}
 	}

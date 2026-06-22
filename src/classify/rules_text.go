@@ -95,25 +95,32 @@ func sedScripts(args []string) []string {
 	hasF := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		// GNU sed accepts unambiguous long-option abbreviations. `--exp`/`--e`
+		// mean `--expression` (the only `--e*` long option); `--fi` means
+		// `--file` (`--f` is ambiguous with `--follow-symlinks`, but we fail
+		// safe). An abbreviated `--file` previously slipped past the exact-token
+		// check, leaving the opaque script-file content UNSCANNED — a bypass.
+		isExpr := a == "-e" || matchesAbbrev(a, "expression")
+		isFile := a == "-f" || matchesAbbrev(a, "file")
 		switch {
-		case a == "-e" || a == "--expression":
+		case isExpr && hasEqValue(a):
+			sawEOrF = true
+			scripts = append(scripts, eqValue(a))
+		case isExpr:
 			sawEOrF = true
 			if i+1 < len(args) {
 				scripts = append(scripts, args[i+1])
 				i++
 			}
-		case strings.HasPrefix(a, "--expression="):
+		case isFile && hasEqValue(a):
 			sawEOrF = true
-			scripts = append(scripts, strings.TrimPrefix(a, "--expression="))
-		case a == "-f" || a == "--file":
+			hasF = true
+		case isFile:
 			sawEOrF = true
 			hasF = true
 			if i+1 < len(args) {
 				i++ // skip the file arg; we can't see its content
 			}
-		case strings.HasPrefix(a, "--file="):
-			sawEOrF = true
-			hasF = true
 		}
 	}
 	if !sawEOrF {
@@ -278,12 +285,45 @@ func awkRule(args []string) Kind {
 	for _, a := range args {
 		// `-f FILE` / `-fFILE` / `--file FILE` / `--file=FILE` loads the awk
 		// program from a FILE whose content is opaque to us — it can call
-		// system()/print to a file just like an inline program. Mirror sed's
-		// `-f` handling and treat it as WRITE. (NOTE: `-F` is the field
-		// separator, a read flag — keep the lowercase/`-f` match exact.)
-		if a == "-f" || a == "--file" || strings.HasPrefix(a, "--file=") ||
-			(strings.HasPrefix(a, "-f") && len(a) > 2) {
+		// system()/print to a file just like an inline program. This also
+		// covers `-f -` and `-f /dev/stdin` (program read from stdin, equally
+		// opaque). gawk exposes several other ways to supply opaque program
+		// text or load native code, plus flags that WRITE a file:
+		//   --source='text' (-e)   alternate inline program (treated opaque:
+		//                          fail-safe WRITE; the common READ form is the
+		//                          bare positional program, not -e)
+		//   --include=FILE  (-i)   load an extension/source file; the `inplace`
+		//                          extension (`-i inplace`) OVERWRITES the input
+		//                          (analogue of `sed -i`)
+		//   --in-place             not a real gawk flag today, but the brief's
+		//                          named vector — fail-safe match in case an awk
+		//                          variant adds it
+		//   --load=LIB      (-l)   load a native shared-object extension
+		//   --exec=FILE     (-E)   program from FILE
+		//   --pretty-print[=F](-o) write the pretty-printed program to a file
+		//   --profile[=F]   (-p)   write a profile to a file
+		//   --dump-variables[=F](-d) write the variable dump to a file
+		//   --debug[=F]     (-D)   write/attach a debugger session
+		// GNU getopt accepts any unambiguous prefix, so match these dangerous
+		// long-option stems by abbreviation. (NOTE: `-F` is the field
+		// separator and `--field-separator` a READ flag — keep the lowercase
+		// `-f` short match exact and do NOT list `field-separator`.)
+		if a == "-f" || (strings.HasPrefix(a, "-f") && len(a) > 2) {
 			return KindWrite
+		}
+		if matchesAbbrev(a, "file", "source", "include", "in-place", "load",
+			"exec", "pretty-print", "profile", "dump-variables", "debug") {
+			return KindWrite
+		}
+		// Bundled/short file-loading + file-writing flags. `-i`/`-e`/`-l`/`-E`
+		// supply opaque program/extension text; `-o`/`-p`/`-d`/`-D` write a
+		// file. `-i inplace` overwrites the input. The `-F` field separator
+		// (capital) is a READ flag and is deliberately excluded.
+		if len(a) >= 2 && a[0] == '-' && a[1] != '-' {
+			switch a[1] {
+			case 'i', 'e', 'l', 'E', 'o', 'p', 'd', 'D':
+				return KindWrite
+			}
 		}
 		if len(a) == 0 || a[0] == '-' {
 			continue
@@ -537,16 +577,18 @@ func isAwkIdentChar(c byte) bool {
 // 2026-06-14 adversarial review.
 func sortRule(args []string) Kind {
 	for _, a := range args {
-		if a == "-o" || a == "--output" ||
-			strings.HasPrefix(a, "--output=") ||
-			(strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-') {
+		// `--output FILE` / `--output=FILE` writes (clobbers) FILE, and
+		// `--compress-program PROG` EXECS PROG to (de)compress the temp files
+		// it spills under -S/large input (`--compress-program=/bin/sh` is
+		// unsigned arbitrary exec, not just a file write; 2026-06-15 rig hunt).
+		// GNU sort accepts ANY unambiguous prefix, so `--o`/`--out`/`--outp`
+		// all mean `--output` and `--compr`/`--compress` mean
+		// `--compress-program` — match by abbreviation, not exact token.
+		if matchesAbbrev(a, "output", "compress-program") {
 			return KindWrite
 		}
-		// `--compress-program PROG` (or `=PROG`): GNU sort EXECS the named
-		// program to (de)compress the temp files it spills under -S/large
-		// input — `sort --compress-program=/bin/sh ...` is unsigned arbitrary
-		// exec, not just a file write. 2026-06-15 rig hunt.
-		if a == "--compress-program" || strings.HasPrefix(a, "--compress-program=") {
+		// Bundled short form: -o<file>.
+		if strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-' {
 			return KindWrite
 		}
 		// Short-flag bundle scan: an `o` reached before any value-consuming

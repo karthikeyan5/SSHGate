@@ -480,3 +480,60 @@ func firstNonFlag(args []string) string {
 	}
 	return ""
 }
+
+// hasEqValue reports whether arg is a `--flag=VALUE` long option (contains an
+// `=` after the `--`).
+func hasEqValue(arg string) bool {
+	if !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	return strings.IndexByte(arg[2:], '=') >= 0
+}
+
+// eqValue returns the VALUE part of a `--flag=VALUE` long option (everything
+// after the first `=`), or "" if there is no `=`.
+func eqValue(arg string) string {
+	if eq := strings.IndexByte(arg, '='); eq >= 0 {
+		return arg[eq+1:]
+	}
+	return ""
+}
+
+// matchesAbbrev reports whether arg is a GNU `--long` option that abbreviates
+// (or fully names) one of the dangerous long-option stems in opts. GNU
+// getopt_long accepts ANY non-empty unambiguous prefix of a long option, so a
+// rule that matched a dangerous flag only by its exact spelling let the
+// abbreviated form fall through to KindRead and run unsigned. This helper
+// closes that gap by treating arg as a WRITE marker if its option name is a
+// prefix of any dangerous stem.
+//
+// Rules:
+//   - arg must begin with `--` (a GNU long option). Single-dash and bundled
+//     short flags are handled by each rule's own short-flag logic.
+//   - any `=VALUE` suffix is stripped first; only the option NAME is matched.
+//   - the option name must be non-empty (bare `--` / `--=x` never match).
+//   - a match is: the option name is a prefix of a dangerous stem (so `--clea`
+//     matches `clear`, `--output` matches `output`). Fail-safe: a name that is
+//     a prefix of EITHER a dangerous or a benign option is still classified
+//     WRITE here when it matches a dangerous stem — getopt would reject a
+//     genuinely ambiguous prefix anyway, and routing it through the gate is the
+//     safe default. Callers pass ONLY the known-dangerous stems so benign reads
+//     are not over-classified.
+func matchesAbbrev(arg string, opts ...string) bool {
+	if !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	body := arg[2:]
+	if eq := strings.IndexByte(body, '='); eq >= 0 {
+		body = body[:eq]
+	}
+	if body == "" {
+		return false
+	}
+	for _, stem := range opts {
+		if strings.HasPrefix(stem, body) {
+			return true
+		}
+	}
+	return false
+}
