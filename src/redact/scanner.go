@@ -87,7 +87,11 @@ func (s *scanner) findMatches(buf []byte) []match {
 			if r.MinLen > 0 && n < r.MinLen {
 				continue
 			}
-			if r.MaxLen > 0 && n > r.MaxLen {
+			// MaxLen trims runaway low-confidence matches. High-
+			// confidence structural rules (JWT, PEM) are exempt: an
+			// over-long match is still unmistakably the secret and must
+			// be redacted, never dropped (MINOR 7).
+			if r.MaxLen > 0 && n > r.MaxLen && !r.HighConfidence {
 				continue
 			}
 			out = append(out, match{
@@ -141,7 +145,14 @@ func (s *scanner) redact(dst, buf []byte, matches []match) ([]byte, int) {
 	prev := 0
 	for _, m := range matches {
 		dst = append(dst, buf[prev:m.Start]...)
-		dst = append(dst, FormatMarker(s.salt, m.Secret)...)
+		if m.RuleID == markerForgeryRuleID {
+			// Child printed a literal MarkerPrefix — rewrite it to the
+			// sanitized form instead of issuing a fresh marker, so the
+			// forgery cannot masquerade as a gate redaction.
+			dst = append(dst, NeutralizedMarkerPrefix...)
+		} else {
+			dst = append(dst, FormatMarker(s.salt, m.Secret)...)
+		}
 		prev = m.End
 	}
 	dst = append(dst, buf[prev:]...)

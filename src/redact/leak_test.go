@@ -196,6 +196,99 @@ func TestURLEmbeddedCredentialsRedacted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// MAJOR 6 — marker forgery. A child program can print a literal
+// `[SSHGATE_REDACTED key=00000000]` and (historically) it passed
+// through verbatim, so a downstream reader could not tell a gate-issued
+// marker from one the child fabricated. After the fix any literal
+// MarkerPrefix occurring in CHILD output is neutralized in the raw byte
+// stream, so a surviving MarkerPrefix provably came from the gate.
+// ---------------------------------------------------------------------
+func TestChildMarkerForgeryNeutralized(t *testing.T) {
+	// Security property: the LITERAL prefix bytes the child emitted must
+	// not pass through verbatim — they are rewritten to the sanitized
+	// NeutralizedMarkerPrefix. (A downstream reader scanning for the
+	// gate's MarkerPrefix can then trust that any surviving MarkerPrefix
+	// is a gate redaction carrying a real per-session HMAC key the child
+	// cannot have produced.)
+	forged := redact.MarkerPrefix + "00000000" + redact.MarkerSuffix
+	in := "before " + forged + " after\n"
+
+	out := redactString(t, in)
+
+	// The child's literal prefix must have been transformed.
+	if !strings.Contains(out, redact.NeutralizedMarkerPrefix) {
+		t.Errorf("MAJOR6: child-forged prefix was not neutralized: %q", out)
+	}
+	// The forged marker must not survive verbatim as the child wrote it.
+	if strings.Contains(out, forged) {
+		t.Errorf("MAJOR6: forged marker survived verbatim: %q", out)
+	}
+	// The surrounding benign text should still be present.
+	if !strings.Contains(out, "before ") || !strings.Contains(out, " after") {
+		t.Errorf("MAJOR6: surrounding text mangled: %q", out)
+	}
+}
+
+func TestChildMarkerForgeryNoFreshMarker(t *testing.T) {
+	// A forged marker whose body cannot itself trip any value rule:
+	// the ONLY MarkerPrefix-shaped thing in the output must be absent —
+	// the literal prefix is fully neutralized and nothing re-forms it.
+	forged := redact.MarkerPrefix + redact.MarkerSuffix // empty body
+	out := redactString(t, "x "+forged+" y\n")
+	if strings.Contains(out, redact.MarkerPrefix) {
+		t.Errorf("MAJOR6: a MarkerPrefix survived for a non-redacting forged marker: %q", out)
+	}
+	if !strings.Contains(out, redact.NeutralizedMarkerPrefix) {
+		t.Errorf("MAJOR6: forged prefix not neutralized: %q", out)
+	}
+}
+
+func TestChildMarkerForgeryNeutralizedAcrossChunks(t *testing.T) {
+	var salt [32]byte
+	for i := range salt {
+		salt[i] = byte(i + 7)
+	}
+	forged := redact.MarkerPrefix + redact.MarkerSuffix
+	in := []byte("noise " + forged + " trailing\n")
+
+	for _, chunk := range []int{1, 3, 7, 13} {
+		chunk := chunk
+		t.Run(itoa(chunk), func(t *testing.T) {
+			var out bytes.Buffer
+			w := redact.NewWriter(&out, salt, rules.Combined())
+			for i := 0; i < len(in); i += chunk {
+				end := i + chunk
+				if end > len(in) {
+					end = len(in)
+				}
+				if _, err := w.Write(in[i:end]); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if strings.Contains(out.String(), redact.MarkerPrefix) {
+				t.Errorf("MAJOR6 chunk=%d: forged MarkerPrefix survived across chunk boundary: %q", chunk, out.String())
+			}
+			if !strings.Contains(out.String(), redact.NeutralizedMarkerPrefix) {
+				t.Errorf("MAJOR6 chunk=%d: forged prefix not neutralized: %q", chunk, out.String())
+			}
+		})
+	}
+}
+
+// A genuine gate marker (emitted because a real secret was redacted)
+// must still come out as a real MarkerPrefix — neutralization only
+// touches CHILD bytes, never the gate's own emitted markers.
+func TestGenuineMarkerSurvivesNeutralization(t *testing.T) {
+	out := redactString(t, "key AKIA"+strings.Repeat("Q", 16)+" here\n")
+	if !strings.Contains(out, redact.MarkerPrefix) {
+		t.Errorf("MAJOR6: genuine gate marker was wrongly neutralized: %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------
 // MAJOR 5 — ringMax (64 KiB) must actually bound the safe-prefix
 // buffer. The writer's straddler logic retreats emitUpTo to the start
 // of any match crossing the prefix/tail boundary; an adversarial stream
@@ -251,6 +344,30 @@ func TestRingMaxBoundsBuffer(t *testing.T) {
 	// boundary — a forced head-flush must redact, not emit raw.
 	if bytes.Contains(out.Bytes(), bytes.Repeat([]byte("A"), 2048)) {
 		t.Errorf("MAJOR5: secret body leaked raw across the ringMax flush boundary")
+	}
+}
+
+// ---------------------------------------------------------------------
+// MINOR 7 — MaxLen must not let an oversized HIGH-CONFIDENCE structural
+// secret leak. A JWT longer than the rule's MaxLen (4096) is still
+// unmistakably a JWT (eyJ.<base64>.<base64>.<base64>) and must be
+// redacted regardless of length; the marker is keyed on a truncated
+// prefix of the secret, never emitted raw.
+// ---------------------------------------------------------------------
+func TestOversizedJWTStillRedacted(t *testing.T) {
+	// Build a JWT whose middle segment is > 4096 chars.
+	header := "eyJhbGciOiJIUzI1NiJ9"
+	payload := "eyJ" + strings.Repeat("A", 5000)
+	sig := strings.Repeat("c", 64)
+	jwt := header + "." + payload + "." + sig
+
+	out := redactString(t, "Authorization token "+jwt+" end\n")
+
+	if strings.Contains(out, payload) {
+		t.Errorf("MINOR7: oversized JWT payload leaked (MaxLen dropped a real secret)")
+	}
+	if !strings.Contains(out, redact.MarkerPrefix) {
+		t.Errorf("MINOR7: oversized JWT not redacted; out len=%d", len(out))
 	}
 }
 

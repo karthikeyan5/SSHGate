@@ -52,14 +52,17 @@ func Rules() []redact.Rule {
 		),
 
 		// JWT — header.payload.sig, all three base64url. We anchor on
-		// the structurally-identifiable header prefix `eyJ`.
+		// the structurally-identifiable header prefix `eyJ`. High-
+		// confidence: a JWT is unmistakable, so an over-4096-char token
+		// is still redacted (MaxLen is advisory here, not a drop —
+		// MINOR 7).
 		redact.CompileRule(
 			"sshgate-jwt",
 			"JSON Web Token (eyJ-prefixed three-part base64url)",
 			`\b(eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\b`,
 			[]string{"eyJ"},
 			1, 30, 4096,
-		),
+		).WithHighConfidence(),
 
 		// HTTP Authorization: Bearer header. Token value only.
 		// Upper bound is 999 (RE2 max repeat is 1000); MaxLen filter

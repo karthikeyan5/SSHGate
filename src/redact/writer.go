@@ -77,14 +77,39 @@ func isSecretDelimiter(b byte) bool {
 // replaced with `[SSHGATE_REDACTED key=<8hex>]` before being forwarded
 // to dst. rules is the compiled-in ruleset (see src/redact/rules/).
 //
+// A built-in marker-forgery rule is ALWAYS active in addition to the
+// caller's ruleset (even when rules is nil): any literal MarkerPrefix
+// the child prints is rewritten to NeutralizedMarkerPrefix so a
+// surviving MarkerPrefix downstream provably came from the gate
+// (MAJOR 6).
+//
 // The caller is responsible for closing the returned Writer.
 // Close does NOT close dst.
 func NewWriter(dst io.Writer, sessionSalt [32]byte, rules []Rule) *Writer {
+	full := make([]Rule, 0, len(rules)+1)
+	full = append(full, markerForgeryRule())
+	full = append(full, rules...)
 	return &Writer{
 		dst:     dst,
-		scanner: newScanner(sessionSalt, rules),
+		scanner: newScanner(sessionSalt, full),
 		buf:     make([]byte, 0, ringInitial),
 	}
+}
+
+// markerForgeryRule matches a literal MarkerPrefix in the byte stream.
+// Its match is rewritten to NeutralizedMarkerPrefix by the scanner's
+// redact step (keyed on markerForgeryRuleID) rather than replaced with
+// a fresh marker — otherwise a forged marker would simply be reissued
+// as a real-looking one. SecretGroup 0: the whole literal prefix is the
+// span. The `[` is a regexp metachar, so it is escaped.
+func markerForgeryRule() Rule {
+	return CompileRule(
+		markerForgeryRuleID,
+		"literal SSHGATE marker prefix printed by the child (forgery guard)",
+		regexpQuoteMarkerPrefix(),
+		[]string{MarkerPrefix},
+		0, 0, 0,
+	)
 }
 
 // Write appends p to the internal ring buffer, scans for matches in
