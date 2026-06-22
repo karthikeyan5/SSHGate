@@ -75,14 +75,23 @@ func Rules() []redact.Rule {
 			1, 8, 1024,
 		),
 
-		// password=foo / pwd=foo / passwd=foo (URL-/env-style). The
+		// password=foo / *_pwd=foo / passwd=foo (URL-/env-style). The
 		// rule fires on the value only; common log noise like
 		// "password = ****" passes through because the value-character
 		// class excludes spaces and the like.
+		//
+		// `password`/`passwd` match bare (a `\b` before them) since they
+		// are unambiguous secret keys. `pwd` is the cwd-env-var landmine:
+		// bare `PWD=/home/...` and `OLDPWD=/home/...` appear in EVERY
+		// `env`/`printenv` dump and must NOT have their value scrubbed, or
+		// the operator goes blind to its own working directory. So `pwd`
+		// only matches as a `_`/`-`-separated suffix (`DB_PWD=`,
+		// `MYSQL_PWD=`); `OLDPWD` (no separator before `pwd`) and bare
+		// `PWD` are deliberately excluded.
 		redact.CompileRule(
 			"sshgate-password-kv",
-			"password=/pwd=/passwd= key-value (URL or env form)",
-			`(?i)\b(?:password|passwd|pwd)\s*[=:]\s*['"]?([^\s'";&,<>]{4,256})['"]?`,
+			"password=/*_pwd=/passwd= key-value (URL or env form)",
+			`(?i)(?:\b(?:password|passwd)|[a-z0-9]+[_-]pwd)\s*[=:]\s*['"]?([^\s'";&,<>]{4,256})['"]?`,
 			[]string{"password", "passwd", "pwd"},
 			1, 4, 256,
 		),
@@ -145,14 +154,28 @@ func Rules() []redact.Rule {
 		// SecretGroup 1 captures the whole value — including its
 		// surrounding quotes when present — so a quoted value with
 		// spaces (`PASSWORD="my secret"`) is redacted in full while the
-		// variable NAME and the `=`/`:` separator survive. The keyword
-		// stem (KEY/TOKEN/SECRET/PASSWORD/PASS/PASSWD/PWD/CREDENTIAL) must
-		// sit at the END of the variable name (a `_` or name-start before
-		// it) so `KEYBOARD=` / `TOKENIZER=` don't trip it.
+		// variable NAME and the `=`/`:` separator survive.
+		//
+		// Boundary discipline (over-redaction guard): the keyword stem
+		// must begin at a non-alphanumeric boundary — `(?:^|[^A-Za-z0-9])`
+		// — so a stem can never match *inside* a longer alphanumeric run
+		// (`KEYBOARD=` / `TOKENIZER=`). The leading class is `[^A-Za-z0-9]`
+		// (NOT `[^A-Za-z0-9_-]`) so a `_`/`-` separator inside a multi-part
+		// name still acts as the boundary — `MY_DB_PASSWORD=` matches on
+		// the `_` before `PASSWORD`. The bulk of the stems (KEY/TOKEN/
+		// SECRET/PASSWORD/PASSWD/CREDENTIAL, with an optional `NAME_`
+		// prefix) tolerate sitting at name-start. PWD and PASS are the
+		// exception: they are short, extremely common English fragments
+		// (`PWD`, `OLDPWD`, `COMPASS`, `BYPASS`, `WHISKEY`/`MONKEY` for the
+		// KEY case) so they get a stricter branch — `[A-Z0-9]+[_-](?:PWD|
+		// PASS)` REQUIRES a `_`/`-` separator before them. Thus `DB_PWD=`/
+		// `DB_PASS=` still redact, but the bare cwd env var `PWD=…` and
+		// `OLDPWD=…` (present in every `env`/`printenv` dump) pass through
+		// verbatim so the operator can still see its own working directory.
 		redact.CompileRule(
 			"sshgate-sensitive-assignment",
 			"Secret value assigned to a *KEY/*TOKEN/*SECRET/*PASSWORD/*PASS-named variable",
-			`(?i)(?:export\s+)?(?:[A-Z0-9]+[_-])?(?:API[_-]?KEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|CREDENTIALS?)\s*[:=]\s*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{4,1000})`,
+			`(?i)(?:^|[^A-Za-z0-9])(?:export\s+)?(?:(?:[A-Z0-9]+[_-])?(?:API[_-]?KEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)|[A-Z0-9]+[_-](?:PWD|PASS))\s*[:=]\s*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{4,1000})`,
 			[]string{"key", "token", "secret", "password", "pass", "passwd", "pwd", "credential"},
 			1, 4, 0,
 		),
