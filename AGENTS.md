@@ -8,7 +8,7 @@ SSHGate is a Claude Code plugin that lets an agent SSH into Linux servers. Reads
 
 ## Architecture (one-liner)
 
-A small Go binary (`gate`) sits between OpenSSH and shell exec on each remote server. A local daemon (`signer-telegram`, running as a separate Unix user) holds the master Ed25519 signing key and asks the operator to approve writes via Telegram. The MCP server (`sshgate-mcp`) exposes seven tools to Claude (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`). Provisioning a server is a human-only `sshgate` CLI — deliberately off the agent surface so the agent can't expand its own reach.
+A small Go binary (`gate`) sits between OpenSSH and shell exec on each remote server. A local daemon (`signer-telegram`, running as a separate Unix user) holds the master Ed25519 signing key and asks the operator to approve writes via Telegram. The MCP server (`sshgate-mcp`) exposes eight tools to Claude (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`). Provisioning a server is a human-only `sshgate` CLI — deliberately off the agent surface so the agent can't expand its own reach.
 
 ## How to use this project as an agent
 
