@@ -95,6 +95,11 @@ type signRequest struct {
 	Kind      string           `json:"kind"`
 	RequestID string           `json:"request_id"`
 	Commands  []signRequestCmd `json:"commands"`
+	// ProtoVersion stamps the socket-RPC shape version. It MUST mirror the
+	// daemon's signRequest field exactly and is SET to sigwire.ProtoVersion
+	// on every request. The daemon checks it in its lenient peek before any
+	// strict decode; omitempty keeps a legacy (unset) request byte-identical.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 type signResponseSig struct {
@@ -103,10 +108,11 @@ type signResponseSig struct {
 }
 
 type signResponse struct {
-	RequestID  string            `json:"request_id"`
-	Status     string            `json:"status"`
-	Signatures []signResponseSig `json:"signatures,omitempty"`
-	Error      string            `json:"error,omitempty"`
+	RequestID    string            `json:"request_id"`
+	Status       string            `json:"status"`
+	Signatures   []signResponseSig `json:"signatures,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	ProtoVersion int               `json:"proto_version,omitempty"`
 }
 
 // Sign sends a sign request for cmds and returns the signed wire
@@ -161,9 +167,10 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 	}()
 
 	body := signRequest{
-		Kind:      "sign",
-		RequestID: requestID,
-		Commands:  make([]signRequestCmd, len(cmds)),
+		Kind:         "sign",
+		RequestID:    requestID,
+		Commands:     make([]signRequestCmd, len(cmds)),
+		ProtoVersion: sigwire.ProtoVersion,
 	}
 	for i, cmd := range cmds {
 		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host, Reveal: cmd.Reveal, Reason: cmd.Reason}

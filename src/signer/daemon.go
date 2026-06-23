@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // MaxGrantDuration is the hard ceiling on a standing grant's lifetime.
@@ -81,6 +81,12 @@ type signRequest struct {
 	Kind      string           `json:"kind"`
 	RequestID string           `json:"request_id"`
 	Commands  []signRequestCmd `json:"commands"`
+	// ProtoVersion is the client's sigwire.ProtoVersion. The strict per-kind
+	// decoder must KNOW the field (it uses DisallowUnknownFields), even though
+	// the authoritative version check already happened in the lenient
+	// kindPeek pre-pass. omitempty keeps a legacy (no-version) request's wire
+	// shape byte-identical.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 type signRequestCmd struct {
@@ -110,10 +116,11 @@ type signRequestCmd struct {
 // "denied", "timeout", "error". Signatures is populated only on
 // approved; Error is populated only on error.
 type signResponse struct {
-	RequestID  string          `json:"request_id"`
-	Status     string          `json:"status"`
-	Signatures []signResponseSig `json:"signatures,omitempty"`
-	Error      string          `json:"error,omitempty"`
+	RequestID    string            `json:"request_id"`
+	Status       string            `json:"status"`
+	Signatures   []signResponseSig `json:"signatures,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	ProtoVersion int               `json:"proto_version,omitempty"`
 }
 
 type signResponseSig struct {
@@ -121,13 +128,24 @@ type signResponseSig struct {
 	Sig string `json:"sig"`
 }
 
-// kindPeek decodes only the "kind" field of a request line, WITHOUT
-// DisallowUnknownFields, so HandleSignRequest can dispatch to the
-// right typed decoder. The per-kind decoder then re-decodes the same
-// line with DisallowUnknownFields, so an unknown field is still
-// rejected for the kind it belongs to.
+// kindPeek decodes the routing/diagnostic fields of a request line,
+// WITHOUT DisallowUnknownFields, so HandleSignRequest can dispatch to the
+// right typed decoder. The per-kind decoder then re-decodes the same line
+// with DisallowUnknownFields, so an unknown field is still rejected for the
+// kind it belongs to.
+//
+// ProtoVersion and RequestID are read here LENIENTLY on purpose:
+//   - ProtoVersion must be checked BEFORE any strict per-kind decode,
+//     because those decoders use DisallowUnknownFields — a naive strict
+//     check would have an old daemon reject the proto_version field itself
+//     and re-create the build-skew outage this guards against.
+//   - RequestID is pulled out so a malformed-peek / version-mismatch error
+//     can echo a correlatable id instead of "" (closing the empty-id
+//     masking at the source).
 type kindPeek struct {
-	Kind string `json:"kind"`
+	Kind         string `json:"kind"`
+	ProtoVersion int    `json:"proto_version"`
+	RequestID    string `json:"request_id"`
 }
 
 // grantRequest is the wire-format "request_grant" request: a human
@@ -140,16 +158,20 @@ type grantRequest struct {
 	Scope       string   `json:"scope"`
 	Commands    []string `json:"commands,omitempty"`
 	DurationSec int64    `json:"duration_seconds"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 // grantResponse is the wire-format "request_grant" response. On approval
 // GrantID + ExpiryUnix are set; Error is set only on status "error".
 type grantResponse struct {
-	RequestID  string `json:"request_id"`
-	Status     string `json:"status"`
-	GrantID    string `json:"grant_id,omitempty"`
-	ExpiryUnix int64  `json:"expiry_unix,omitempty"`
-	Error      string `json:"error,omitempty"`
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	GrantID      string `json:"grant_id,omitempty"`
+	ExpiryUnix   int64  `json:"expiry_unix,omitempty"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
 // revokeGrantRequest is the wire-format "revoke_grant" request: drop a
@@ -160,13 +182,17 @@ type revokeGrantRequest struct {
 	Kind      string `json:"kind"`
 	RequestID string `json:"request_id"`
 	Alias     string `json:"alias"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 // revokeGrantResponse is the wire-format "revoke_grant" response.
 type revokeGrantResponse struct {
-	RequestID string `json:"request_id"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
 // HandleSignRequest implements the one-request-per-connection protocol:
@@ -197,8 +223,19 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	// "unknown extra json field" case still fails on the sign path).
 	var peek kindPeek
 	if jerr := json.Unmarshal(line, &peek); jerr != nil {
-		// Malformed: respond with "error", audit with "error".
-		return d.respondError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+		// Malformed: respond with "error", audit with "error". Echo
+		// peek.RequestID (it may have decoded even when another field
+		// didn't) so a correlatable id is returned when available.
+		return d.respondError(conn, peek.RequestID, fmt.Sprintf("malformed request: %v", jerr))
+	}
+	// Protocol-version skew guard. This runs in the LENIENT pre-pass, BEFORE
+	// any strict per-kind decode, so an old daemon's DisallowUnknownFields
+	// can't reject the proto_version field itself and re-create the outage.
+	// proto_version == 0 (absent) ⇒ accept as legacy.
+	if peek.ProtoVersion != 0 && peek.ProtoVersion != sigwire.ProtoVersion {
+		return d.respondError(conn, peek.RequestID, fmt.Sprintf(
+			"proto_version mismatch: client v%d vs daemon v%d — signer and MCP are different builds; rebuild and restart both",
+			peek.ProtoVersion, sigwire.ProtoVersion))
 	}
 	switch peek.Kind {
 	case "request_grant":
@@ -287,7 +324,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 // response/audit pair is intentionally produced inside one function so
 // the two cannot drift.
 func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result) error {
-	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String()}
+	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
 
 	if result.Status == backend.StatusApproved {
 		// Two paths:
@@ -351,7 +388,7 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 // to the caller (the protocol level always writes a line; the caller
 // only sees a non-nil error on hard I/O failure).
 func (d *Daemon) respondError(conn io.Writer, reqID, reason string) error {
-	resp := signResponse{RequestID: reqID, Status: "error", Error: reason}
+	resp := signResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		if auditErr := d.audit(signRequest{RequestID: reqID}, "error", ""); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", auditErr)
@@ -430,7 +467,7 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	}
 
 	if result.Status != backend.StatusApproved {
-		resp := grantResponse{RequestID: req.RequestID, Status: result.Status.String()}
+		resp := grantResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
 		if err := writeJSONLine(conn, resp); err != nil {
 			d.auditGrant(req, result.Status.String(), result.ApprovedBy)
 			return fmt.Errorf("write grant response: %w", err)
@@ -458,7 +495,7 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	}
 	d.grantsMu.Unlock()
 
-	resp := grantResponse{RequestID: req.RequestID, Status: "approved", GrantID: gid, ExpiryUnix: expiry.Unix()}
+	resp := grantResponse{RequestID: req.RequestID, Status: "approved", GrantID: gid, ExpiryUnix: expiry.Unix(), ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		// Approved + stored but the response did not reach the MCP.
 		// Record the asymmetry distinctly, mirroring the sign path's
@@ -494,7 +531,7 @@ func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
 	}
 	d.grantsMu.Unlock()
 
-	resp := revokeGrantResponse{RequestID: req.RequestID, Status: "approved"}
+	resp := revokeGrantResponse{RequestID: req.RequestID, Status: "approved", ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		d.auditRevokeGrant(req, "approved")
 		return fmt.Errorf("write revoke-grant response: %w", err)
@@ -505,7 +542,7 @@ func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
 
 // respondGrantError writes a grant "error" response and audits it.
 func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
-	resp := grantResponse{RequestID: reqID, Status: "error", Error: reason}
+	resp := grantResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		d.auditGrant(grantRequest{RequestID: reqID}, "error", "")
 		return fmt.Errorf("write grant error response: %w", err)
@@ -516,7 +553,7 @@ func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
 
 // respondRevokeGrantError writes a revoke-grant "error" response and audits it.
 func (d *Daemon) respondRevokeGrantError(conn io.Writer, reqID, reason string) error {
-	resp := revokeGrantResponse{RequestID: reqID, Status: "error", Error: reason}
+	resp := revokeGrantResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		d.auditRevokeGrant(revokeGrantRequest{RequestID: reqID}, "error")
 		return fmt.Errorf("write revoke-grant error response: %w", err)

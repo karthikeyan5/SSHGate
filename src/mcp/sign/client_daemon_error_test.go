@@ -8,7 +8,63 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/mcp/sign"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
+
+// TestSign_SendsProtoVersion confirms the MCP stamps the current
+// sigwire.ProtoVersion onto every sign request it builds (F6). The
+// fake-signer seam captures the marshalled request so we can inspect the
+// wire field directly.
+func TestSign_SendsProtoVersion(t *testing.T) {
+	t.Parallel()
+	path, gotReq, stop := startFakeSigner(t, func(req map[string]any) string {
+		return `{"request_id":"r1","status":"approved","signatures":[{"cmd":"x","sig":"SSHGATE_SIG:a:b"}]}`
+	})
+	defer stop()
+
+	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
+	if _, err := c.Sign(context.Background(), "r1", []sign.CmdReq{{Server: "s", Cmd: "x", TTLSec: 60}}); err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	select {
+	case req := <-gotReq:
+		// JSON numbers decode to float64 in a map[string]any.
+		pv, ok := req["proto_version"].(float64)
+		if !ok {
+			t.Fatalf("proto_version missing/!number on the wire: %v", req["proto_version"])
+		}
+		if int(pv) != sigwire.ProtoVersion {
+			t.Errorf("proto_version = %d; want %d", int(pv), sigwire.ProtoVersion)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fake signer did not receive the request")
+	}
+}
+
+// TestSign_VersionMismatchDaemonErrorSurfaces confirms a daemon
+// proto_version-mismatch error (carrying an echoed request_id) surfaces its
+// reason clearly to the caller rather than a sentinel or an opaque mismatch.
+func TestSign_VersionMismatchDaemonErrorSurfaces(t *testing.T) {
+	t.Parallel()
+	const reason = "proto_version mismatch: client v999 vs daemon v1 — signer and MCP are different builds; rebuild and restart both"
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
+		return `{"request_id":"r1","status":"error","error":"` + reason + `"}`
+	})
+	defer stop()
+
+	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
+	_, err := c.Sign(context.Background(), "r1", []sign.CmdReq{{Server: "s", Cmd: "x", TTLSec: 60}})
+	if err == nil {
+		t.Fatal("err is nil; want the version-mismatch reason surfaced")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "proto_version mismatch") || !strings.Contains(msg, "rebuild") {
+		t.Errorf("error did not surface the version-mismatch reason; got: %v", msg)
+	}
+	if errors.Is(err, sign.ErrDenied) || errors.Is(err, sign.ErrTimeout) || errors.Is(err, sign.ErrUnreachable) {
+		t.Errorf("version-mismatch error mis-classified as a sentinel: %v", err)
+	}
+}
 
 // TestSign_EmptyRequestIDErrorSurfacesReason covers Finding 2b: a daemon
 // error response with an empty request_id (e.g. a malformed request, or a

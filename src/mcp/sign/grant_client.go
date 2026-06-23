@@ -18,15 +18,20 @@ type grantRequest struct {
 	Scope       string   `json:"scope"`
 	Commands    []string `json:"commands,omitempty"`
 	DurationSec int64    `json:"duration_seconds"`
+	// ProtoVersion mirrors signer's grantRequest field and is SET to
+	// sigwire.ProtoVersion on every request; omitempty preserves the legacy
+	// wire shape. See client.go signRequest for the full rationale.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 // grantResponse mirrors signer's grantResponse.
 type grantResponse struct {
-	RequestID  string `json:"request_id"`
-	Status     string `json:"status"`
-	GrantID    string `json:"grant_id,omitempty"`
-	ExpiryUnix int64  `json:"expiry_unix,omitempty"`
-	Error      string `json:"error,omitempty"`
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	GrantID      string `json:"grant_id,omitempty"`
+	ExpiryUnix   int64  `json:"expiry_unix,omitempty"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
 // revokeGrantRequest is the JSON shape of a revoke_grant request.
@@ -34,13 +39,17 @@ type revokeGrantRequest struct {
 	Kind      string `json:"kind"`
 	RequestID string `json:"request_id"`
 	Alias     string `json:"alias"`
+	// ProtoVersion mirrors signer's revokeGrantRequest field; SET on every
+	// request, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 // revokeGrantResponse mirrors signer's revokeGrantResponse.
 type revokeGrantResponse struct {
-	RequestID string `json:"request_id"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
 // RequestGrant asks the signer to mint a STANDING GRANT for alias: on a
@@ -64,12 +73,13 @@ func (c *Client) RequestGrant(ctx context.Context, requestID, alias, scope strin
 	}
 
 	body := grantRequest{
-		Kind:        "request_grant",
-		RequestID:   requestID,
-		Alias:       alias,
-		Scope:       scope,
-		Commands:    commands,
-		DurationSec: durationSec,
+		Kind:         "request_grant",
+		RequestID:    requestID,
+		Alias:        alias,
+		Scope:        scope,
+		Commands:     commands,
+		DurationSec:  durationSec,
+		ProtoVersion: sigwire.ProtoVersion,
 	}
 	line, err := c.roundtrip(ctx, requestID, body, "request_grant")
 	if err != nil {
@@ -79,6 +89,20 @@ func (c *Client) RequestGrant(ctx context.Context, requestID, alias, scope strin
 	var resp grantResponse
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return "", 0, fmt.Errorf("request_grant: malformed response: %w", err)
+	}
+	// A daemon error response can legitimately carry an EMPTY request_id —
+	// it is set before the daemon has parsed/echoed our id (a malformed
+	// request, or a missing-request_id / backend failure reported with no
+	// id). Surface the real reason rather than the opaque correlation
+	// mismatch below, which would mask why the request failed. A NON-EMPTY
+	// mismatched id is still a true correlation error. Mirrors Sign's 2b
+	// fix in client.go so the daemon-error contract is uniform across
+	// Sign/RequestGrant/RevokeGrant.
+	if resp.RequestID == "" && resp.Status == "error" {
+		if resp.Error == "" {
+			return "", 0, fmt.Errorf("request_grant: daemon reported error (no detail)")
+		}
+		return "", 0, fmt.Errorf("request_grant: daemon error: %s", resp.Error)
 	}
 	if resp.RequestID != requestID {
 		return "", 0, fmt.Errorf("request_grant: response request_id %q != %q", resp.RequestID, requestID)
@@ -118,9 +142,10 @@ func (c *Client) RevokeGrant(ctx context.Context, requestID, alias string) error
 	}
 
 	body := revokeGrantRequest{
-		Kind:      "revoke_grant",
-		RequestID: requestID,
-		Alias:     alias,
+		Kind:         "revoke_grant",
+		RequestID:    requestID,
+		Alias:        alias,
+		ProtoVersion: sigwire.ProtoVersion,
 	}
 	line, err := c.roundtrip(ctx, requestID, body, "revoke_grant")
 	if err != nil {
@@ -130,6 +155,15 @@ func (c *Client) RevokeGrant(ctx context.Context, requestID, alias string) error
 	var resp revokeGrantResponse
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return fmt.Errorf("revoke_grant: malformed response: %w", err)
+	}
+	// See RequestGrant: an empty-request_id error response carries the real
+	// reason; surface it instead of the opaque correlation mismatch. A
+	// non-empty mismatched id is still a correlation error.
+	if resp.RequestID == "" && resp.Status == "error" {
+		if resp.Error == "" {
+			return fmt.Errorf("revoke_grant: daemon reported error (no detail)")
+		}
+		return fmt.Errorf("revoke_grant: daemon error: %s", resp.Error)
 	}
 	if resp.RequestID != requestID {
 		return fmt.Errorf("revoke_grant: response request_id %q != %q", resp.RequestID, requestID)
