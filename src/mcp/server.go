@@ -84,6 +84,12 @@ const ToolNameRequestGrant = "request_grant"
 // approval). Claude Code's surface name is "mcp__sshgate__revoke_grant".
 const ToolNameRevokeGrant = "revoke_grant"
 
+// ToolNameListGrants reports the signer's in-memory LIVE standing grants
+// (read-only; no approval). It lets the agent reconcile true grant state
+// after a request_grant whose verdict-write was lost (the phantom-live
+// grant). Claude Code's surface name is "mcp__sshgate__list_grants".
+const ToolNameListGrants = "list_grants"
+
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
@@ -186,6 +192,16 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolNameRevokeGrant,
 		Description: "Revoke (drop) a server's standing grant so writes prompt for approval again. De-escalation only — always safe, needs no approval, and is a no-op if no grant exists.",
 	}, s.revokeGrantHandler)
+
+	// list_grants — reports the signer's in-memory LIVE standing grants.
+	// READ-ONLY: no approval, no capability granted, no key material — it
+	// only reports state. Use it to reconcile after a request_grant timeout:
+	// if the verdict-write was lost the grant can be live while the agent saw
+	// only an error, and this is the way to re-learn its id / scope / expiry.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameListGrants,
+		Description: "List live standing grants the signer currently holds (optionally filtered to one alias). Read-only, no approval, always safe. Use it to reconcile after a request_grant timeout — a grant can be live even though you saw an error, and this re-learns its grant_id, scope, and expiry. Expired grants are never listed; grants die on signer restart.",
+	}, s.listGrantsHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -440,6 +456,41 @@ func (s *Server) revokeGrantHandler(ctx context.Context, _ *mcpsdk.CallToolReque
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: fmt.Sprintf("standing grant on %s revoked (writes will prompt again)", out.Alias)}},
 	}, out, nil
+}
+
+// listGrantsHandler is the typed handler for sshgate.list_grants. It is
+// read-only — only a true infrastructure error (nil dependency, transport
+// failure, or a too-old daemon) surfaces as a Go error; a successful read
+// carries the live grants in the structured ListGrantsOutput.
+func (s *Server) listGrantsHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.ListGrantsInput) (*mcpsdk.CallToolResult, tools.ListGrantsOutput, error) {
+	out, err := s.Runner.ListGrants(ctx, in)
+	if err != nil {
+		s.Logger.Printf("list_grants alias=%s err=%v", in.Alias, err)
+		return nil, tools.ListGrantsOutput{}, err
+	}
+	s.Logger.Printf("list_grants alias=%s grants=%d", in.Alias, len(out.Grants))
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatListGrantsSummary(out)}},
+	}, out, nil
+}
+
+// formatListGrantsSummary renders a short human summary for the fallback
+// TextContent block. Structured content carries the full ListGrantsOutput.
+func formatListGrantsSummary(out tools.ListGrantsOutput) string {
+	if len(out.Grants) == 0 {
+		return "no live standing grants"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d live grant(s):", len(out.Grants))
+	for _, g := range out.Grants {
+		fmt.Fprintf(&b, "\n  %s  scope=%s grant_id=%s expires_unix=%d", g.Alias, g.Scope, g.GrantID, g.ExpiryUnix)
+		if g.Scope == "commands" {
+			for _, c := range g.Commands {
+				fmt.Fprintf(&b, "\n    - %s", c)
+			}
+		}
+	}
+	return b.String()
 }
 
 // listServersHandler is the typed handler for sshgate.list_servers.

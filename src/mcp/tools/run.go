@@ -74,6 +74,10 @@ type SignClient interface {
 	// RevokeGrant drops the standing grant for alias (de-escalation; no
 	// approval needed).
 	RevokeGrant(ctx context.Context, requestID, alias string) error
+	// ListGrants reports the signer's in-memory LIVE standing grants
+	// (optionally filtered to alias). Read-only: no approval, no backend.
+	// Used to reconcile true grant state after a request_grant timeout.
+	ListGrants(ctx context.Context, requestID, alias string) ([]signpkg.GrantInfo, error)
 }
 
 // SSHRunner is the subset of ssh.Client that Runner needs. It

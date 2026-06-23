@@ -11,6 +11,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/mcp"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
+	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
 )
 
@@ -86,6 +87,16 @@ func connectAllTools(t *testing.T, server *mcp.Server) (*mcpsdk.ClientSession, f
 		out, err := server.Runner.RevokeGrant(ctx, in)
 		if err != nil {
 			return nil, tools.RevokeGrantOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameListGrants,
+		Description: "List live standing grants (read-only).",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.ListGrantsInput) (*mcpsdk.CallToolResult, tools.ListGrantsOutput, error) {
+		out, err := server.Runner.ListGrants(ctx, in)
+		if err != nil {
+			return nil, tools.ListGrantsOutput{}, err
 		}
 		return nil, out, nil
 	})
@@ -280,5 +291,36 @@ func TestServer_RevokeGrant_SDKBoundary(t *testing.T) {
 	decodeStructured(t, res, &out)
 	if !out.Revoked {
 		t.Error("Revoked = false; want true")
+	}
+}
+
+func TestServer_ListGrants_SDKBoundary(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "prod", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{
+		Servers: r,
+		Sign: &fakeSign{listGrantsResult: []signpkg.GrantInfo{
+			{Alias: "prod", Scope: "commands", Commands: []string{"systemctl restart nginx"}, GrantID: "g_sdk", ExpiryUnix: 1700000000},
+		}},
+		SSH: &fakeSSH{},
+	}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameListGrants,
+		Arguments: map[string]any{"alias": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError=true: %+v", res.Content)
+	}
+	var out tools.ListGrantsOutput
+	decodeStructured(t, res, &out)
+	if len(out.Grants) != 1 || out.Grants[0].GrantID != "g_sdk" {
+		t.Errorf("out = %+v; want one grant g_sdk", out)
 	}
 }

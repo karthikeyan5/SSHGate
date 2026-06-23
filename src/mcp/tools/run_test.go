@@ -43,6 +43,13 @@ type fakeSign struct {
 	revokeGrantReqID  string
 	revokeGrantAlias  string
 	revokeGrantErr    error
+
+	// ListGrants capture + canned result.
+	listGrantsCalled bool
+	listGrantsReqID  string
+	listGrantsAlias  string
+	listGrantsResult []signpkg.GrantInfo
+	listGrantsErr    error
 }
 
 func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error) {
@@ -73,6 +80,15 @@ func (f *fakeSign) RevokeGrant(ctx context.Context, requestID, alias string) err
 	f.revokeGrantReqID = requestID
 	f.revokeGrantAlias = alias
 	return f.revokeGrantErr
+}
+
+func (f *fakeSign) ListGrants(ctx context.Context, requestID, alias string) ([]signpkg.GrantInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listGrantsCalled = true
+	f.listGrantsReqID = requestID
+	f.listGrantsAlias = alias
+	return f.listGrantsResult, f.listGrantsErr
 }
 
 // fakeSSH is a Runner.SSH stub.

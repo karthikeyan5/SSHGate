@@ -48,6 +48,9 @@ func (f *hookFakeSign) RequestGrant(_ context.Context, _, _, _ string, _ []strin
 	return "", 0, nil
 }
 func (f *hookFakeSign) RevokeGrant(_ context.Context, _, _ string) error { return nil }
+func (f *hookFakeSign) ListGrants(_ context.Context, _, _ string) ([]signpkg.GrantInfo, error) {
+	return nil, nil
+}
 
 func liveRecords(t *testing.T, path string) []map[string]any {
 	t.Helper()

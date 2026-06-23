@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -577,4 +578,237 @@ func mustSig(t *testing.T, wire string) []byte {
 		t.Fatalf("decode sig: %v", err)
 	}
 	return sig
+}
+
+// listGrantsResp is the decoded list_grants response shape.
+type listGrantsResp struct {
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	ProtoVersion int    `json:"proto_version"`
+	Error        string `json:"error"`
+	Grants       []struct {
+		Alias      string   `json:"alias"`
+		Scope      string   `json:"scope"`
+		Commands   []string `json:"commands"`
+		GrantID    string   `json:"grant_id"`
+		ExpiryUnix int64    `json:"expiry_unix"`
+	} `json:"grants"`
+}
+
+// listGrants drives the real list_grants path through the daemon and
+// returns the decoded response. alias is optional ("" = all).
+func listGrants(t *testing.T, d *signer.Daemon, reqID, alias string) listGrantsResp {
+	t.Helper()
+	body := map[string]any{
+		"kind":       "list_grants",
+		"request_id": reqID,
+	}
+	if alias != "" {
+		body["alias"] = alias
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal list req: %v", err)
+	}
+	conn := &memConn{in: bytes.NewReader(append(raw, '\n')), out: &bytes.Buffer{}}
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest(list_grants): %v", err)
+	}
+	var resp listGrantsResp
+	if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+		t.Fatalf("decode list resp: %v\nraw=%q", err, conn.out.String())
+	}
+	return resp
+}
+
+// TestListGrants_ReportsLiveGrant pins the core read-only path: after a
+// grant is minted, list_grants returns it with the exact grant_id, scope,
+// commands, and expiry the daemon recorded.
+func TestListGrants_ReportsLiveGrant(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	base := time.Unix(1000, 0)
+	d, _, audit, _, _ := newGrantDaemon(t, mock, base)
+	defer audit.Close()
+
+	mock.Approve("g_req", "karthi")
+	gr := createGrant(t, d, "g_req", "prod", "commands", []string{"systemctl restart nginx"}, 3600)
+	if gr.Status != "approved" {
+		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
+	}
+
+	lr := listGrants(t, d, "l_req", "")
+	if lr.Status != "ok" {
+		t.Fatalf("list status = %q; want ok (err=%q)", lr.Status, lr.Error)
+	}
+	if lr.ProtoVersion != sigwire.ProtoVersion {
+		t.Errorf("proto_version = %d; want %d", lr.ProtoVersion, sigwire.ProtoVersion)
+	}
+	if lr.RequestID != "l_req" {
+		t.Errorf("request_id = %q; want l_req", lr.RequestID)
+	}
+	if len(lr.Grants) != 1 {
+		t.Fatalf("got %d grants; want 1", len(lr.Grants))
+	}
+	g := lr.Grants[0]
+	if g.GrantID != gr.GrantID {
+		t.Errorf("grant_id = %q; want %q (the id request_grant returned)", g.GrantID, gr.GrantID)
+	}
+	if g.Alias != "prod" {
+		t.Errorf("alias = %q; want prod", g.Alias)
+	}
+	if g.Scope != "commands" {
+		t.Errorf("scope = %q; want commands", g.Scope)
+	}
+	if len(g.Commands) != 1 || g.Commands[0] != "systemctl restart nginx" {
+		t.Errorf("commands = %v; want [systemctl restart nginx]", g.Commands)
+	}
+	// Expiry is base + 1h.
+	if g.ExpiryUnix != base.Add(3600*time.Second).Unix() {
+		t.Errorf("expiry_unix = %d; want %d", g.ExpiryUnix, base.Add(3600*time.Second).Unix())
+	}
+}
+
+// TestListGrants_OmitsExpiredGrant pins that a grant whose window has
+// elapsed is NEVER reported — list_grants must never surface a dead /
+// phantom-expired grant.
+func TestListGrants_OmitsExpiredGrant(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	base := time.Unix(1000, 0)
+	d, _, audit, _, clk := newGrantDaemon(t, mock, base)
+	defer audit.Close()
+
+	mock.Approve("g_req", "karthi")
+	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
+	if gr.Status != "approved" {
+		t.Fatalf("grant status = %q; want approved", gr.Status)
+	}
+
+	// Before expiry: reported.
+	if lr := listGrants(t, d, "l_before", ""); len(lr.Grants) != 1 {
+		t.Fatalf("pre-expiry: got %d grants; want 1", len(lr.Grants))
+	}
+
+	// Advance past expiry (base + 1h + 1s).
+	clk.set(base.Add(3601 * time.Second))
+
+	lr := listGrants(t, d, "l_after", "")
+	if lr.Status != "ok" {
+		t.Fatalf("list status = %q; want ok", lr.Status)
+	}
+	if len(lr.Grants) != 0 {
+		t.Errorf("post-expiry: got %d grants; want 0 (expired grant must not be reported)", len(lr.Grants))
+	}
+}
+
+// blockingBackend is a Backend whose Request / RequestGrant always error
+// (and record that they were touched). list_grants must NEVER consult the
+// backend — a read-only verb has no approval path — so this proves the
+// handler returns promptly from in-memory state without an approval round.
+type blockingBackend struct {
+	mu     sync.Mutex
+	called bool
+}
+
+func (b *blockingBackend) mark() {
+	b.mu.Lock()
+	b.called = true
+	b.mu.Unlock()
+}
+
+func (b *blockingBackend) wasCalled() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.called
+}
+
+func (b *blockingBackend) Request(context.Context, backend.ApprovalRequest) (<-chan backend.Result, error) {
+	b.mark()
+	return nil, fmt.Errorf("blockingBackend: Request must not be called by list_grants")
+}
+
+func (b *blockingBackend) RequestGrant(context.Context, backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+	b.mark()
+	return nil, fmt.Errorf("blockingBackend: RequestGrant must not be called by list_grants")
+}
+
+// TestListGrants_NoApprovalNoBackend pins that list_grants is purely
+// read-only: against a backend whose every method errors, list_grants
+// still returns ok promptly and never touches the backend.
+func TestListGrants_NoApprovalNoBackend(t *testing.T) {
+	t.Parallel()
+	bk := &blockingBackend{}
+	d, _, audit, _, _ := newGrantDaemon(t, bk, time.Unix(1000, 0))
+	defer audit.Close()
+
+	lr := listGrants(t, d, "l_req", "")
+	if lr.Status != "ok" {
+		t.Fatalf("list status = %q; want ok (err=%q)", lr.Status, lr.Error)
+	}
+	if len(lr.Grants) != 0 {
+		t.Errorf("got %d grants; want 0 (no grant minted)", len(lr.Grants))
+	}
+	if bk.wasCalled() {
+		t.Error("backend was consulted by list_grants; it must be read-only (no approval)")
+	}
+}
+
+// TestListGrants_AliasFilter pins the optional alias filter: with two
+// live grants, listing for one alias returns only that grant.
+func TestListGrants_AliasFilter(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
+	defer audit.Close()
+
+	mock.Approve("g_prod", "karthi")
+	if gr := createGrant(t, d, "g_prod", "prod", "all", nil, 3600); gr.Status != "approved" {
+		t.Fatalf("prod grant status = %q; want approved", gr.Status)
+	}
+	mock.Approve("g_src", "karthi")
+	if gr := createGrant(t, d, "g_src", "src", "all", nil, 3600); gr.Status != "approved" {
+		t.Fatalf("src grant status = %q; want approved", gr.Status)
+	}
+
+	// No filter → both.
+	if lr := listGrants(t, d, "l_all", ""); len(lr.Grants) != 2 {
+		t.Fatalf("unfiltered: got %d grants; want 2", len(lr.Grants))
+	}
+
+	// Filter to "prod" → exactly one, the prod grant.
+	lr := listGrants(t, d, "l_prod", "prod")
+	if lr.Status != "ok" {
+		t.Fatalf("list status = %q; want ok", lr.Status)
+	}
+	if len(lr.Grants) != 1 {
+		t.Fatalf("filtered: got %d grants; want 1", len(lr.Grants))
+	}
+	if lr.Grants[0].Alias != "prod" {
+		t.Errorf("filtered alias = %q; want prod", lr.Grants[0].Alias)
+	}
+}
+
+// TestListGrants_MissingRequestID pins that a list_grants with no
+// request_id is rejected as an error (the daemon's every-request-has-an-id
+// contract).
+func TestListGrants_MissingRequestID(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
+	defer audit.Close()
+
+	body := map[string]any{"kind": "list_grants"}
+	raw, _ := json.Marshal(body)
+	conn := &memConn{in: bytes.NewReader(append(raw, '\n')), out: &bytes.Buffer{}}
+	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+		t.Fatalf("HandleSignRequest(list_grants): %v", err)
+	}
+	var resp listGrantsResp
+	if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+		t.Fatalf("decode list resp: %v", err)
+	}
+	if resp.Status != "error" {
+		t.Errorf("status = %q; want error for missing request_id", resp.Status)
+	}
 }

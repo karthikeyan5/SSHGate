@@ -40,6 +40,9 @@ func (f *batchSign) RequestGrant(_ context.Context, _, _, _ string, _ []string, 
 	return "", 0, nil
 }
 func (f *batchSign) RevokeGrant(_ context.Context, _, _ string) error { return nil }
+func (f *batchSign) ListGrants(_ context.Context, _, _ string) ([]signpkg.GrantInfo, error) {
+	return nil, nil
+}
 
 // batchSSH records every Run call so tests can verify ordering, count,
 // and per-command output mapping.

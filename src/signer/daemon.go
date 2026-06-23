@@ -195,6 +195,43 @@ type revokeGrantResponse struct {
 	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
+// listGrantsRequest is the wire-format "list_grants" request: a READ-ONLY
+// query of the daemon's in-memory live-grant table. It needs no human
+// approval and never reaches the backend (like revoke_grant). Alias is an
+// optional filter (empty = all live grants). It exists so the MCP can
+// re-learn true grant state after a request_grant whose verdict-write was
+// lost (the phantom-live-grant race).
+type listGrantsRequest struct {
+	Kind      string `json:"kind"`
+	RequestID string `json:"request_id"`
+	Alias     string `json:"alias,omitempty"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
+}
+
+// grantInfo is one live grant reported by list_grants. It echoes the
+// agent's own grant request back (scope/commands) plus the daemon-minted
+// grant_id and the absolute expiry — no key material, no capability.
+type grantInfo struct {
+	Alias      string   `json:"alias"`
+	Scope      string   `json:"scope"`
+	Commands   []string `json:"commands,omitempty"`
+	GrantID    string   `json:"grant_id"`
+	ExpiryUnix int64    `json:"expiry_unix"`
+}
+
+// listGrantsResponse is the wire-format "list_grants" response. Status is
+// "ok" on a successful read or "error" on a malformed request. Grants
+// carries the live (unexpired) grants matching the optional alias filter.
+type listGrantsResponse struct {
+	RequestID    string      `json:"request_id"`
+	Status       string      `json:"status"`
+	Grants       []grantInfo `json:"grants,omitempty"`
+	Error        string      `json:"error,omitempty"`
+	ProtoVersion int         `json:"proto_version,omitempty"`
+}
+
 // HandleSignRequest implements the one-request-per-connection protocol:
 // read one JSON line, dispatch to the Backend, sign each command on
 // approval, write one JSON line back. The function always writes a
@@ -242,6 +279,8 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.handleRequestGrant(ctx, conn, line)
 	case "revoke_grant":
 		return d.handleRevokeGrant(conn, line)
+	case "list_grants":
+		return d.handleListGrants(conn, line)
 	case "sign", "":
 		// "" falls through to the sign decoder, which rejects it as an
 		// unsupported kind — preserving the existing error wording.
@@ -567,6 +606,96 @@ func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
 	}
 	d.auditGrant(grantRequest{RequestID: reqID}, "error", "")
 	return nil
+}
+
+// handleListGrants processes a "list_grants" request: a READ-ONLY query of
+// the in-memory standing-grant table. Like revoke_grant it needs NO human
+// approval and never touches the backend — it only reports state, it grants
+// no capability and leaks no key material. It exists so the MCP can re-learn
+// the daemon's authoritative grant state after a request_grant whose
+// verdict-write was lost (phantom-live grant).
+//
+// It RLocks d.grantsMu, iterates the table, SKIPS any grant whose expiry is
+// at-or-before now() (a dead grant is never reported), applies the optional
+// alias filter, and copies the commands slice defensively. Every request
+// produces exactly one audit row, matching the daemon's "every request is
+// audited" contract.
+func (d *Daemon) handleListGrants(conn io.ReadWriter, line []byte) error {
+	var req listGrantsRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if jerr := dec.Decode(&req); jerr != nil {
+		return d.respondListGrantsError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if req.RequestID == "" {
+		return d.respondListGrantsError(conn, "", "missing request_id")
+	}
+
+	now := d.now()
+	var out []grantInfo
+	d.grantsMu.RLock()
+	for alias, g := range d.grants {
+		if req.Alias != "" && alias != req.Alias {
+			continue
+		}
+		// Never report a dead/phantom-expired grant. Mirrors matchGrant's
+		// expiry guard: at-or-before now() is dead.
+		if !g.expiry.After(now) {
+			continue
+		}
+		out = append(out, grantInfo{
+			Alias:      g.alias,
+			Scope:      g.scope,
+			Commands:   append([]string(nil), g.commands...),
+			GrantID:    g.id,
+			ExpiryUnix: g.expiry.Unix(),
+		})
+	}
+	d.grantsMu.RUnlock()
+
+	resp := listGrantsResponse{RequestID: req.RequestID, Status: "ok", Grants: out, ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditListGrants(req, "list_grants")
+		return fmt.Errorf("write list-grants response: %w", err)
+	}
+	d.auditListGrants(req, "list_grants")
+	return nil
+}
+
+// respondListGrantsError writes a list-grants "error" response and audits it.
+func (d *Daemon) respondListGrantsError(conn io.Writer, reqID, reason string) error {
+	resp := listGrantsResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditListGrants(listGrantsRequest{RequestID: reqID}, "error")
+		return fmt.Errorf("write list-grants error response: %w", err)
+	}
+	d.auditListGrants(listGrantsRequest{RequestID: reqID}, "error")
+	return nil
+}
+
+// auditListGrants writes one audit row for a list_grants request. The
+// "command" slot carries a synthetic descriptor so a grep over the audit
+// log surfaces the read-only query alongside per-command signing. A
+// read-only "list_grants" status is fine — no verdict was rendered.
+func (d *Daemon) auditListGrants(req listGrantsRequest, status string) {
+	desc := "list_grants"
+	if req.Alias != "" {
+		desc = fmt.Sprintf("list_grants alias=%s", req.Alias)
+	}
+	var servers []string
+	if req.Alias != "" {
+		servers = []string{req.Alias}
+	}
+	ev := AuditEvent{
+		TS:        d.now().UTC(),
+		RequestID: req.RequestID,
+		Status:    status,
+		Commands:  []string{desc},
+		Servers:   servers,
+	}
+	if err := d.Audit.Write(ev); err != nil {
+		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	}
 }
 
 // respondRevokeGrantError writes a revoke-grant "error" response and audits it.
