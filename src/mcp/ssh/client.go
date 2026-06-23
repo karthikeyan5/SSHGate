@@ -24,8 +24,13 @@ type Client struct {
 	// KnownHostsPath is the TOFU known_hosts file. Created with mode
 	// 0o600 on first contact.
 	KnownHostsPath string
-	// Timeout bounds the entire dial+auth+exec window. Zero means
-	// 30 seconds.
+	// Timeout bounds the dial + SSH handshake only (TCP connect plus
+	// auth/key-exchange). The connection deadline is CLEARED right
+	// after the handshake (see Run, conn.SetDeadline(time.Time{})), so
+	// Timeout does NOT bound command execution: a command that runs
+	// longer than Timeout still completes normally. Execution duration
+	// is bounded by the caller's ctx, not by Timeout. Zero means 30
+	// seconds.
 	Timeout time.Duration
 }
 
@@ -34,7 +39,9 @@ type Client struct {
 // exit is the remote exit status (0 on success, the remote's reported
 // exit code on failure, or -1 if the remote terminated by signal).
 //
-// Run honours ctx cancellation: the dial is bounded by Timeout, and a
+// Run honours ctx cancellation: the dial + handshake are bounded by
+// Timeout (the deadline is cleared once the handshake completes, so
+// command execution is NOT bounded by Timeout — only by ctx), and a
 // cancelled ctx forcibly closes the connection so a stuck session
 // returns promptly.
 func (c *Client) Run(ctx context.Context, host, user string, port int, cmd string) ([]byte, []byte, int, error) {
@@ -96,7 +103,11 @@ func (c *Client) Run(ctx context.Context, host, user string, port int, cmd strin
 	defer client.Close()
 
 	// Clear the deadline once the handshake is done — the per-session
-	// I/O is bounded by the ctx watcher below.
+	// I/O is bounded by the ctx watcher below. NOTE: this is what makes
+	// Client.Timeout cover only dial + handshake, not exec. Do NOT
+	// re-apply a Timeout-derived deadline here: long-running commands
+	// (e.g. a build) are meant to outlive Timeout and are bounded only
+	// by the caller's ctx. See TestRun_CommandLongerThanTimeoutCompletes.
 	_ = conn.SetDeadline(time.Time{})
 
 	// Propagate ctx cancellation: close the client to abort a stuck

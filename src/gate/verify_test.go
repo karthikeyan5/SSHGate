@@ -39,6 +39,19 @@ func genKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return pub, priv
 }
 
+// gateFPs is the canonical set of host-key fingerprints a test gate
+// self-derives. Tests that exercise the host-binding path pass it (or a
+// superset) into VerifySigned; the legacy time/sig tests below use Host="" +
+// a matching empty-allowing set via hostAny so they stay focused on their own
+// concern. hostFP is the single "bound" fingerprint most cases use.
+const hostFP = "SHA256:gateHostKeyFingerprintAAAAAAAAAAAAAAAAAAAAAA"
+
+// hostAny is the fingerprint set used by the pre-host-binding legacy cases:
+// every legacy payload now also carries Host = hostFP, and the gate is given
+// {hostFP}, so the host check passes and the case still exercises only its
+// original concern (time bounds, signature, format).
+var hostAny = []string{hostFP}
+
 func TestVerifySigned(t *testing.T) {
 	pub, priv := genKey(t)
 	otherPub, _ := genKey(t)
@@ -52,13 +65,14 @@ func TestVerifySigned(t *testing.T) {
 			TS:    ts.Unix(),
 			Exp:   exp.Unix(),
 			Nonce: "nonce-abc",
+			Host:  hostFP,
 		}
 	}
 
 	t.Run("valid signed read", func(t *testing.T) {
 		p := mkPayload("df -h", now.Add(-10*time.Second), now.Add(60*time.Second))
 		line := signedLine(t, priv, p)
-		inner, err := gate.VerifySigned(line, pub, now)
+		inner, _, err := gate.VerifySigned(line, pub, now, hostAny)
 		if err != nil {
 			t.Fatalf("VerifySigned returned err=%v, want nil", err)
 		}
@@ -70,7 +84,7 @@ func TestVerifySigned(t *testing.T) {
 	t.Run("valid signed write", func(t *testing.T) {
 		p := mkPayload("systemctl restart nginx", now.Add(-5*time.Second), now.Add(60*time.Second))
 		line := signedLine(t, priv, p)
-		inner, err := gate.VerifySigned(line, pub, now)
+		inner, _, err := gate.VerifySigned(line, pub, now, hostAny)
 		if err != nil {
 			t.Fatalf("VerifySigned returned err=%v, want nil", err)
 		}
@@ -82,7 +96,7 @@ func TestVerifySigned(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		p := mkPayload("df -h", now.Add(-120*time.Second), now.Add(-1*time.Second))
 		line := signedLine(t, priv, p)
-		_, err := gate.VerifySigned(line, pub, now)
+		_, _, err := gate.VerifySigned(line, pub, now, hostAny)
 		if !errors.Is(err, gate.ErrExpired) {
 			t.Fatalf("err = %v, want ErrExpired", err)
 		}
@@ -92,7 +106,7 @@ func TestVerifySigned(t *testing.T) {
 		// exp == now: token is no longer valid (now >= exp).
 		p := mkPayload("df -h", now.Add(-60*time.Second), now)
 		line := signedLine(t, priv, p)
-		_, err := gate.VerifySigned(line, pub, now)
+		_, _, err := gate.VerifySigned(line, pub, now, hostAny)
 		if !errors.Is(err, gate.ErrExpired) {
 			t.Fatalf("err = %v, want ErrExpired", err)
 		}
@@ -102,7 +116,7 @@ func TestVerifySigned(t *testing.T) {
 		// exp - ts = 10 minutes > MaxSigValidity (5 min)
 		p := mkPayload("df -h", now, now.Add(sigwire.MaxSigValidity+1*time.Second))
 		line := signedLine(t, priv, p)
-		_, err := gate.VerifySigned(line, pub, now)
+		_, _, err := gate.VerifySigned(line, pub, now, hostAny)
 		if !errors.Is(err, gate.ErrValidityTooLong) {
 			t.Fatalf("err = %v, want ErrValidityTooLong", err)
 		}
@@ -112,7 +126,7 @@ func TestVerifySigned(t *testing.T) {
 		// exp - ts == MaxSigValidity exactly is fine
 		p := mkPayload("df -h", now, now.Add(sigwire.MaxSigValidity))
 		line := signedLine(t, priv, p)
-		inner, err := gate.VerifySigned(line, pub, now)
+		inner, _, err := gate.VerifySigned(line, pub, now, hostAny)
 		if err != nil {
 			t.Fatalf("err = %v, want nil", err)
 		}
@@ -134,7 +148,7 @@ func TestVerifySigned(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
-		_, err = gate.VerifySigned(line, pub, now)
+		_, _, err = gate.VerifySigned(line, pub, now, hostAny)
 		if !errors.Is(err, gate.ErrBadSig) {
 			t.Fatalf("err = %v, want ErrBadSig", err)
 		}
@@ -150,7 +164,7 @@ func TestVerifySigned(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
-		_, err = gate.VerifySigned(line, pub, now)
+		_, _, err = gate.VerifySigned(line, pub, now, hostAny)
 		if !errors.Is(err, gate.ErrBadSig) {
 			t.Fatalf("err = %v, want ErrBadSig", err)
 		}
@@ -160,7 +174,7 @@ func TestVerifySigned(t *testing.T) {
 		p := mkPayload("df -h", now.Add(-1*time.Second), now.Add(60*time.Second))
 		line := signedLine(t, priv, p)
 		// Verify with otherPub (a different key).
-		_, err := gate.VerifySigned(line, otherPub, now)
+		_, _, err := gate.VerifySigned(line, otherPub, now, hostAny)
 		if !errors.Is(err, gate.ErrBadSig) {
 			t.Fatalf("err = %v, want ErrBadSig", err)
 		}
@@ -184,7 +198,7 @@ func TestVerifySigned(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
-		_, err = gate.VerifySigned(line, pub, now)
+		_, _, err = gate.VerifySigned(line, pub, now, hostAny)
 		if err == nil {
 			t.Fatalf("err = nil, want some error")
 		}
@@ -194,7 +208,7 @@ func TestVerifySigned(t *testing.T) {
 	})
 
 	t.Run("non-SSHGATE_SIG prefix returns ErrBadFormat", func(t *testing.T) {
-		_, err := gate.VerifySigned("df -h", pub, now)
+		_, _, err := gate.VerifySigned("df -h", pub, now, hostAny)
 		if !errors.Is(err, gate.ErrBadFormat) {
 			t.Fatalf("err = %v, want ErrBadFormat", err)
 		}
@@ -202,7 +216,7 @@ func TestVerifySigned(t *testing.T) {
 
 	t.Run("malformed envelope returns ErrBadFormat", func(t *testing.T) {
 		// Prefix is right but body is junk.
-		_, err := gate.VerifySigned("SSHGATE_SIG:not-base64::also-not", pub, now)
+		_, _, err := gate.VerifySigned("SSHGATE_SIG:not-base64::also-not", pub, now, hostAny)
 		if !errors.Is(err, gate.ErrBadFormat) {
 			t.Fatalf("err = %v, want ErrBadFormat", err)
 		}
@@ -216,6 +230,7 @@ func TestVerifySigned(t *testing.T) {
 			gate.ErrExpired,
 			gate.ErrValidityTooLong,
 			gate.ErrEmptyCmd,
+			gate.ErrHostMismatch,
 		} {
 			m := e.Error()
 			if m == "" {
@@ -228,6 +243,116 @@ func TestVerifySigned(t *testing.T) {
 			if strings.HasSuffix(m, ".") {
 				t.Errorf("error %q ends with period", m)
 			}
+		}
+	})
+}
+
+// TestVerifySigned_HostBinding pins the per-server host-key binding: a
+// signature is bound to ONE target's host-key fingerprint and is
+// un-replayable on any other host. The gate self-derives its own host
+// fingerprints and rejects a signed payload whose Host does not match one of
+// them. The binding is mandatory: an empty Host on a signed write fails closed
+// (a signature minted without a binding must never execute), regardless of how
+// it was produced.
+func TestVerifySigned_HostBinding(t *testing.T) {
+	pub, priv := genKey(t)
+	now := time.Unix(1_700_000_000, 0)
+
+	const (
+		fpThis  = "SHA256:thisGateHostKeyFingerprintAAAAAAAAAAAAAAAAAA"
+		fpOther = "SHA256:someOtherServerHostKeyFingerprintBBBBBBBBBBB"
+		fpRSA   = "SHA256:thisGateRSAHostKeyFingerprintCCCCCCCCCCCCCCCC"
+	)
+
+	mk := func(host string) sigwire.SigPayload {
+		return sigwire.SigPayload{
+			Cmd:   "systemctl restart nginx",
+			TS:    now.Add(-5 * time.Second).Unix(),
+			Exp:   now.Add(60 * time.Second).Unix(),
+			Nonce: "nonce-host",
+			Host:  host,
+		}
+	}
+
+	t.Run("host matches the gate's host key -> ok", func(t *testing.T) {
+		line := signedLine(t, priv, mk(fpThis))
+		inner, _, err := gate.VerifySigned(line, pub, now, []string{fpThis})
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if inner != "systemctl restart nginx" {
+			t.Errorf("inner = %q", inner)
+		}
+	})
+
+	t.Run("host matches ANY of several gate host keys -> ok", func(t *testing.T) {
+		// The TOFU-pinned key could be ed25519/rsa/ecdsa; a match against
+		// any of the gate's own host keys is sufficient.
+		line := signedLine(t, priv, mk(fpRSA))
+		inner, _, err := gate.VerifySigned(line, pub, now, []string{fpThis, fpRSA, fpOther})
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if inner != "systemctl restart nginx" {
+			t.Errorf("inner = %q", inner)
+		}
+	})
+
+	t.Run("host bound to a DIFFERENT server -> ErrHostMismatch", func(t *testing.T) {
+		// Signature approved for server fpOther, replayed against THIS gate
+		// (which only holds fpThis). Must be refused — this is the
+		// confused-deputy / cross-host replay guard.
+		line := signedLine(t, priv, mk(fpOther))
+		inner, _, err := gate.VerifySigned(line, pub, now, []string{fpThis})
+		if !errors.Is(err, gate.ErrHostMismatch) {
+			t.Fatalf("err = %v, want ErrHostMismatch", err)
+		}
+		if inner != "" {
+			t.Errorf("inner = %q; want empty on rejection", inner)
+		}
+	})
+
+	t.Run("empty Host on a signed write -> ErrHostMismatch (fail closed)", func(t *testing.T) {
+		// A validly-signed payload with NO host binding must NOT execute:
+		// binding is mandatory on the signed path.
+		line := signedLine(t, priv, mk(""))
+		inner, _, err := gate.VerifySigned(line, pub, now, []string{fpThis})
+		if !errors.Is(err, gate.ErrHostMismatch) {
+			t.Fatalf("err = %v, want ErrHostMismatch", err)
+		}
+		if inner != "" {
+			t.Errorf("inner = %q; want empty on rejection", inner)
+		}
+	})
+
+	t.Run("gate has no host fingerprints -> fail closed", func(t *testing.T) {
+		// If the gate could not self-derive ANY host key, it can match no
+		// Host and every signed write fails closed.
+		line := signedLine(t, priv, mk(fpThis))
+		inner, _, err := gate.VerifySigned(line, pub, now, nil)
+		if !errors.Is(err, gate.ErrHostMismatch) {
+			t.Fatalf("err = %v, want ErrHostMismatch", err)
+		}
+		if inner != "" {
+			t.Errorf("inner = %q; want empty on rejection", inner)
+		}
+	})
+
+	t.Run("host check happens only on otherwise-valid payloads (bad sig still ErrBadSig)", func(t *testing.T) {
+		// A wrong-host payload that ALSO has a bad signature must surface
+		// ErrBadSig, not ErrHostMismatch: authenticity is checked first so
+		// an unauthenticated caller cannot probe the gate's host set.
+		_, otherPriv := genKey(t)
+		p := mk(fpOther)
+		pb, _ := json.Marshal(p)
+		badSig := ed25519.Sign(otherPriv, pb)
+		line, err := sigwire.EncodeSigned(badSig, p)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		_, _, err = gate.VerifySigned(line, pub, now, []string{fpThis})
+		if !errors.Is(err, gate.ErrBadSig) {
+			t.Fatalf("err = %v, want ErrBadSig (authenticity before host binding)", err)
 		}
 	})
 }
@@ -293,7 +418,7 @@ func TestVerifySigned_ValidityOverflow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := sigwire.SigPayload{Cmd: "rm -rf /data", TS: tc.ts, Exp: tc.exp, Nonce: "n-overflow"}
 			line := signedLine(t, priv, p)
-			inner, err := gate.VerifySigned(line, pub, now)
+			inner, _, err := gate.VerifySigned(line, pub, now, hostAny)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("VerifySigned err = %v; want %v", err, tc.wantErr)
 			}

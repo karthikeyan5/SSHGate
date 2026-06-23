@@ -77,10 +77,16 @@ func signedLine(t *testing.T, priv ed25519.PrivateKey, p sigwire.SigPayload) str
 	return line
 }
 
+// testGateHostFP is the canonical host-key fingerprint the test gate
+// self-derives (via the hostKeyFPsFn seam installed by runWith). freshPayload
+// binds to it so a signed write that reaches the host check matches; tests
+// that exercise cross-host rejection override the payload Host explicitly.
+const testGateHostFP = "SHA256:testGateHostKeyFingerprintAAAAAAAAAAAAAAAAAA"
+
 // freshPayload returns a payload that is valid against the real wall
 // clock for the next 5 minutes (ts a second in the past, exp inside the
-// MaxSigValidity window). run() reads time.Now(), so the window must
-// cover actual test execution time.
+// MaxSigValidity window) and bound to the test gate's host key. run() reads
+// time.Now(), so the window must cover actual test execution time.
 func freshPayload(cmd string) sigwire.SigPayload {
 	now := time.Now()
 	return sigwire.SigPayload{
@@ -88,7 +94,19 @@ func freshPayload(cmd string) sigwire.SigPayload {
 		TS:    now.Add(-1 * time.Second).Unix(),
 		Exp:   now.Add(4 * time.Minute).Unix(),
 		Nonce: "nonce-run-test",
+		Host:  testGateHostFP,
 	}
+}
+
+// withHostFPs points the hostKeyFPsFn seam at a fixed fingerprint set for the
+// test, restoring the production loader on cleanup. The signed-write path in
+// run() consults this to enforce the per-server host-key binding; without the
+// seam a test would read the real /etc/ssh and fail closed.
+func withHostFPs(t *testing.T, fps ...string) {
+	t.Helper()
+	prev := hostKeyFPsFn
+	hostKeyFPsFn = func() ([]string, error) { return fps, nil }
+	t.Cleanup(func() { hostKeyFPsFn = prev })
 }
 
 // withGateDir points the gateDirFn seam at dir (with binaryPath
@@ -143,6 +161,11 @@ func seedPub(t *testing.T, dir string, pub ed25519.PublicKey, mode os.FileMode) 
 // stdout and stderr. Returns (exitCode, stdout, stderr).
 func runWith(t *testing.T, cmd string) (int, string, string) {
 	t.Helper()
+	// Install a deterministic host-key fingerprint set so the signed-write
+	// host-binding check resolves against testGateHostFP rather than the real
+	// /etc/ssh on the build box. Tests that assert cross-host rejection install
+	// their own narrower set AFTER calling this (Cleanup restores in reverse).
+	withHostFPs(t, testGateHostFP)
 	withEnv(t, "SSH_ORIGINAL_COMMAND", cmd)
 	var code int
 	var out string
@@ -309,6 +332,42 @@ func TestRunVerifiedPaths(t *testing.T) {
 		code, _, _ := runWith(t, line)
 		if code != exitDataErr {
 			t.Errorf("exit = %d, want %d", code, exitDataErr)
+		}
+	})
+
+	t.Run("signature bound to a different host exits 65", func(t *testing.T) {
+		dir := t.TempDir()
+		pub, priv := genKey(t)
+		seedPub(t, dir, pub, 0o644)
+		withGateDir(t, dir)
+
+		// A perfectly valid, in-window signature — but its Host names ANOTHER
+		// server. Replayed against this gate (whose host key is testGateHostFP
+		// via runWith's seam), it must be refused at the binding check. This
+		// is the end-to-end cross-host replay guard.
+		p := freshPayload("cat /etc/hostname")
+		p.Host = "SHA256:someOtherServerHostKeyFingerprintZZZZZZZZZZ"
+		line := signedLine(t, priv, p)
+		code, _, stderr := runWith(t, line)
+		if code != exitDataErr {
+			t.Errorf("exit = %d, want %d; stderr=%q", code, exitDataErr, stderr)
+		}
+	})
+
+	t.Run("signature with no host binding exits 65 (fail closed)", func(t *testing.T) {
+		dir := t.TempDir()
+		pub, priv := genKey(t)
+		seedPub(t, dir, pub, 0o644)
+		withGateDir(t, dir)
+
+		// Valid signature, valid window, but NO Host binding at all. The
+		// signed path is binding-mandatory: must be refused.
+		p := freshPayload("cat /etc/hostname")
+		p.Host = ""
+		line := signedLine(t, priv, p)
+		code, _, stderr := runWith(t, line)
+		if code != exitDataErr {
+			t.Errorf("exit = %d, want %d; stderr=%q", code, exitDataErr, stderr)
 		}
 	})
 }

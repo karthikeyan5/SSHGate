@@ -39,6 +39,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/hostkey"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -88,9 +89,20 @@ func run() int {
 	raw := os.Getenv("SSH_ORIGINAL_COMMAND")
 	if raw == "" {
 		// Post-install probe. Stdout only (the installer reads this).
+		// The probe is gate machinery, not a command the operator ran, so
+		// it is intentionally NOT audited.
 		fmt.Println("SSHGATE_OK")
 		return exitOK
 	}
+
+	// Tier 6a — resolve the gate-side authoritative audit logger from the
+	// gate dir. The level/path config files live there (owner/admin-edited
+	// only; the agent cannot reach them), and resolution NEVER fails the
+	// gate: a missing/unreadable config falls to the default (all+meta /
+	// gateDir/audit.log). When the gate dir cannot be resolved at all
+	// (os.Executable failure), we degrade to a nil logger — auditing is a
+	// side effect, never a gate, so the command still runs.
+	audit := newAuditLogger()
 
 	// Locate gate.pub alongside the binary.
 	pubPath, err := pubKeyPath()
@@ -116,36 +128,74 @@ func run() int {
 	if pubkey == nil {
 		if signed {
 			logf("no signing key configured; signed commands cannot be verified")
+			// A signed command on a read-only host is a denial: classify it
+			// as a write (it was elevated) so it is logged from `writes` up.
+			auditNoExec(audit, raw, "write", "denied", exitNoPermVal)
 			return exitNoPermVal
 		}
 		kind := classify.Classify(raw)
 		if kind == classify.KindRead {
-			return execChild(raw)
+			// Tier-1 read-only: unsigned read, never revealed.
+			return execAndAudit(audit, raw, "read", "unsigned", false)
 		}
 		// KindWrite or KindUnknown (empty/whitespace already handled
 		// upstream — anything else unknown falls through as write).
 		logf("no signing key configured (read-only install — re-run /sshgate:setup to add a signer)")
+		auditNoExec(audit, raw, "write", "denied", exitNoPermVal)
 		return exitNoPermVal
 	}
 
 	innerCmd := raw
+	// reveal is the verified SECRET-REVEAL capability. It can ONLY become true
+	// on the signed path below, from the authenticated payload — the unsigned
+	// read path leaves it false, so a read is never revealed (it is redacted
+	// like any other output). The agent cannot set this; only a human approval
+	// turned into a signature can.
+	reveal := false
 	if signed {
-		ic, err := gate.VerifySigned(raw, pubkey, time.Now())
+		// Self-derive THIS gate's host-key fingerprints so VerifySigned can
+		// enforce the per-server binding: a signature approved for server X
+		// must name X's pinned host key, so it cannot be replayed on server Y.
+		// Reading the world-readable static /etc/ssh/ssh_host_*.pub files at
+		// process start is identity, not decision state — the gate stays
+		// stateless. An empty set fails closed inside VerifySigned
+		// (ErrHostMismatch), which is the correct outcome when the gate cannot
+		// identify itself; we surface a clearer error here when the glob itself
+		// errored.
+		selfHostFPs, herr := hostKeyFPsFn()
+		if herr != nil {
+			logf("derive host-key fingerprints: %v", herr)
+			return exitSoftware
+		}
+		ic, rev, err := gate.VerifySigned(raw, pubkey, time.Now(), selfHostFPs)
 		if err != nil {
 			logf("%v", err)
+			// A signature that failed to verify (bad/expired/wrong-host) is a
+			// denial. We log the OUTER raw line (the verified inner command is
+			// not trustworthy here) and classify it as a write — it carried a
+			// SIG prefix, so it was an elevation attempt — so it is recorded
+			// from `writes` up.
+			auditNoExec(audit, raw, "write", "denied", exitDataErr)
 			return exitDataErr
 		}
 		innerCmd = ic
+		reveal = rev
 	}
 
 	// Administrative commands. Only valid when signed.
 	if signed {
 		if innerCmd == "SSHGATE_REVOKE" {
-			return doRevoke()
+			// A verified admin verb runs no /bin/sh child, so there is no
+			// output metadata — record it as a signed write with the actual
+			// exit code. doRevoke owns the teardown + its own exit code.
+			rc := doRevoke()
+			auditNoExec(audit, innerCmd, "write", "signed", rc)
+			return rc
 		}
 		if strings.HasPrefix(innerCmd, "SSHGATE_UPDATE ") {
 			// Future: self-update path (fetch + verify + replace the gate binary).
 			logf("SSHGATE_UPDATE not yet implemented")
+			auditNoExec(audit, innerCmd, "write", "signed", exitGeneric)
 			return exitGeneric
 		}
 	}
@@ -153,7 +203,14 @@ func run() int {
 	kind := classify.Classify(innerCmd)
 	switch kind {
 	case classify.KindRead:
-		return execChild(innerCmd)
+		// A signed READ may carry reveal=true (e.g. `cat secret.env`
+		// approved as a reveal): the verified flag flows through. An
+		// UNSIGNED read can never reach here (reveal stays false above).
+		status := "unsigned"
+		if signed {
+			status = "signed"
+		}
+		return execAndAudit(audit, innerCmd, "read", status, reveal)
 	case classify.KindWrite, classify.KindUnknown:
 		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
@@ -161,11 +218,13 @@ func run() int {
 		// here, and we treat that as denied too).
 		if !signed {
 			logf("write commands require a SSHGATE_SIG prefix")
+			auditNoExec(audit, innerCmd, "write", "denied", exitNoPermVal)
 			return exitNoPermVal
 		}
-		return execChild(innerCmd)
+		return execAndAudit(audit, innerCmd, "write", "signed", reveal)
 	default:
 		logf("unexpected classification: %v", kind)
+		auditNoExec(audit, innerCmd, "write", "denied", exitGeneric)
 		return exitGeneric
 	}
 }
@@ -174,8 +233,17 @@ func run() int {
 // received by gate are propagated to the child process group via
 // the context cancellation wired through Exec. The child's
 // stdout/stderr are wrapped in redact.Writer instances so every byte
-// the child emits passes Layer-1 redaction (v1.2 R1).
-func execChild(cmd string) int {
+// the child emits passes Layer-1 redaction (v1.2 R1) — UNLESS reveal is
+// true, the signed SECRET-REVEAL path, where the verified payload
+// authorised raw (un-redacted) output. reveal can only be true on the
+// signed path (see run()); it is never set for an unsigned read.
+//
+// It returns the gate exit code AND the ExecResult (output metadata) so
+// the caller can feed the Tier-6a audit log. captureLimit (>0 only at the
+// audit all+full level) makes the executor tee a capped copy of the
+// output into the result. On an exec start-failure (exit<0) the gate exit
+// code is normalised to exitGeneric (1).
+func execChild(cmd string, reveal bool, captureLimit int) (int, gate.ExecResult) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	// Compile the redaction ruleset lazily — only this execute path needs
@@ -185,20 +253,104 @@ func execChild(cmd string) int {
 	if rules == nil {
 		rules = redactrules.Combined()
 	}
-	exit, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
-		SessionSalt: sessionSalt,
-		Rules:       rules,
+	res, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
+		SessionSalt:  sessionSalt,
+		Rules:        rules,
+		Reveal:       reveal,
+		CaptureLimit: captureLimit,
 	})
 	if err != nil {
 		logf("%v", err)
-		if exit < 0 {
-			return exitGeneric
-		}
 	}
-	if exit < 0 {
-		return exitGeneric
+	if res.ExitCode < 0 {
+		return exitGeneric, res
 	}
-	return exit
+	return res.ExitCode, res
+}
+
+// auditFullCaptureLimit bounds the per-stream bytes the gate buffers for
+// the all+full audit level. 256 KiB is generous for a captured command
+// transcript while keeping a runaway command from ballooning gate memory;
+// beyond it the record carries a truncation marker.
+const auditFullCaptureLimit = 256 * 1024
+
+// newAuditLogger builds the Tier-6a gate-side authoritative logger from
+// the gate dir. Level + path come from the gate-dir config files
+// (audit-level / audit-path), each failing to a safe default. If the
+// gate dir itself cannot be resolved (os.Executable failure), it returns
+// nil — auditing is a side effect, never a gate, so a nil logger simply
+// means "no audit this invocation" and the command still runs. A nil
+// *gate.AuditLogger.Record is a documented no-op.
+func newAuditLogger() *gate.AuditLogger {
+	gateDir, _, err := gateDirFn()
+	if err != nil {
+		// Cannot locate the gate dir → no audit, but never block the gate.
+		return nil
+	}
+	return gate.NewAuditLogger(gate.LoadAuditLevel(gateDir), gate.AuditPath(gateDir))
+}
+
+// execAndAudit runs cmd, records ONE Tier-6a audit line with output
+// metadata (and raw output only at all+full), and returns the gate exit
+// code. It is the single exec+audit chokepoint for reads and signed
+// writes. The audit write is fail-open inside Record — a logging failure
+// never affects the returned exit code.
+func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool) int {
+	// Only buffer output when the audit level actually wants raw output
+	// (all+full). At every other level captureLimit stays 0 and the
+	// executor streams without buffering — zero added cost on the hot path.
+	//
+	// REVEAL EXCLUSION: a SECRET-REVEAL bypasses the redactor, so the child's
+	// output is the RAW secret. The audit log is accountability, not a secret
+	// store, and reveal's threat model never accepted persisting the secret to
+	// disk. So we DON'T EVEN CAPTURE it: captureLimit stays 0 for a revealed
+	// command regardless of level, meaning the raw secret is never buffered in
+	// the gate in the first place (defence in depth — there is nothing to
+	// accidentally serialise). The record still gets full metadata + revealed:true.
+	captureLimit := 0
+	if audit != nil && audit.Level() >= gate.AuditAllFull && !reveal {
+		captureLimit = auditFullCaptureLimit
+	}
+	rc, res := execChild(cmd, reveal, captureLimit)
+	audit.Record(gate.AuditRecord{
+		TS:             time.Now().UTC().Unix(),
+		Command:        cmd,
+		Classification: classification,
+		ApprovalStatus: approval,
+		ExitCode:       rc,
+		Meta: &gate.AuditMeta{
+			StdoutBytes: res.StdoutBytes,
+			StderrBytes: res.StderrBytes,
+			Lines:       res.Lines,
+			DurationMS:  res.Duration.Milliseconds(),
+		},
+		// Revealed marks a SECRET-REVEAL so the record shows revealed:true with
+		// metadata but no output — accountability without storing the secret.
+		Revealed: reveal,
+		// res.Stdout/Stderr are populated ONLY when captureLimit>0, i.e. at
+		// all+full AND not a reveal. For a reveal captureLimit is 0 (above), so
+		// these are empty — the raw secret is never even buffered, let alone
+		// persisted. AuditLogger.Record additionally blanks them below all+full,
+		// so all+meta provably cannot leak raw output either.
+		Stdout: res.Stdout,
+		Stderr: res.Stderr,
+	})
+	return rc
+}
+
+// auditNoExec records a Tier-6a line for a command that ran NO /bin/sh
+// child: a rejection (approval="denied", exit is the deny code) or a
+// signed admin verb handled internally (approval="signed"). Meta is nil
+// because there is no output metadata. The write is fail-open.
+func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int) {
+	audit.Record(gate.AuditRecord{
+		TS:             time.Now().UTC().Unix(),
+		Command:        cmd,
+		Classification: classification,
+		ApprovalStatus: approval,
+		ExitCode:       exit,
+		Meta:           nil,
+	})
 }
 
 // gateDirFn resolves the gate install directory and the absolute path
@@ -215,6 +367,15 @@ var gateDirFn = defaultGateDir
 // homeDirFn resolves the operator's home directory. Same test-seam
 // rationale as gateDirFn; defaults to os.UserHomeDir.
 var homeDirFn = os.UserHomeDir
+
+// hostKeyFPsFn returns THIS gate's own SSH host-key fingerprints, used to
+// enforce the per-server host-key binding on the signed-write path. It is a
+// package-level var so in-package tests can inject a controlled set without an
+// /etc/ssh on the test box; production reads the real host keys from
+// hostkey.DefaultHostKeyGlob (/etc/ssh/ssh_host_*.pub). Like gateDirFn this is
+// deliberately NOT driven by any environment variable: letting the environment
+// redirect which host keys the gate trusts would be a binding-forgery surface.
+var hostKeyFPsFn = hostkey.LoadHostFingerprints
 
 // defaultGateDir returns the directory holding the gate binary and the
 // binary's own absolute path, both derived from os.Executable().

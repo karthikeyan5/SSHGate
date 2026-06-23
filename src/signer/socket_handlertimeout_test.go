@@ -34,6 +34,17 @@ type delayedBackend struct {
 }
 
 func (b delayedBackend) Request(ctx context.Context, _ backend.ApprovalRequest) (<-chan backend.Result, error) {
+	return b.delayedResult(ctx), nil
+}
+
+// RequestGrant mirrors Request so delayedBackend satisfies the widened
+// Backend interface; the handler-timeout tests only exercise the sign
+// path, but the daemon needs a complete backend.
+func (b delayedBackend) RequestGrant(ctx context.Context, _ backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+	return b.delayedResult(ctx), nil
+}
+
+func (b delayedBackend) delayedResult(ctx context.Context) <-chan backend.Result {
 	ch := make(chan backend.Result, 1)
 	go func() {
 		timer := time.NewTimer(b.delay)
@@ -48,7 +59,7 @@ func (b delayedBackend) Request(ctx context.Context, _ backend.ApprovalRequest) 
 			// covers ctx.Done(), and sending would race with that branch.)
 		}
 	}()
-	return ch, nil
+	return ch
 }
 
 // newServerWithDaemon stands up a real signer.Server over a unix socket in

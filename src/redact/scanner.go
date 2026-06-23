@@ -29,6 +29,11 @@ type scanner struct {
 	// into markers. Exposed via Stats(); a future redact.list /
 	// redact.stats command (R5) reads it.
 	redactCount atomic.Uint64
+
+	// suppressedBytes counts bytes dropped by the ringMax suppression
+	// continuation (a secret longer than ringMax whose anchor scrolled
+	// out of the window). Bookkeeping only; observable via stats.
+	suppressedBytes atomic.Uint64
 }
 
 func newScanner(salt [32]byte, rules []Rule) *scanner {
@@ -36,10 +41,20 @@ func newScanner(salt [32]byte, rules []Rule) *scanner {
 }
 
 // match is a single rule hit on a buffer. Start/End are byte offsets
-// into the buffer where the secret group lies; RuleID identifies
-// which rule fired (used for audit logging in R2+).
+// into the buffer where the secret group lies (the bytes that get
+// replaced with a marker); RuleID identifies which rule fired (used for
+// audit logging in R2+).
+//
+// MatchStart is the offset of the FULL match (including any keyword/
+// anchor prefix that sits before the secret group). It is used by the
+// writer's straddler-retention logic: when a match crosses the
+// prefix/tail boundary we must retain it starting from its anchor, not
+// from the secret group — otherwise the anchor flushes out and the
+// remaining secret can no longer be re-matched, leaking raw. MatchStart
+// <= Start always.
 type match struct {
 	Start, End int
+	MatchStart int
 	RuleID     string
 	Secret     []byte
 }
@@ -58,6 +73,7 @@ func (s *scanner) findMatches(buf []byte) []match {
 		}
 		idxs := r.Regex.FindAllSubmatchIndex(buf, -1)
 		for _, ix := range idxs {
+			matchStart := ix[0]
 			start, end := ix[0], ix[1]
 			if r.SecretGroup > 0 {
 				// FindAllSubmatchIndex returns 2*N+2 ints per match:
@@ -71,14 +87,19 @@ func (s *scanner) findMatches(buf []byte) []match {
 			if r.MinLen > 0 && n < r.MinLen {
 				continue
 			}
-			if r.MaxLen > 0 && n > r.MaxLen {
+			// MaxLen trims runaway low-confidence matches. High-
+			// confidence structural rules (JWT, PEM) are exempt: an
+			// over-long match is still unmistakably the secret and must
+			// be redacted, never dropped (MINOR 7).
+			if r.MaxLen > 0 && n > r.MaxLen && !r.HighConfidence {
 				continue
 			}
 			out = append(out, match{
-				Start:  start,
-				End:    end,
-				RuleID: r.ID,
-				Secret: append([]byte(nil), buf[start:end]...),
+				Start:      start,
+				End:        end,
+				MatchStart: matchStart,
+				RuleID:     r.ID,
+				Secret:     append([]byte(nil), buf[start:end]...),
 			})
 		}
 	}
@@ -124,7 +145,14 @@ func (s *scanner) redact(dst, buf []byte, matches []match) ([]byte, int) {
 	prev := 0
 	for _, m := range matches {
 		dst = append(dst, buf[prev:m.Start]...)
-		dst = append(dst, FormatMarker(s.salt, m.Secret)...)
+		if m.RuleID == markerForgeryRuleID {
+			// Child printed a literal MarkerPrefix — rewrite it to the
+			// sanitized form instead of issuing a fresh marker, so the
+			// forgery cannot masquerade as a gate redaction.
+			dst = append(dst, NeutralizedMarkerPrefix...)
+		} else {
+			dst = append(dst, FormatMarker(s.salt, m.Secret)...)
+		}
 		prev = m.End
 	}
 	dst = append(dst, buf[prev:]...)

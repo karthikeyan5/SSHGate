@@ -108,6 +108,57 @@ func TestEncodeDecodeSigned_Roundtrip(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeSigned_HostRoundtrip(t *testing.T) {
+	t.Parallel()
+	p := SigPayload{
+		Cmd:   "systemctl restart nginx",
+		TS:    1716100000,
+		Exp:   1716100060,
+		Nonce: "n_host",
+		Host:  "SHA256:abcdefGHIJklmno1234567890+/PQRSTUVWXYZxyz",
+	}
+	s, err := EncodeSigned(fixedSig, p)
+	if err != nil {
+		t.Fatalf("EncodeSigned: %v", err)
+	}
+	_, got, err := DecodeSigned(s)
+	if err != nil {
+		t.Fatalf("DecodeSigned: %v", err)
+	}
+	if got != p {
+		t.Errorf("payload with Host did not round-trip:\n got  %+v\n want %+v", got, p)
+	}
+	if got.Host != p.Host {
+		t.Errorf("Host = %q; want %q", got.Host, p.Host)
+	}
+}
+
+// TestEncodeSigned_HostOmitEmpty pins that an empty Host is OMITTED from the
+// JSON (omitempty), so the wire form of a Host-less payload is byte-identical
+// to the pre-Host format. This keeps the golden test valid and means an old
+// decoder (without the Host field) still accepts a Host-less payload — and,
+// crucially with DisallowUnknownFields, FAILS CLOSED on a Host-bearing one.
+func TestEncodeSigned_HostOmitEmpty(t *testing.T) {
+	t.Parallel()
+	p := SigPayload{Cmd: "ls", TS: 1, Exp: 2, Nonce: "n"} // Host == ""
+	s, err := EncodeSigned(fixedSig, p)
+	if err != nil {
+		t.Fatalf("EncodeSigned: %v", err)
+	}
+	// Decode the payload base64 back to raw JSON and assert no "host" key.
+	parts := strings.SplitN(s, ":", 3)
+	if len(parts) != 3 {
+		t.Fatalf("envelope wrong shape: %q", s)
+	}
+	raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode payload b64: %v", err)
+	}
+	if strings.Contains(string(raw), "host") {
+		t.Errorf("empty Host leaked into JSON: %s", raw)
+	}
+}
+
 func TestEncodeSigned_NoPadding(t *testing.T) {
 	t.Parallel()
 	// Force payload sizes that would normally need '=' padding in standard

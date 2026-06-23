@@ -15,8 +15,9 @@ import (
 
 func TestRevokeServer_HappyPath(t *testing.T) {
 	t.Parallel()
+	const revFP = "SHA256:revokeHostKeyFingerprintAAAAAAAAAAAAAAAAAAA"
 	r := newRegistryWith(t, "to-revoke", registry.Entry{
-		Host: "host.example.com", Port: 22, User: "ops", AddedAt: time.Now(),
+		Host: "host.example.com", Port: 22, User: "ops", AddedAt: time.Now(), Fingerprint: revFP,
 	})
 	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "SSHGATE_REVOKE", Sig: "SSHGATE_SIG:fake-sig:fake-payload"}}}
 	ssh := &fakeSSH{stdout: []byte("SSHGATE_REVOKED lines=1 dir=removed\n"), exit: 0}
@@ -40,6 +41,11 @@ func TestRevokeServer_HappyPath(t *testing.T) {
 	}
 	if len(sign.gotCmds) != 1 || sign.gotCmds[0].Cmd != "SSHGATE_REVOKE" {
 		t.Errorf("sign got %+v; want one cmd SSHGATE_REVOKE", sign.gotCmds)
+	}
+	// SSHGATE_REVOKE is a signed admin command, so it must carry the host
+	// binding read from the registry or the gate would reject it.
+	if sign.gotCmds[0].Host != revFP {
+		t.Errorf("revoke sign CmdReq.Host = %q; want registry fingerprint %q", sign.gotCmds[0].Host, revFP)
 	}
 	if !strings.HasPrefix(ssh.gotCmd, "SSHGATE_SIG:") || !strings.HasSuffix(ssh.gotCmd, " SSHGATE_REVOKE") {
 		t.Errorf("ssh.gotCmd = %q; want SSHGATE_SIG:... SSHGATE_REVOKE", ssh.gotCmd)

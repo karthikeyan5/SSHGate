@@ -16,8 +16,9 @@ import (
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
-// fakeSign is a Runner.Sign stub. signCalled records whether Sign was
-// invoked; respond is the canned outcome.
+// fakeSign is a Runner.Sign / SignClient stub. signCalled records whether
+// Sign was invoked; respond is the canned outcome. The grant* fields
+// capture and drive the RequestGrant / RevokeGrant paths.
 type fakeSign struct {
 	mu         sync.Mutex
 	signCalled bool
@@ -25,6 +26,23 @@ type fakeSign struct {
 	gotCmds    []signpkg.CmdReq
 	signed     []signpkg.Signed
 	err        error
+
+	// RequestGrant capture + canned result.
+	grantCalled      bool
+	grantReqID       string
+	grantAlias       string
+	grantScope       string
+	grantCommands    []string
+	grantDurationSec int64
+	grantID          string
+	grantExpiryUnix  int64
+	grantErr         error
+
+	// RevokeGrant capture + canned result.
+	revokeGrantCalled bool
+	revokeGrantReqID  string
+	revokeGrantAlias  string
+	revokeGrantErr    error
 }
 
 func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error) {
@@ -34,6 +52,27 @@ func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.Cm
 	f.gotReqID = requestID
 	f.gotCmds = cmds
 	return f.signed, f.err
+}
+
+func (f *fakeSign) RequestGrant(ctx context.Context, requestID, alias, scope string, commands []string, durationSec int64) (string, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grantCalled = true
+	f.grantReqID = requestID
+	f.grantAlias = alias
+	f.grantScope = scope
+	f.grantCommands = commands
+	f.grantDurationSec = durationSec
+	return f.grantID, f.grantExpiryUnix, f.grantErr
+}
+
+func (f *fakeSign) RevokeGrant(ctx context.Context, requestID, alias string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokeGrantCalled = true
+	f.revokeGrantReqID = requestID
+	f.revokeGrantAlias = alias
+	return f.revokeGrantErr
 }
 
 // fakeSSH is a Runner.SSH stub.
@@ -151,6 +190,40 @@ func TestRun_WriteCommandSignsThenSSH(t *testing.T) {
 	}
 }
 
+// TestRun_WritePassesRegistryFingerprint pins that the write path binds the
+// sign request to the server's host-key fingerprint READ FROM THE REGISTRY,
+// not from any agent-supplied value. This is the confused-deputy guard: the
+// agent invokes run(alias, command) and can never influence which host the
+// approved signature binds to — the MCP sources it from the trusted registry
+// entry. A regression that dropped this would let an "approve on X" signature
+// be minted unbound (and thus replayable anywhere the gate fails open).
+func TestRun_WritePassesRegistryFingerprint(t *testing.T) {
+	t.Parallel()
+	const wantFP = "SHA256:prodHostKeyFingerprintAAAAAAAAAAAAAAAAAAAAAA"
+	r := newRegistryWith(t, "h1", registry.Entry{
+		Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now(),
+		Fingerprint: wantFP,
+	})
+	payload := sigwire.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc", Host: wantFP}
+	wire, err := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "rm /tmp/x", Sig: wire}}}
+	ssh := &fakeSSH{stdout: []byte("ok\n"), exit: 0}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	if _, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(sign.gotCmds) != 1 {
+		t.Fatalf("got %d cmds; want 1", len(sign.gotCmds))
+	}
+	if sign.gotCmds[0].Host != wantFP {
+		t.Errorf("sign CmdReq.Host = %q; want %q (must come from the registry entry, not the agent)", sign.gotCmds[0].Host, wantFP)
+	}
+}
+
 func TestRun_WriteDenied(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now()})
@@ -259,5 +332,29 @@ func TestRun_SSHErrorSurfaces(t *testing.T) {
 	}
 	if !errors.Is(err, sshErr) {
 		t.Errorf("err = %v; want wrap of %v", err, sshErr)
+	}
+}
+
+// TestRun_DefaultWriteTTL pins the default write signature window at 60s.
+// A tighter default shrinks the replay window between human approval and gate
+// execution; the gate still independently caps it at MaxSigValidity. When the
+// Runner's WriteTTLSec is unset, the write path must request exactly this TTL.
+func TestRun_DefaultWriteTTL(t *testing.T) {
+	t.Parallel()
+	if tools.DefaultWriteTTLSec != 60 {
+		t.Fatalf("DefaultWriteTTLSec = %d; want 60", tools.DefaultWriteTTLSec)
+	}
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now(), Fingerprint: "SHA256:x"})
+	payload := sigwire.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc", Host: "SHA256:x"}
+	wire, _ := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "rm /tmp/x", Sig: wire}}}
+	ssh := &fakeSSH{stdout: []byte("ok\n")}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh} // WriteTTLSec unset → default
+
+	if _, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(sign.gotCmds) != 1 || sign.gotCmds[0].TTLSec != 60 {
+		t.Errorf("requested TTLSec = %v; want 60 (the default)", sign.gotCmds)
 	}
 }

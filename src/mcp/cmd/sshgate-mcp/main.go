@@ -28,10 +28,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/mcp"
+	"github.com/karthikeyan5/sshgate/src/mcp/livelog"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
@@ -146,7 +149,39 @@ func buildServer(cfgRoot, socketPath string, logger *log.Logger) (*mcp.Server, e
 		SignerSockPath: socketPath,
 	}
 
-	return &mcp.Server{Runner: runner, Logger: logger}, nil
+	// Tier 6b — MCP-side rolling live log (convenience surface). On by
+	// default with a sane cap; configurable via cfgRoot/audit-live-cap
+	// (bytes; 0 disables). A nil log is a no-op, so a disabled config or a
+	// resolution error simply means "no live log."
+	liveLog := buildLiveLog(cfgRoot, logger)
+
+	return &mcp.Server{Runner: runner, Logger: logger, LiveLog: liveLog}, nil
+}
+
+// defaultLiveLogCapBytes is the default size cap of the Tier-6b rolling
+// live log: 5 MiB of terminal-scrollback-style history, plenty for a
+// `tail -f` operator view while staying bounded and transient.
+const defaultLiveLogCapBytes int64 = 5 * 1024 * 1024
+
+// buildLiveLog resolves the Tier-6b live-log path + cap and returns a
+// *livelog.Log (or nil when disabled). The cap is read from
+// cfgRoot/audit-live-cap (an integer byte count; 0 disables); a missing
+// or unparseable file falls to defaultLiveLogCapBytes. The log lives at
+// cfgRoot/audit-live.log.
+func buildLiveLog(cfgRoot string, logger *log.Logger) *livelog.Log {
+	capBytes := defaultLiveLogCapBytes
+	if b, err := os.ReadFile(filepath.Join(cfgRoot, "audit-live-cap")); err == nil {
+		if n, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
+			capBytes = n
+		} else {
+			logger.Printf("audit-live-cap unparseable (%v); using default %d bytes", perr, defaultLiveLogCapBytes)
+		}
+	}
+	if capBytes <= 0 {
+		logger.Printf("Tier-6b live log disabled (audit-live-cap=%d)", capBytes)
+		return nil
+	}
+	return livelog.New(filepath.Join(cfgRoot, "audit-live.log"), capBytes)
 }
 
 // configRoot returns the sshgate config root, honouring

@@ -34,6 +34,13 @@ func (f *batchSign) Sign(_ context.Context, requestID string, cmds []signpkg.Cmd
 	return f.signed, f.err
 }
 
+// RequestGrant / RevokeGrant satisfy SignClient; batch tests never use
+// the grant paths.
+func (f *batchSign) RequestGrant(_ context.Context, _, _, _ string, _ []string, _ int64) (string, int64, error) {
+	return "", 0, nil
+}
+func (f *batchSign) RevokeGrant(_ context.Context, _, _ string) error { return nil }
+
 // batchSSH records every Run call so tests can verify ordering, count,
 // and per-command output mapping.
 type batchSSH struct {
@@ -191,6 +198,37 @@ func TestRunBatch_AllWrites_OneSignCall(t *testing.T) {
 		}
 		if res.Command != writes[i] {
 			t.Errorf("Results[%d].Command=%q; want %q", i, res.Command, writes[i])
+		}
+	}
+}
+
+// TestRunBatch_WritesPassRegistryFingerprint pins that every write in a batch
+// is bound to the server's registry host-key fingerprint, read in code from
+// the trusted entry — the agent (which supplies only alias + commands) can
+// never influence the binding. Without this, a bulk approval could be minted
+// unbound and replayed elsewhere.
+func TestRunBatch_WritesPassRegistryFingerprint(t *testing.T) {
+	t.Parallel()
+	const wantFP = "SHA256:batchHostKeyFingerprintAAAAAAAAAAAAAAAAAAAAA"
+	r := newRegistryWith(t, "h1", registry.Entry{
+		Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now(), Fingerprint: wantFP,
+	})
+	writes := []string{"apt update", "systemctl restart nginx"}
+	sign := &batchSign{signed: makeSignedFor(t, writes)}
+	ssh := &batchSSH{}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	if _, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+		Alias: "h1", Commands: writes,
+	}); err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if len(sign.gotCmds) != 2 {
+		t.Fatalf("sign.gotCmds=%d; want 2", len(sign.gotCmds))
+	}
+	for i := range sign.gotCmds {
+		if sign.gotCmds[i].Host != wantFP {
+			t.Errorf("sign.gotCmds[%d].Host=%q; want %q (registry fingerprint, not agent input)", i, sign.gotCmds[i].Host, wantFP)
 		}
 	}
 }

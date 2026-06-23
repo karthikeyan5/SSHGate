@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -368,6 +369,71 @@ func TestHostedServerBackend_ValidatesConfig(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestHostedServerBackend_RejectsReveal(t *testing.T) {
+	t.Parallel()
+	// Fail-CLOSED defence: a reveal must NOT be silently downgraded to an
+	// ordinary approval on the hosted path (the v2 wire structs don't carry
+	// the reveal flag or its reason yet). If ANY command is a reveal, Request
+	// must error WITHOUT touching the server — so no future v2 web UI can
+	// render an un-bannered reveal a human approves unknowingly.
+	// hit is written by the httptest handler goroutine and read by the test
+	// goroutine, so it must be synchronized (atomic) to stay race-free under
+	// `go test -race`. The Request path itself is sequential — only this
+	// test-harness observation flag crosses goroutines.
+	var hit atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit.Store(true)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"request_id":"r","poll_url":"/v1/poll/r"}`))
+	}))
+	defer ts.Close()
+
+	hb := &backend.HostedServerBackend{
+		BaseURL:    ts.URL,
+		APIKey:     "k",
+		ClientID:   "karthi-laptop",
+		HTTPClient: ts.Client(),
+		PollWait:   50 * time.Millisecond,
+		Timeout:    2 * time.Second,
+	}
+
+	// A reveal command (possibly mixed with an ordinary one) must be rejected.
+	ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+		RequestID: "r_reveal",
+		Commands: []backend.CommandReq{
+			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60},
+			{Server: "prod", Cmd: "cat /etc/secret.env", TTLSec: 60, Reveal: true, Reason: "need the DB password"},
+		},
+	})
+	if err == nil {
+		t.Fatal("Request with a reveal command should error; got nil")
+	}
+	if ch != nil {
+		t.Error("Request returned a non-nil channel alongside the reveal error; want nil")
+	}
+	if !strings.Contains(err.Error(), "reveal") {
+		t.Errorf("err = %v; want a mention of reveal", err)
+	}
+	if hit.Load() {
+		t.Error("server was contacted on a reveal request; must fail-closed BEFORE the HTTP call")
+	}
+
+	// Sanity: the SAME backend still works for an ordinary (non-reveal) write.
+	ch2, err := hb.Request(context.Background(), backend.ApprovalRequest{
+		RequestID: "r_plain",
+		Commands:  []backend.CommandReq{{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60}},
+	})
+	if err != nil {
+		t.Fatalf("non-reveal Request should succeed; got %v", err)
+	}
+	if !hit.Load() {
+		t.Error("server was NOT contacted on a non-reveal request; the guard over-rejected")
+	}
+	if ch2 != nil {
+		<-ch2 // drain so the poll goroutine exits cleanly
 	}
 }
 

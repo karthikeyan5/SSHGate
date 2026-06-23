@@ -55,6 +55,41 @@ func TestLoad_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestFingerprint_PersistsThroughSaveLoad pins that an Entry.Fingerprint
+// survives a save (Add) and an independent reload (New). The gate's per-server
+// host-key binding depends on this value being durable: if it were dropped on
+// persist, the MCP would later supply an empty Host and every signed write
+// would fail closed at the gate.
+func TestFingerprint_PersistsThroughSaveLoad(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.json")
+	s, err := registry.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fp = "SHA256:persistedHostKeyFingerprintAAAAAAAAAAAAAAAAA"
+	if err := s.Add("prod", registry.Entry{
+		Host: "10.0.0.1", Port: 22, User: "karthi", AddedAt: time.Now().UTC(), Fingerprint: fp,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Reload through a fresh Servers so we exercise the on-disk JSON, not the
+	// in-memory map.
+	s2, err := registry.New(path)
+	if err != nil {
+		t.Fatalf("reload New: %v", err)
+	}
+	e, ok := s2.Get("prod")
+	if !ok {
+		t.Fatal("missing prod after reload")
+	}
+	if e.Fingerprint != fp {
+		t.Errorf("Fingerprint = %q; want %q (must persist through save/load)", e.Fingerprint, fp)
+	}
+}
+
 func TestAdd_PersistsAtomically(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

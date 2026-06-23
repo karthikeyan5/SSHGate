@@ -42,13 +42,16 @@ func Rules() []redact.Rule {
 		// pem.go accumulator in the writer; this rule exists for the
 		// edge case of a PEM block compressed onto a single line
 		// (unusual but seen in JSON-quoted config dumps).
+		// High-confidence: a `-----BEGIN ...PRIVATE KEY-----...-----END`
+		// span is unmistakable — redact regardless of length so a key
+		// larger than MaxLen still can't leak (MINOR 7).
 		redact.CompileRule(
 			"gitleaks-pem-private-key",
 			"PEM-armoured private key (single-line form)",
 			`(-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]+-----END [A-Z ]*PRIVATE KEY-----)`,
 			[]string{"-----BEGIN", "PRIVATE KEY"},
 			1, 100, 16384,
-		),
+		).WithHighConfidence(),
 
 		// SSH private key — OpenSSH format.
 		redact.CompileRule(
@@ -57,7 +60,7 @@ func Rules() []redact.Rule {
 			`(-----BEGIN OPENSSH PRIVATE KEY-----[A-Za-z0-9+/=\s]+-----END OPENSSH PRIVATE KEY-----)`,
 			[]string{"OPENSSH PRIVATE KEY"},
 			1, 100, 16384,
-		),
+		).WithHighConfidence(),
 
 		// Twilio API key.
 		redact.CompileRule(
@@ -121,6 +124,6 @@ func Rules() []redact.Rule {
 			`(-----BEGIN PRIVATE KEY-----[A-Za-z0-9+/=\s]+-----END PRIVATE KEY-----)`,
 			[]string{"BEGIN PRIVATE KEY"},
 			1, 100, 16384,
-		),
+		).WithHighConfidence(),
 	}
 }

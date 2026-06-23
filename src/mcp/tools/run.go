@@ -22,12 +22,24 @@ import (
 //	  "required":["alias","command"],
 //	  "properties":{
 //	    "alias":{"type":"string"},
-//	    "command":{"type":"string"}
+//	    "command":{"type":"string"},
+//	    "reveal":{"type":"boolean"},
+//	    "reason":{"type":"string"}
 //	  }
 //	}
 type RunInput struct {
 	Alias   string `json:"alias" jsonschema:"registered server alias (run sshgate.list_servers to see options)"`
 	Command string `json:"command" jsonschema:"shell command to run on the remote host"`
+	// Reveal requests a SECRET-REVEAL for THIS single command: its output is
+	// run un-redacted so raw secret values reach you. It always requires a
+	// separate, explicit human approval and forces the signed path even for a
+	// read. It is single-command only (run_batch never reveals) and REQUIRES a
+	// non-empty reason. Use it sparingly — the raw secret then reaches the AI
+	// provider and the approval chat. Default false.
+	Reveal bool `json:"reveal,omitempty" jsonschema:"request SECRET-REVEAL: run this one command's output WITHOUT redaction (raw secrets reach the agent). Requires reason. Single command only. Default false."`
+	// Reason is the mandatory human-readable justification shown in the
+	// reveal approval. Required when reveal is true; ignored otherwise.
+	Reason string `json:"reason,omitempty" jsonschema:"why this secret must be revealed (required when reveal=true; shown to the human approver)"`
 }
 
 // RunOutput is the structured result. The MCP server layer also
@@ -42,6 +54,12 @@ type RunOutput struct {
 	// Approved is true when a sign request was made and approved (i.e.
 	// for writes). Reads are always direct, never solicited approval.
 	Approved bool `json:"approved"`
+	// Revealed is true when this command ran as a SECRET-REVEAL (its output
+	// bypassed the gate's redactor). It is an indicator only — the raw output
+	// already reached the agent — so downstream audit surfaces (the live log)
+	// can record THAT a reveal happened while blanking the raw secret. Never
+	// set on the read or ordinary-write paths.
+	Revealed bool `json:"revealed,omitempty"`
 }
 
 // SignClient is the subset of sign.Client that Runner needs. It
@@ -49,6 +67,13 @@ type RunOutput struct {
 // signer socket.
 type SignClient interface {
 	Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error)
+	// RequestGrant asks the signer to mint a standing grant (one human
+	// approval → auto-sign matching writes for the window). Returns the
+	// grant id + Unix expiry on approval.
+	RequestGrant(ctx context.Context, requestID, alias, scope string, commands []string, durationSec int64) (grantID string, expiryUnix int64, err error)
+	// RevokeGrant drops the standing grant for alias (de-escalation; no
+	// approval needed).
+	RevokeGrant(ctx context.Context, requestID, alias string) error
 }
 
 // SSHRunner is the subset of ssh.Client that Runner needs. It
@@ -93,8 +118,12 @@ type Runner struct {
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —
-// long enough to cover dial+exec, well under sigwire.MaxSigValidity.
-const DefaultWriteTTLSec = 120
+// long enough to cover dial+exec, well under sigwire.MaxSigValidity. Kept
+// tight (60s) to shrink the window in which an approved signature could be
+// replayed between the human's approval and gate execution; the gate still
+// independently caps every window at sigwire.MaxSigValidity. Matches
+// BatchWriteTTLSec so single and bulk writes share the same default window.
+const DefaultWriteTTLSec = 60
 
 // Run resolves the alias from the registry, classifies the command,
 // and dispatches:
@@ -127,6 +156,20 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 		return RunOutput{}, fmt.Errorf("tools: unknown server alias %q (check sshgate.list_servers)", in.Alias)
 	}
 
+	// SECRET-REVEAL is signed-only: a reveal must carry a human approval that
+	// the signer turns into a reveal=true signature, so it ALWAYS routes
+	// through the sign path — even when the command classifies as a read (a
+	// reveal of `cat secret.env` would otherwise run direct/unsigned and the
+	// gate would never honour the flag). The reason is mandatory: reject here,
+	// before any Telegram tap, so the agent always supplies a justification the
+	// human can weigh.
+	if in.Reveal {
+		if strings.TrimSpace(in.Reason) == "" {
+			return RunOutput{}, errors.New("tools: reveal requires a non-empty reason (a SECRET-REVEAL exposes raw secret values to the agent; the human approver needs to know why)")
+		}
+		return r.runWrite(ctx, in.Alias, entry, in.Command, true, in.Reason)
+	}
+
 	kind := classify.Classify(in.Command)
 	switch kind {
 	case classify.KindUnknown:
@@ -136,7 +179,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	case classify.KindRead:
 		return r.runRead(ctx, entry, in.Command)
 	case classify.KindWrite:
-		return r.runWrite(ctx, in.Alias, entry, in.Command)
+		return r.runWrite(ctx, in.Alias, entry, in.Command, false, "")
 	default:
 		return RunOutput{}, fmt.Errorf("tools: unexpected classification %v", kind)
 	}
@@ -174,7 +217,7 @@ func (r *Runner) checkKeyReady() error {
 	return nil
 }
 
-func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string) (RunOutput, error) {
+func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string, reveal bool, reason string) (RunOutput, error) {
 	// Read-only servers have no signer pubkey on the host, so the gate
 	// rejects every write (exit 77). Soliciting an approval first would
 	// waste a real Telegram tap on a guaranteed no-op — short-circuit
@@ -200,7 +243,16 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// the signer audit log), not the underlying hostname. Passing
 	// the alias keeps audit-log archaeology stable across hostname
 	// changes and matches the format the audit-log examples use.
-	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl}})
+	//
+	// Host binds the signature to THIS server's TOFU-pinned host key. It is
+	// read from the trusted registry entry IN CODE — the agent supplies only
+	// (alias, command) and can never influence which host the approval binds
+	// to. The gate self-derives its own host fingerprint and rejects a
+	// signature whose binding names a different server (confused-deputy guard).
+	// Reveal/Reason ride along ONLY on this single-command sign request — a
+	// reveal is single-command by construction (run_batch carries no reveal).
+	// The signer copies Reveal into the SIGNED payload; the gate enforces it.
+	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl, Host: e.Fingerprint, Reveal: reveal, Reason: reason}})
 	if err != nil {
 		// Preserve the sentinel for the MCP layer, but enrich the
 		// message with actionable remediation (permission vs Tier-1 vs
@@ -214,14 +266,14 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 
 	stdout, stderr, exit, err := r.SSH.Run(ctx, e.Host, e.User, e.Port, wireCmd)
 	if err != nil {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true},
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal},
 			fmt.Errorf("ssh exec: %w", err)
 	}
 	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
 	// the well-known gate codes so the model gets remediation rather than
 	// a bare "exit 77/65".
 	if note := gateDenyNote(exit); note != "" {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true},
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal},
 			fmt.Errorf("tools: %s", note)
 	}
 	return RunOutput{
@@ -230,6 +282,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		ExitCode: exit,
 		Kind:     "write",
 		Approved: true,
+		Revealed: reveal,
 	}, nil
 }
 

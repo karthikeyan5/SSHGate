@@ -38,6 +38,25 @@ type Rule struct {
 	Entropy     float64
 	MinLen      int
 	MaxLen      int
+
+	// HighConfidence marks a rule whose structural prefix is so
+	// distinctive (e.g. a JWT's `eyJ.<b64>.<b64>.<b64>`, a PEM
+	// `-----BEGIN`) that a match is a secret regardless of how long it
+	// is. The scanner SKIPS the MaxLen filter for such rules (MINOR 7):
+	// MaxLen exists to trim runaway low-confidence matches, but a
+	// 5000-char JWT is still unmistakably a JWT and must be redacted —
+	// dropping it because it is "too long" leaks a real secret. The
+	// marker is keyed on a truncated prefix of the secret (see
+	// markerKeyInputLimit), not the whole span, so an over-long secret
+	// cannot blow up marker derivation.
+	HighConfidence bool
+}
+
+// WithHighConfidence returns a copy of r marked high-confidence so the
+// scanner exempts it from the MaxLen filter. See Rule.HighConfidence.
+func (r Rule) WithHighConfidence() Rule {
+	r.HighConfidence = true
+	return r
 }
 
 // CompileRule builds a Rule from its plaintext regex source. Used by

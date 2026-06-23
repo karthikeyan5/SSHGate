@@ -34,17 +34,33 @@ func NewMockBackend() *MockBackend {
 // channel that a later Approve/Deny/Timeout call will resolve. Each
 // channel has capacity 1 so the resolver never blocks.
 func (m *MockBackend) Request(_ context.Context, req ApprovalRequest) (<-chan Result, error) {
+	return m.requestByID(req.RequestID), nil
+}
+
+// RequestGrant mirrors Request: it registers (or returns the
+// pre-arranged) pending channel keyed by RequestID, so the same
+// Approve/Deny/Timeout(reqID) calls that drive sign requests also drive
+// grant requests. The grant-specific fields are ignored — tests assert
+// the daemon's grant bookkeeping, not the mock's.
+func (m *MockBackend) RequestGrant(_ context.Context, req GrantApprovalRequest) (<-chan Result, error) {
+	return m.requestByID(req.RequestID), nil
+}
+
+// requestByID returns the pending channel for reqID, returning a
+// pre-arranged outcome if one was registered before the call, else a
+// fresh channel a later Approve/Deny/Timeout will resolve.
+func (m *MockBackend) requestByID(reqID string) <-chan Result {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if ch, ok := m.pending[req.RequestID]; ok {
-		return ch, nil
+	if ch, ok := m.pending[reqID]; ok {
+		return ch
 	}
 	ch := make(chan Result, 1)
 	if m.pending == nil {
 		m.pending = make(map[string]chan Result)
 	}
-	m.pending[req.RequestID] = ch
-	return ch, nil
+	m.pending[reqID] = ch
+	return ch
 }
 
 // Approve resolves reqID with StatusApproved. The optional approvedBy

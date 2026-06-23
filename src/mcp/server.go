@@ -10,6 +10,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/karthikeyan5/sshgate/src/mcp/livelog"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
 )
 
@@ -73,6 +74,16 @@ const ToolNameStatus = "status"
 // Code's surface name is "mcp__sshgate__revoke_server".
 const ToolNameRevokeServer = "revoke_server"
 
+// ToolNameRequestGrant requests a STANDING GRANT on a server: ONE human
+// Telegram approval lets the signer auto-sign matching writes for the
+// window without further taps. Claude Code's surface name is
+// "mcp__sshgate__request_grant".
+const ToolNameRequestGrant = "request_grant"
+
+// ToolNameRevokeGrant drops a server's standing grant (de-escalation; no
+// approval). Claude Code's surface name is "mcp__sshgate__revoke_grant".
+const ToolNameRevokeGrant = "revoke_grant"
+
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
@@ -92,9 +103,15 @@ The gate FAILS CLOSED: a command is treated as a read ONLY when every part of it
 // (the Runner) and is configured by main. Logger is the operator-side
 // log target; it MUST write to stderr (stdout is the JSON-RPC
 // channel).
+//
+// LiveLog is the Tier-6b MCP-side rolling live log (the convenience /
+// `tail -f` view). It is OPTIONAL — a nil LiveLog is a valid no-op (Log
+// does nothing), so tests and a "disabled" config both leave it nil. It
+// is NOT the system of record; that is the gate-side authoritative log.
 type Server struct {
-	Runner *tools.Runner
-	Logger *log.Logger
+	Runner  *tools.Runner
+	Logger  *log.Logger
+	LiveLog *livelog.Log
 }
 
 // Serve runs the MCP server over the provided stdio pipes. It
@@ -151,6 +168,25 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Description: "Revoke a registered server. Signs SSHGATE_REVOKE (one approval), gate strips its authorized_keys line and removes ~/.sshgate-gate/, MCP removes the alias. Backup kept at ~/.ssh/authorized_keys.sshgate-revoke-backup.",
 	}, s.revokeServerHandler)
 
+	// request_grant — REQUESTS a standing grant. It needs a human Telegram
+	// approval of a distinct "STANDING GRANT" message; the agent cannot
+	// self-grant. Once approved, matching writes auto-sign for the window.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name: ToolNameRequestGrant,
+		Description: "Request a STANDING GRANT on a server so matching writes auto-sign for a window (1-24h) without a tap each. " +
+			"This REQUIRES a human to approve a distinct \"STANDING GRANT\" Telegram message — you CANNOT create a grant yourself; you only request one. " +
+			"scope=\"commands\" auto-signs ONLY the exact command strings you list (exact match, no patterns) — prefer this. " +
+			"scope=\"all\" auto-signs EVERY write on the alias — use it ONLY for a throwaway/dedicated target, never a server holding anything that matters. " +
+			"The grant dies on signer restart and can be revoked with revoke_grant. Always show the user the exact scope + commands before requesting.",
+	}, s.requestGrantHandler)
+
+	// revoke_grant — drops a standing grant. Pure de-escalation: it only
+	// shrinks capability, so it needs no approval and is always safe.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameRevokeGrant,
+		Description: "Revoke (drop) a server's standing grant so writes prompt for approval again. De-escalation only — always safe, needs no approval, and is a no-op if no grant exists.",
+	}, s.revokeGrantHandler)
+
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
 		Writer: writerCloser{out},
@@ -177,6 +213,29 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 		return nil, tools.RunOutput{}, err
 	}
 	s.Logger.Printf("run alias=%s kind=%s approved=%v exit=%d", in.Alias, out.Kind, out.Approved, out.ExitCode)
+	// Tier 6b — append the full command + full output to the MCP-side
+	// rolling live log (the convenience surface). nil LiveLog is a no-op.
+	//
+	// EXCEPTION: a SECRET-REVEAL bypasses the gate's redactor, so out.Stdout/
+	// Stderr carry the RAW secret. The live log's job is accountability — to
+	// record THAT a reveal ran (command, classification, exit, revealed:true)
+	// — NOT to be a secret store. So for a revealed command we blank the raw
+	// output here and never persist it. Reveal's accepted exposure is the
+	// agent + transcript + approval chat, not this on-disk log.
+	stdout, stderr := out.Stdout, out.Stderr
+	if out.Revealed {
+		stdout, stderr = "", ""
+	}
+	s.LiveLog.Log(livelog.Entry{
+		Server:         in.Alias,
+		Command:        in.Command,
+		Classification: out.Kind,
+		ExitCode:       out.ExitCode,
+		Approved:       out.Approved,
+		Revealed:       out.Revealed,
+		Stdout:         stdout,
+		Stderr:         stderr,
+	})
 	// Also pack a TextContent block so older MCP clients (without
 	// structured content support) see a human-readable result.
 	return &mcpsdk.CallToolResult{
@@ -191,10 +250,45 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RunBatchInput) (*mcpsdk.CallToolResult, tools.RunBatchOutput, error) {
 	out, err := s.Runner.RunBatch(ctx, in)
 	if err != nil {
+		// NOTE: a batch that hit an SSH TRANSPORT error returns here, BEFORE
+		// the live-log loop below, so its partial results are not live-logged.
+		// This is intentional: the live log is a convenience surface, and the
+		// gate-side Tier-6a log on the host is the authoritative record of
+		// whatever actually executed. We do not restructure to live-log
+		// partials — keeping the error path simple is worth more than the
+		// transient convenience view of an aborted batch.
 		s.Logger.Printf("run_batch alias=%s err=%v", in.Alias, err)
 		return nil, tools.RunBatchOutput{}, err
 	}
 	s.Logger.Printf("run_batch alias=%s n=%d approved=%v denied=%v reason=%s", in.Alias, len(out.Results), out.Approved, out.Denied, out.Reason)
+	// Tier 6b — append one live-log entry per command result (full output).
+	// Skipped commands (stop_on_error) and a wholly-denied batch (empty
+	// Results) simply produce fewer/no entries. nil LiveLog is a no-op.
+	for _, r := range out.Results {
+		if r.Skipped {
+			continue
+		}
+		// run_batch NEVER reveals (bulk reveal is forbidden), so r.Revealed is
+		// always false today; we still honour it so a revealed result would
+		// blank its raw output, mirroring the single-command hook above.
+		stdout, stderr := r.Stdout, r.Stderr
+		if r.Revealed {
+			stdout, stderr = "", ""
+		}
+		s.LiveLog.Log(livelog.Entry{
+			Server:         out.Server,
+			Command:        r.Command,
+			Classification: r.Kind,
+			ExitCode:       r.ExitCode,
+			// A read inside an approved batch is correctly Approved:false — the
+			// single bulk approval only authorised the batch's WRITES; the reads
+			// ran direct and were never part of the human tap.
+			Approved: out.Approved && r.Kind == "write",
+			Revealed: r.Revealed,
+			Stdout:   stdout,
+			Stderr:   stderr,
+		})
+	}
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatRunBatchSummary(out)}},
 	}, out, nil
@@ -299,6 +393,53 @@ func formatRevokeServerSummary(out tools.RevokeServerOutput) string {
 		fmt.Fprintf(&b, "\ngate: %s", out.Message)
 	}
 	return b.String()
+}
+
+// requestGrantHandler is the typed handler for sshgate.request_grant. A
+// denial/timeout from the human (or a validation error) surfaces as an
+// MCP tool error so Claude sees exactly why the grant was not minted; on
+// approval the structured RequestGrantOutput carries the grant id +
+// expiry.
+func (s *Server) requestGrantHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RequestGrantInput) (*mcpsdk.CallToolResult, tools.RequestGrantOutput, error) {
+	out, err := s.Runner.RequestGrant(ctx, in)
+	if err != nil {
+		s.Logger.Printf("request_grant alias=%s scope=%s err=%v", in.Alias, in.Scope, err)
+		return nil, tools.RequestGrantOutput{}, err
+	}
+	s.Logger.Printf("request_grant alias=%s scope=%s grant_id=%s expiry=%d",
+		out.Alias, out.Scope, out.GrantID, out.ExpiryUnix)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatRequestGrantSummary(out)}},
+	}, out, nil
+}
+
+// formatRequestGrantSummary renders a short human summary for the
+// fallback TextContent block.
+func formatRequestGrantSummary(out tools.RequestGrantOutput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "standing grant minted on %s: scope=%s grant_id=%s", out.Alias, out.Scope, out.GrantID)
+	if out.Scope == "commands" {
+		for _, c := range out.Commands {
+			fmt.Fprintf(&b, "\n  - %s", c)
+		}
+	}
+	fmt.Fprintf(&b, "\nexpires_unix=%d (auto-signs matching writes until then; dies on signer restart)", out.ExpiryUnix)
+	return b.String()
+}
+
+// revokeGrantHandler is the typed handler for sshgate.revoke_grant. Only
+// a true infrastructure error (nil dependency, transport failure)
+// surfaces as a Go error; a successful revoke carries Revoked=true.
+func (s *Server) revokeGrantHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RevokeGrantInput) (*mcpsdk.CallToolResult, tools.RevokeGrantOutput, error) {
+	out, err := s.Runner.RevokeGrant(ctx, in)
+	if err != nil {
+		s.Logger.Printf("revoke_grant alias=%s err=%v", in.Alias, err)
+		return nil, tools.RevokeGrantOutput{}, err
+	}
+	s.Logger.Printf("revoke_grant alias=%s revoked=%v", out.Alias, out.Revoked)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: fmt.Sprintf("standing grant on %s revoked (writes will prompt again)", out.Alias)}},
+	}, out, nil
 }
 
 // listServersHandler is the typed handler for sshgate.list_servers.

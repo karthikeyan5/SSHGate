@@ -1,8 +1,6 @@
 package ssh
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,6 +11,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/karthikeyan5/sshgate/src/hostkey"
 )
 
 // ErrHostKeyChanged is returned by a TOFU callback when the host key
@@ -102,9 +102,14 @@ func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
 // Fingerprint returns the SHA256 fingerprint of key in the standard
 // OpenSSH "SHA256:..." form (no padding). Exported because the
 // add_server tool reports it back to the operator after pinning.
+//
+// It delegates to the canonical hostkey.Fingerprint so the MCP-side value
+// (pinned into the registry and supplied in the sign request's Host field)
+// is byte-identical to the gate-side value the gate self-derives and
+// enforces. The parity is locked by a test in this package; do NOT reimplement
+// the hash here.
 func Fingerprint(key ssh.PublicKey) string {
-	sum := sha256.Sum256(key.Marshal())
-	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+	return hostkey.Fingerprint(key)
 }
 
 // fingerprint is kept as a package-local alias to avoid touching the

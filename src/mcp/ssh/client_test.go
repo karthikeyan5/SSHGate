@@ -300,6 +300,49 @@ func TestClient_Run_CtxCancelled(t *testing.T) {
 	}
 }
 
+// TestRun_CommandLongerThanTimeoutCompletes is a regression test
+// pinning the documented behavior of Client.Timeout: it bounds only the
+// dial + SSH handshake, NOT command execution. Client.Run clears the
+// connection deadline immediately after the handshake (see client.go,
+// SetDeadline(time.Time{})), so a command that runs LONGER than Timeout
+// must still complete and return its output. This guards against a
+// future contributor "fixing" the (now-corrected) docstring by making
+// Timeout kill long-running commands.
+func TestRun_CommandLongerThanTimeoutCompletes(t *testing.T) {
+	t.Parallel()
+	keyPath, pub := generateClientKey(t)
+	const sleep = 3 * time.Second
+	srv := newTestServer(t, pub, func(cmd string) ([]byte, []byte, int) {
+		// Simulate a command that runs well past Timeout, e.g.
+		// "sleep 3; echo done".
+		time.Sleep(sleep)
+		return []byte("done\n"), nil, 0
+	})
+	defer srv.stop()
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	// Short Timeout (1s) — far less than the 3s the command runs for.
+	c := &sshpkg.Client{KeyPath: keyPath, KnownHostsPath: khPath, Timeout: 1 * time.Second}
+
+	// No deadline on ctx: command execution is bounded by ctx, not by
+	// Timeout, and we want it to run to completion.
+	start := time.Now()
+	stdout, stderr, exit, err := c.Run(context.Background(), srv.host, "tester", srv.port, "sleep 3; echo done")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Run: %v (stderr=%s) — command longer than Timeout should still succeed", err, stderr)
+	}
+	if elapsed < sleep {
+		t.Errorf("Run returned after %v; expected it to wait the full %v command (Timeout must not bound exec)", elapsed, sleep)
+	}
+	if string(stdout) != "done\n" {
+		t.Errorf("stdout = %q; want %q", stdout, "done\n")
+	}
+	if exit != 0 {
+		t.Errorf("exit = %d; want 0", exit)
+	}
+}
+
 func TestClient_Run_HostKeyMismatch(t *testing.T) {
 	t.Parallel()
 	keyPath, pub := generateClientKey(t)

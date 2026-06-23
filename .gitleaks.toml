@@ -26,6 +26,14 @@ paths = [
 # private key is written to a temp dir, never committed. Allowlist the
 # fixture-key token specifically (NOT the whole package) so a real secret in
 # the rig would still be caught.
+#
+# "AKIA1234567890ABCDEF" is an unmistakably-fake AWS-access-key-SHAPED fixture
+# (sequential 1234567890ABCDEF) used by the gate reveal/audit/redaction tests
+# (src/gate/**/*_test.go) and the redactor tests to verify secrets are
+# redacted / reveal-bypassed / audited. It is a constant, never a real key.
+# Allowlist this exact token (NOT the gate package) so a real AWS key anywhere
+# in the tree is still caught.
 regexes = [
   '''sshgate_ed25519\.pub''',
+  '''AKIA1234567890ABCDEF''',
 ]

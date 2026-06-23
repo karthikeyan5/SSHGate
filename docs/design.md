@@ -198,7 +198,7 @@ reach and **operating** within those machines.
   own reach. It only ever operates within boundaries a human established.
 
 - **Operating is the data plane and is the agent's surface.** The MCP exposes
-  exactly five tools:
+  exactly seven tools:
 
   | Tool | Purpose |
   |---|---|
@@ -207,6 +207,8 @@ reach and **operating** within those machines.
   | `list_servers` | List the registered server aliases. |
   | `status` | Report signer health and per-server reachability. |
   | `revoke_server` | Uninstall the gate from a server (itself an approved action). |
+  | `request_grant` | Request a standing grant so matching writes auto-sign for a window (≤ 24h); the human must approve a distinct "STANDING GRANT" Telegram message — the agent can only request, never self-grant. |
+  | `revoke_grant` | Drop a server's standing grant so writes prompt again. De-escalation only — always safe, needs no approval. |
 
   There is intentionally no provisioning tool here. If asked to add a server, the
   agent directs the human to the CLI steps above.

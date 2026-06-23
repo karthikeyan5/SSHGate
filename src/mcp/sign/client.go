@@ -51,11 +51,23 @@ type Client struct {
 // CmdReq is a single command in a sign request. Server is the alias
 // from the MCP registry (recorded in the audit log); Cmd is the
 // literal shell command; TTLSec is the signature validity window in
-// seconds (bounded by sigwire.MaxSigValidity on the daemon side).
+// seconds (bounded by sigwire.MaxSigValidity on the daemon side); Host
+// is the target's TOFU-pinned SSH host-key fingerprint ("SHA256:..."),
+// sourced by the caller from the trusted registry (never an agent
+// parameter), which the daemon copies into the signed payload's Host
+// field so the gate can enforce the per-server binding.
 type CmdReq struct {
 	Server string
 	Cmd    string
 	TTLSec int64
+	Host   string
+	// Reveal requests a SECRET-REVEAL: the daemon signs reveal=true into the
+	// payload so the gate runs this one command's output WITHOUT the redactor.
+	// Reason is the mandatory human justification shown in the approval UX
+	// (the caller enforces non-empty Reason for reveal=true). Both are zero for
+	// ordinary writes. Reveal is single-command only — there is no batch reveal.
+	Reveal bool
+	Reason string
 }
 
 // Signed is one signed result returned from signer on approval.
@@ -74,6 +86,9 @@ type signRequestCmd struct {
 	Server string `json:"server"`
 	Cmd    string `json:"cmd"`
 	TTLSec int64  `json:"ttl_seconds"`
+	Host   string `json:"host,omitempty"`
+	Reveal bool   `json:"reveal,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type signRequest struct {
@@ -151,7 +166,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 		Commands:  make([]signRequestCmd, len(cmds)),
 	}
 	for i, cmd := range cmds {
-		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec}
+		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host, Reveal: cmd.Reveal, Reason: cmd.Reason}
 	}
 	wire, err := json.Marshal(body)
 	if err != nil {

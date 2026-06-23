@@ -31,6 +31,12 @@ type CommandResult struct {
 	// Skipped is true when stop_on_error=true and a previous command
 	// exited non-zero (so this one never ran).
 	Skipped bool `json:"skipped"`
+	// Revealed mirrors RunOutput.Revealed: true iff this command ran as a
+	// SECRET-REVEAL. run_batch NEVER reveals by design (bulk reveal is
+	// forbidden), so this is always false today — the field exists so the
+	// live-log hook treats batch and single-command results uniformly and
+	// stays correct if a batch reveal path is ever (wrongly) added.
+	Revealed bool `json:"revealed,omitempty"`
 }
 
 // RunBatchOutput is the structured result returned to the MCP client.
@@ -113,10 +119,16 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			// (recorded in the signer audit log), not the
 			// underlying hostname. Passing the alias keeps audit-log
 			// archaeology stable across hostname changes.
+			//
+			// Host binds each signature to this server's TOFU-pinned host
+			// key, read from the trusted registry entry IN CODE (never an
+			// agent parameter), so the gate can enforce the per-server
+			// binding and a bulk approval cannot be replayed on another host.
 			writeCmds = append(writeCmds, signpkg.CmdReq{
 				Server: in.Alias,
 				Cmd:    cmd,
 				TTLSec: BatchWriteTTLSec,
+				Host:   entry.Fingerprint,
 			})
 			writeIdx = append(writeIdx, i)
 		}

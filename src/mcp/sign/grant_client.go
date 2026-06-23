@@ -1,0 +1,205 @@
+package sign
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
+)
+
+// grantRequest is the JSON shape of a request_grant request on the wire.
+// It must mirror signer's grantRequest exactly.
+type grantRequest struct {
+	Kind        string   `json:"kind"`
+	RequestID   string   `json:"request_id"`
+	Alias       string   `json:"alias"`
+	Scope       string   `json:"scope"`
+	Commands    []string `json:"commands,omitempty"`
+	DurationSec int64    `json:"duration_seconds"`
+}
+
+// grantResponse mirrors signer's grantResponse.
+type grantResponse struct {
+	RequestID  string `json:"request_id"`
+	Status     string `json:"status"`
+	GrantID    string `json:"grant_id,omitempty"`
+	ExpiryUnix int64  `json:"expiry_unix,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// revokeGrantRequest is the JSON shape of a revoke_grant request.
+type revokeGrantRequest struct {
+	Kind      string `json:"kind"`
+	RequestID string `json:"request_id"`
+	Alias     string `json:"alias"`
+}
+
+// revokeGrantResponse mirrors signer's revokeGrantResponse.
+type revokeGrantResponse struct {
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+}
+
+// RequestGrant asks the signer to mint a STANDING GRANT for alias: on a
+// single human Telegram approval of a distinct "STANDING GRANT" message,
+// the signer records {alias, scope, commands, expiry} in memory and
+// thereafter auto-signs matching writes WITHOUT further taps until the
+// window elapses. The agent can only REQUEST a grant; only the human
+// approving the scary message creates one.
+//
+// scope is "all" (any command on alias) or "commands" (only the exact
+// strings in commands). durationSec is the requested window; the signer
+// caps it at 24h. On approval RequestGrant returns the grant id and the
+// Unix expiry. On any other outcome it returns one of {ErrDenied,
+// ErrTimeout, ErrUnreachable, ErrSignerPermission, fmt.Errorf("...")}.
+func (c *Client) RequestGrant(ctx context.Context, requestID, alias, scope string, commands []string, durationSec int64) (grantID string, expiryUnix int64, err error) {
+	if c.SocketPath == "" {
+		return "", 0, fmt.Errorf("request_grant: SocketPath is empty")
+	}
+	if requestID == "" {
+		return "", 0, fmt.Errorf("request_grant: requestID is empty")
+	}
+
+	body := grantRequest{
+		Kind:        "request_grant",
+		RequestID:   requestID,
+		Alias:       alias,
+		Scope:       scope,
+		Commands:    commands,
+		DurationSec: durationSec,
+	}
+	line, err := c.roundtrip(ctx, requestID, body, "request_grant")
+	if err != nil {
+		return "", 0, err
+	}
+
+	var resp grantResponse
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return "", 0, fmt.Errorf("request_grant: malformed response: %w", err)
+	}
+	if resp.RequestID != requestID {
+		return "", 0, fmt.Errorf("request_grant: response request_id %q != %q", resp.RequestID, requestID)
+	}
+
+	switch resp.Status {
+	case "approved":
+		if resp.GrantID == "" {
+			return "", 0, fmt.Errorf("request_grant: approved but empty grant_id")
+		}
+		return resp.GrantID, resp.ExpiryUnix, nil
+	case "denied":
+		return "", 0, ErrDenied
+	case "timeout":
+		return "", 0, ErrTimeout
+	case "error":
+		if resp.Error == "" {
+			return "", 0, fmt.Errorf("request_grant: daemon reported error (no detail)")
+		}
+		return "", 0, fmt.Errorf("request_grant: daemon error: %s", resp.Error)
+	default:
+		return "", 0, fmt.Errorf("request_grant: unknown status %q", resp.Status)
+	}
+}
+
+// RevokeGrant drops the standing grant for alias on the signer. Revoke is
+// de-escalation — it only ever shrinks capability — so it needs no human
+// approval and never prompts. Revoking a non-existent grant is a
+// successful no-op. Returns nil on success or one of {ErrUnreachable,
+// ErrSignerPermission, fmt.Errorf("...")} on a transport/daemon error.
+func (c *Client) RevokeGrant(ctx context.Context, requestID, alias string) error {
+	if c.SocketPath == "" {
+		return fmt.Errorf("revoke_grant: SocketPath is empty")
+	}
+	if requestID == "" {
+		return fmt.Errorf("revoke_grant: requestID is empty")
+	}
+
+	body := revokeGrantRequest{
+		Kind:      "revoke_grant",
+		RequestID: requestID,
+		Alias:     alias,
+	}
+	line, err := c.roundtrip(ctx, requestID, body, "revoke_grant")
+	if err != nil {
+		return err
+	}
+
+	var resp revokeGrantResponse
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return fmt.Errorf("revoke_grant: malformed response: %w", err)
+	}
+	if resp.RequestID != requestID {
+		return fmt.Errorf("revoke_grant: response request_id %q != %q", resp.RequestID, requestID)
+	}
+
+	switch resp.Status {
+	case "approved":
+		return nil
+	case "error":
+		if resp.Error == "" {
+			return fmt.Errorf("revoke_grant: daemon reported error (no detail)")
+		}
+		return fmt.Errorf("revoke_grant: daemon error: %s", resp.Error)
+	default:
+		return fmt.Errorf("revoke_grant: unknown status %q", resp.Status)
+	}
+}
+
+// roundtrip performs the dial → deadline → ctx-watcher → write-one-line →
+// read-one-line dance shared by RequestGrant and RevokeGrant. It mirrors
+// Sign's transport scaffold exactly (Sign predates this helper and is
+// left untouched). label prefixes error messages. The returned line is
+// the raw JSON response (newline trimmed by ReadBytes's framing — caller
+// unmarshals).
+func (c *Client) roundtrip(ctx context.Context, requestID string, body any, label string) ([]byte, error) {
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = sigwire.ClientSignTimeout
+	}
+
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, err := dialWithCtx(dialCtx, c.SocketPath)
+	if err != nil {
+		return nil, classifyDialError(err)
+	}
+	defer conn.Close()
+
+	deadline, _ := dialCtx.Deadline()
+	if !deadline.IsZero() {
+		_ = conn.SetDeadline(deadline)
+	}
+
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}()
+
+	wire, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: marshal: %w", label, err)
+	}
+	wire = append(wire, '\n')
+	if _, err := conn.Write(wire); err != nil {
+		return nil, fmt.Errorf("%s: write: %w", label, err)
+	}
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadBytes('\n')
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("%s: %w", label, ctxErr)
+		}
+		return nil, fmt.Errorf("%s: read response: %w", label, err)
+	}
+	return line, nil
+}

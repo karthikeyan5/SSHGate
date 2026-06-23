@@ -12,11 +12,39 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
+
+// MaxGrantDuration is the hard ceiling on a standing grant's lifetime.
+// A request for a longer window is rejected at creation; the signer will
+// never auto-sign past a grant's expiry, and the gate still independently
+// caps every individual signature at sigwire.MaxSigValidity regardless.
+const MaxGrantDuration = 24 * time.Hour
+
+// grant is a standing grant: in-memory signer state recorded after ONE
+// human approval that lets matching (alias, command) sign requests
+// auto-approve WITHOUT prompting during the window. It never appears on
+// the wire and the gate is unaware of it — auto-signed signatures are
+// byte-identical to human-approved ones. Grants are in-memory only, so a
+// signer restart drops every grant.
+//
+//   - scope == "all"      → any command on alias auto-signs.
+//   - scope == "commands" → only an EXACT string in commands auto-signs.
+//
+// Fields are written once at creation (under grantsMu.Lock) and read-only
+// thereafter, so a snapshot copied out under RLock is safe to inspect
+// without further locking.
+type grant struct {
+	id       string
+	alias    string
+	scope    string
+	commands []string
+	expiry   time.Time
+}
 
 // Daemon is the signer core. It owns the Ed25519 private key, the
 // pluggable approval Backend, and the audit log. One Daemon instance
@@ -35,6 +63,17 @@ type Daemon struct {
 	Backend backend.Backend
 	Audit   *AuditLog
 	NowFunc func() time.Time
+
+	// grants is the in-memory standing-grant table, keyed by server
+	// alias (one grant per alias — a new grant for an alias replaces the
+	// old). It is lazily initialised on first create so a Daemon built as
+	// a struct literal (cmd/main, tests) needs no extra wiring. All access
+	// goes through grantsMu: reads (matchGrant) take RLock, create/revoke
+	// take Lock. The table is process-memory only — it is never persisted,
+	// so a signer restart drops every grant (the "stop the signer kills
+	// grants" property).
+	grants   map[string]grant
+	grantsMu sync.RWMutex
 }
 
 // signRequest is the wire-format request sent over the Unix socket.
@@ -45,9 +84,26 @@ type signRequest struct {
 }
 
 type signRequestCmd struct {
-	Server  string `json:"server"`
-	Cmd     string `json:"cmd"`
-	TTLSec  int64  `json:"ttl_seconds"`
+	Server string `json:"server"`
+	Cmd    string `json:"cmd"`
+	TTLSec int64  `json:"ttl_seconds"`
+	// Host is the target server's SSH host-key fingerprint
+	// ("SHA256:..."), supplied by the MCP from its TRUSTED registry (never
+	// an agent parameter). The daemon copies it verbatim into the signed
+	// payload's Host field so the gate can enforce the per-server binding.
+	// omitempty keeps the wire shape unchanged for any legacy caller that
+	// does not send it.
+	Host string `json:"host,omitempty"`
+	// Reveal requests a SECRET-REVEAL: when true, the daemon copies it into
+	// the signed payload's Reveal field so the gate runs the command output
+	// WITHOUT the redactor. Reason is the mandatory human justification (the
+	// MCP enforces non-empty Reason for reveal=true and shows it in the
+	// approval UX). Both omitempty so an ordinary write's wire shape is
+	// unchanged. Reason is NOT signed — it exists only for the human approval
+	// decision and audit; the gate-enforced capability is the signed Reveal
+	// bool.
+	Reveal bool   `json:"reveal,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // signResponse is the wire-format response. Status is one of "approved",
@@ -63,6 +119,54 @@ type signResponse struct {
 type signResponseSig struct {
 	Cmd string `json:"cmd"`
 	Sig string `json:"sig"`
+}
+
+// kindPeek decodes only the "kind" field of a request line, WITHOUT
+// DisallowUnknownFields, so HandleSignRequest can dispatch to the
+// right typed decoder. The per-kind decoder then re-decodes the same
+// line with DisallowUnknownFields, so an unknown field is still
+// rejected for the kind it belongs to.
+type kindPeek struct {
+	Kind string `json:"kind"`
+}
+
+// grantRequest is the wire-format "request_grant" request: a human
+// approval mints a standing grant. Fields disjoint from signRequest, so
+// it has its own struct (and its own DisallowUnknownFields decode).
+type grantRequest struct {
+	Kind        string   `json:"kind"`
+	RequestID   string   `json:"request_id"`
+	Alias       string   `json:"alias"`
+	Scope       string   `json:"scope"`
+	Commands    []string `json:"commands,omitempty"`
+	DurationSec int64    `json:"duration_seconds"`
+}
+
+// grantResponse is the wire-format "request_grant" response. On approval
+// GrantID + ExpiryUnix are set; Error is set only on status "error".
+type grantResponse struct {
+	RequestID  string `json:"request_id"`
+	Status     string `json:"status"`
+	GrantID    string `json:"grant_id,omitempty"`
+	ExpiryUnix int64  `json:"expiry_unix,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// revokeGrantRequest is the wire-format "revoke_grant" request: drop a
+// standing grant for alias. Revoke is de-escalation (it only SHRINKS
+// capability), so it needs no human approval — it never reaches the
+// backend.
+type revokeGrantRequest struct {
+	Kind      string `json:"kind"`
+	RequestID string `json:"request_id"`
+	Alias     string `json:"alias"`
+}
+
+// revokeGrantResponse is the wire-format "revoke_grant" response.
+type revokeGrantResponse struct {
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
 }
 
 // HandleSignRequest implements the one-request-per-connection protocol:
@@ -84,6 +188,28 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		// Read errored before we got any input — there's no request
 		// ID we can pin the error to, so surface to the caller.
 		return fmt.Errorf("read request: %w", err)
+	}
+
+	// Peek the kind so we can dispatch to the right typed decoder. The
+	// peek is lenient (no DisallowUnknownFields); each per-kind decoder
+	// below re-decodes the same line strictly, so an unknown field is
+	// still rejected for the kind it belongs to (e.g. the daemon_reject
+	// "unknown extra json field" case still fails on the sign path).
+	var peek kindPeek
+	if jerr := json.Unmarshal(line, &peek); jerr != nil {
+		// Malformed: respond with "error", audit with "error".
+		return d.respondError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	switch peek.Kind {
+	case "request_grant":
+		return d.handleRequestGrant(ctx, conn, line)
+	case "revoke_grant":
+		return d.handleRevokeGrant(conn, line)
+	case "sign", "":
+		// "" falls through to the sign decoder, which rejects it as an
+		// unsupported kind — preserving the existing error wording.
+	default:
+		return d.respondError(conn, peek.Kind, fmt.Sprintf("unsupported kind %q", peek.Kind))
 	}
 
 	var req signRequest
@@ -124,7 +250,16 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl > int64(sigwire.MaxSigValidity/time.Second) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
-		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl}
+		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason}
+	}
+
+	// Standing-grant auto-approve: if EVERY command matches a live grant
+	// for its alias (and NONE is a reveal — reveals always prompt), skip
+	// the human prompt entirely and synthesise an approval. respond then
+	// signs a NORMAL per-command payload (byte-identical to a
+	// human-approved one), so the gate never learns a grant was involved.
+	if id, ok := d.matchGrant(req.Commands); ok {
+		return d.respond(conn, req, backend.Result{Status: backend.StatusApproved, ApprovedBy: "grant:" + id})
 	}
 
 	resultCh, err := d.Backend.Request(ctx, apReq)
@@ -226,6 +361,291 @@ func (d *Daemon) respondError(conn io.Writer, reqID, reason string) error {
 	return d.audit(signRequest{RequestID: reqID}, "error", "")
 }
 
+// handleRequestGrant processes a "request_grant" request: validate, route
+// the human approval through the backend's DISTINCT grant-approval UX,
+// and on approval store an in-memory standing grant. Every grant request
+// produces exactly one audit row (matching the daemon's "every request is
+// audited" contract).
+func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, line []byte) error {
+	var req grantRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if jerr := dec.Decode(&req); jerr != nil {
+		return d.respondGrantError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if req.RequestID == "" {
+		return d.respondGrantError(conn, "", "missing request_id")
+	}
+	if req.Alias == "" {
+		return d.respondGrantError(conn, req.RequestID, "missing alias")
+	}
+	switch req.Scope {
+	case "all":
+		if len(req.Commands) != 0 {
+			return d.respondGrantError(conn, req.RequestID, "scope \"all\" must not carry a commands list")
+		}
+	case "commands":
+		if len(req.Commands) == 0 {
+			return d.respondGrantError(conn, req.RequestID, "scope \"commands\" requires a non-empty commands list")
+		}
+		for i, c := range req.Commands {
+			if c == "" {
+				return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("commands[%d] is empty", i))
+			}
+		}
+	default:
+		return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("invalid scope %q (must be \"all\" or \"commands\")", req.Scope))
+	}
+	if req.DurationSec <= 0 {
+		return d.respondGrantError(conn, req.RequestID, "duration_seconds must be > 0")
+	}
+	// Compare in int64 SECONDS — never multiply attacker-controlled
+	// seconds into a time.Duration (overflows negative for huge values).
+	if req.DurationSec > int64(MaxGrantDuration/time.Second) {
+		return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("duration_seconds %d exceeds the 24h grant ceiling (%d)", req.DurationSec, int64(MaxGrantDuration/time.Second)))
+	}
+	duration := time.Duration(req.DurationSec) * time.Second
+
+	resultCh, err := d.Backend.RequestGrant(ctx, backend.GrantApprovalRequest{
+		RequestID: req.RequestID,
+		Alias:     req.Alias,
+		Scope:     req.Scope,
+		Commands:  req.Commands,
+		Duration:  duration,
+	})
+	if err != nil {
+		return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
+	}
+
+	var result backend.Result
+	select {
+	case r, ok := <-resultCh:
+		if !ok {
+			result = backend.Result{Status: backend.StatusTimeout}
+		} else {
+			result = r
+		}
+	case <-ctx.Done():
+		result = backend.Result{Status: backend.StatusTimeout}
+	}
+
+	if result.Status != backend.StatusApproved {
+		resp := grantResponse{RequestID: req.RequestID, Status: result.Status.String()}
+		if err := writeJSONLine(conn, resp); err != nil {
+			d.auditGrant(req, result.Status.String(), result.ApprovedBy)
+			return fmt.Errorf("write grant response: %w", err)
+		}
+		d.auditGrant(req, result.Status.String(), result.ApprovedBy)
+		return nil
+	}
+
+	// Approved: mint the standing grant under Lock.
+	gid, err := newGrantID()
+	if err != nil {
+		return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("grant id: %v", err))
+	}
+	expiry := d.now().Add(duration)
+	d.grantsMu.Lock()
+	if d.grants == nil {
+		d.grants = make(map[string]grant)
+	}
+	d.grants[req.Alias] = grant{
+		id:       gid,
+		alias:    req.Alias,
+		scope:    req.Scope,
+		commands: append([]string(nil), req.Commands...),
+		expiry:   expiry,
+	}
+	d.grantsMu.Unlock()
+
+	resp := grantResponse{RequestID: req.RequestID, Status: "approved", GrantID: gid, ExpiryUnix: expiry.Unix()}
+	if err := writeJSONLine(conn, resp); err != nil {
+		// Approved + stored but the response did not reach the MCP.
+		// Record the asymmetry distinctly, mirroring the sign path's
+		// "approved-undelivered".
+		d.auditGrant(req, "approved-undelivered", result.ApprovedBy)
+		return fmt.Errorf("write grant response: %w", err)
+	}
+	d.auditGrant(req, "approved", result.ApprovedBy)
+	return nil
+}
+
+// handleRevokeGrant processes a "revoke_grant" request: drop the standing
+// grant for the alias. Revoke is de-escalation — it only ever shrinks
+// capability — so it needs NO human approval and never touches the
+// backend. Revoking a non-existent grant is a successful no-op.
+func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
+	var req revokeGrantRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if jerr := dec.Decode(&req); jerr != nil {
+		return d.respondRevokeGrantError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if req.RequestID == "" {
+		return d.respondRevokeGrantError(conn, "", "missing request_id")
+	}
+	if req.Alias == "" {
+		return d.respondRevokeGrantError(conn, req.RequestID, "missing alias")
+	}
+
+	d.grantsMu.Lock()
+	if d.grants != nil {
+		delete(d.grants, req.Alias)
+	}
+	d.grantsMu.Unlock()
+
+	resp := revokeGrantResponse{RequestID: req.RequestID, Status: "approved"}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditRevokeGrant(req, "approved")
+		return fmt.Errorf("write revoke-grant response: %w", err)
+	}
+	d.auditRevokeGrant(req, "approved")
+	return nil
+}
+
+// respondGrantError writes a grant "error" response and audits it.
+func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
+	resp := grantResponse{RequestID: reqID, Status: "error", Error: reason}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditGrant(grantRequest{RequestID: reqID}, "error", "")
+		return fmt.Errorf("write grant error response: %w", err)
+	}
+	d.auditGrant(grantRequest{RequestID: reqID}, "error", "")
+	return nil
+}
+
+// respondRevokeGrantError writes a revoke-grant "error" response and audits it.
+func (d *Daemon) respondRevokeGrantError(conn io.Writer, reqID, reason string) error {
+	resp := revokeGrantResponse{RequestID: reqID, Status: "error", Error: reason}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditRevokeGrant(revokeGrantRequest{RequestID: reqID}, "error")
+		return fmt.Errorf("write revoke-grant error response: %w", err)
+	}
+	d.auditRevokeGrant(revokeGrantRequest{RequestID: reqID}, "error")
+	return nil
+}
+
+// auditGrant writes one audit row for a grant request. The "command"
+// slot carries a synthetic descriptor so a grep over the audit log
+// surfaces grant issuance alongside per-command signing.
+func (d *Daemon) auditGrant(req grantRequest, status, approvedBy string) {
+	desc := fmt.Sprintf("request_grant alias=%s scope=%s", req.Alias, req.Scope)
+	ev := AuditEvent{
+		TS:         d.now().UTC(),
+		RequestID:  req.RequestID,
+		Status:     status,
+		Commands:   []string{desc},
+		Servers:    []string{req.Alias},
+		ApprovedBy: approvedBy,
+	}
+	if err := d.Audit.Write(ev); err != nil {
+		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	}
+}
+
+// auditRevokeGrant writes one audit row for a revoke-grant request.
+func (d *Daemon) auditRevokeGrant(req revokeGrantRequest, status string) {
+	desc := fmt.Sprintf("revoke_grant alias=%s", req.Alias)
+	ev := AuditEvent{
+		TS:        d.now().UTC(),
+		RequestID: req.RequestID,
+		Status:    status,
+		Commands:  []string{desc},
+		Servers:   []string{req.Alias},
+	}
+	if err := d.Audit.Write(ev); err != nil {
+		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	}
+}
+
+// matchGrant reports whether EVERY command in cmds is covered by a live
+// standing grant for its alias, returning the matched grant id for the
+// audit trail. It is the auto-approve gate: when ok is true the daemon
+// signs without prompting.
+//
+// Security-critical guards, in order:
+//
+//   - REVEAL ALWAYS PROMPTS. If ANY command is a SECRET-REVEAL, the whole
+//     request falls through to the human prompt — a grant NEVER
+//     auto-signs a reveal. This is checked first/outermost so no later
+//     logic can accidentally auto-approve a reveal.
+//   - NO PARTIAL AUTO-APPROVE. A single command that does not match a
+//     live grant fails the whole request (returns ok=false), so the
+//     human prompt covers the full set rather than a subset.
+//   - EXACT-STRING SCOPE. For scope=="commands", c.Cmd must equal a
+//     stored command string exactly — no prefix/substring/argument
+//     tolerance. scope=="all" matches any command on that alias.
+//   - EXPIRY. A grant whose expiry is at-or-before now() is dead and
+//     matches nothing (the signer never auto-signs past a grant window).
+//   - PER-ALIAS. Each command is checked against the grant for ITS OWN
+//     alias (c.Server), so a grant for alias X can never auto-sign a
+//     command aimed at alias Y.
+//
+// The returned id is the grant matched by the FIRST command. run /
+// run_batch always target a single alias, so all commands share one
+// grant and the first id is the right audit anchor; if a future
+// multi-alias request had every command covered by its own alias's
+// grant, recording the first is still an accurate "auto-approved under a
+// grant" marker.
+func (d *Daemon) matchGrant(cmds []signRequestCmd) (id string, ok bool) {
+	// Reveal short-circuit FIRST: a reveal anywhere forces a prompt.
+	for _, c := range cmds {
+		if c.Reveal {
+			return "", false
+		}
+	}
+	if len(cmds) == 0 {
+		return "", false
+	}
+
+	d.grantsMu.RLock()
+	defer d.grantsMu.RUnlock()
+	if d.grants == nil {
+		return "", false
+	}
+
+	now := d.now()
+	var firstID string
+	for i, c := range cmds {
+		g, exists := d.grants[c.Server]
+		if !exists {
+			return "", false
+		}
+		if !g.expiry.After(now) {
+			// Expired (or exactly at expiry): dead grant, prompt.
+			return "", false
+		}
+		if !grantCovers(g, c.Cmd) {
+			return "", false
+		}
+		if i == 0 {
+			firstID = g.id
+		}
+	}
+	return firstID, true
+}
+
+// grantCovers reports whether grant g authorises command cmd. scope=="all"
+// covers everything on the alias; scope=="commands" covers ONLY an exact
+// string match (no patterns, no argument tolerance).
+func grantCovers(g grant, cmd string) bool {
+	switch g.scope {
+	case "all":
+		return true
+	case "commands":
+		for _, allowed := range g.commands {
+			if allowed == cmd {
+				return true
+			}
+		}
+		return false
+	default:
+		// Unknown scope never auto-approves (defensive; create-time
+		// validation already rejects anything but all/commands).
+		return false
+	}
+}
+
 // signAll signs each command in cmds with d.Key and returns the wire-
 // encoded signed strings. Each signature uses an independent random
 // nonce.
@@ -242,6 +662,15 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 			TS:    now,
 			Exp:   now + c.TTLSec,
 			Nonce: nonce,
+			// Bind the signature to the target's pinned host key. The MCP
+			// sourced this from its trusted registry; the gate enforces it.
+			Host: c.Host,
+			// Carry the SECRET-REVEAL capability INTO the signed bytes. Only a
+			// human-approved request reaches here, so signing reveal=true means
+			// the gate will run that one command's output un-redacted. The
+			// agent never sets this — it is authorised by the approval the
+			// signer is responding to.
+			Reveal: c.Reveal,
 		}
 		// Sign the exact bytes that DecodeSigned will reconstruct on
 		// the verifier side; sigwire.EncodeSigned + verify.go both go
@@ -310,6 +739,18 @@ func newNonce() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
+}
+
+// newGrantID returns a short random grant identifier prefixed "g_". It
+// is used purely as an audit anchor (ApprovedBy = "grant:<id>") — it is
+// never security-bearing, so 96 bits of entropy is ample. Uses the same
+// randRead seam as newNonce so a broken RNG surfaces as an error.
+func newGrantID() (string, error) {
+	var buf [12]byte
+	if _, err := randRead(buf[:]); err != nil {
+		return "", err
+	}
+	return "g_" + base64.RawURLEncoding.EncodeToString(buf[:]), nil
 }
 
 // writeJSONLine marshals v and writes it followed by a newline.

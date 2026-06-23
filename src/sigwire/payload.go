@@ -27,6 +27,32 @@ type SigPayload struct {
 	TS    int64  `json:"ts"`
 	Exp   int64  `json:"exp"`
 	Nonce string `json:"nonce"`
+	// Host binds this signed payload to ONE target server's SSH host-key
+	// fingerprint (OpenSSH "SHA256:..." form). The signer copies it in from
+	// the MCP's sign request — which reads it from the TRUSTED registry, not
+	// from any agent parameter — so an "approve on server X" signature is
+	// cryptographically un-replayable on server Y: the gate self-derives its
+	// own host-key fingerprints and rejects any signed write whose Host does
+	// not match one of them (ErrHostMismatch).
+	//
+	// omitempty keeps a Host-less payload byte-identical to the pre-binding
+	// wire format (so the golden test holds and an older verifier still
+	// accepts legacy reads). On the SIGNED-WRITE path, however, an empty Host
+	// is rejected fail-closed by the gate — binding is mandatory there.
+	Host string `json:"host,omitempty"`
+	// Reveal, when true, marks this signed command as a SECRET-REVEAL: the
+	// gate runs its output WITHOUT the redactor, so raw secret values flow to
+	// the agent. It is a capability encoded in the SIGNED payload precisely so
+	// the (untrusted) agent cannot self-elevate — only a human approval that
+	// the signer turns into a signature can set it, and the gate enforces it.
+	//
+	// omitempty keeps a reveal=false payload (the common case) byte-identical
+	// to the pre-reveal wire format, so the golden test holds and the
+	// canonical form never drifts. With DisallowUnknownFields a reveal-bearing
+	// payload still decodes (the field is known); the security property is that
+	// the bool is part of the signed bytes, so it cannot be flipped on the
+	// wire without invalidating the signature.
+	Reveal bool `json:"reveal,omitempty"`
 }
 
 // sigEncoding is the base64 alphabet used for both halves of the wire

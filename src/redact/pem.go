@@ -132,3 +132,33 @@ func findPEMEnd(buf []byte) int {
 func findPEMBegin(buf []byte) int {
 	return bytes.Index(buf, []byte(pemBegin))
 }
+
+// isPrivateKeyBegin reports whether buf opens with a high-confidence
+// private-key BEGIN line — i.e. a `-----BEGIN ...PRIVATE KEY-----`
+// header. It is used at the abort / EOF boundaries to decide whether an
+// unterminated `BEGIN` span is a real (leaking) private key that must
+// be redacted wholesale, versus a benign false-BEGIN that should be
+// re-scanned byte-by-byte through Layer 1.
+//
+// The check is anchored to the first line of buf so a `-----BEGIN `
+// that begins the accumulator span (which is how the writer seeds it)
+// is classified by its own header, not by some later line.
+func isPrivateKeyBegin(buf []byte) bool {
+	idx := bytes.Index(buf, []byte(pemBegin))
+	if idx < 0 {
+		return false
+	}
+	lineEnd := idx
+	for lineEnd < len(buf) && buf[lineEnd] != '\n' {
+		lineEnd++
+	}
+	line := buf[idx:lineEnd]
+	// Require the closing `-----` so a log line that merely contains the
+	// literal `-----BEGIN PRIVATE KEY` substring without proper armour
+	// does not get force-redacted at EOF.
+	trimmed := bytes.TrimRight(line, " \t\r")
+	if !bytes.HasSuffix(trimmed, []byte(pemEndSuffix)) {
+		return false
+	}
+	return bytes.Contains(line, []byte("PRIVATE KEY"))
+}

@@ -13,9 +13,10 @@ For the security model these items extend, see [design.md](design.md) and
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
   done with the `sshgate` CLI (`pubkey` → paste → `add [--read-only]`), not an
-  agent tool. The agent surface is exactly five tools (`run`, `run_batch`,
-  `list_servers`, `status`, `revoke_server`); there is deliberately no
-  `add_server` tool, so the agent can never expand its own reach.
+  agent tool. The agent surface is exactly seven tools (`run`, `run_batch`,
+  `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`);
+  there is deliberately no `add_server` tool, so the agent can never expand its
+  own reach.
 - **Read-only (Tier-1) and signed-write (Tier-2) provisioning**, selectable at
   `sshgate add` time.
 - **Inline secret redaction on the read path** in the gate.
@@ -27,6 +28,18 @@ For the security model these items extend, see [design.md](design.md) and
 ## Next
 
 These are the highest-priority forward items.
+
+- **Standing grants, secret-reveal, per-server binding, audit trail (in progress).**
+  A bundle that all touches the signed payload, so it ships as one wire change:
+  signer-issued **standing grants** (scope `all` or an exact command-set, ≤24h,
+  server-bound, revocable) for unattended write windows; an approved
+  **secret-reveal** that bypasses output redaction for a single signed command;
+  **per-server identity** binding each signature to the target's SSH host-key
+  fingerprint (closes cross-server replay); a **two-tier audit trail** — a
+  gate-side, separate-user, append-only authoritative log plus an MCP-side
+  rolling full-output live view; plus a tighter 60s default signature window and
+  `servers.json` 0600. Design at
+  [docs/proposed/feature3-grants-reveal-audit-binding.md](proposed/feature3-grants-reveal-audit-binding.md).
 
 - **Argv-exec structural classifier fix (#22).** Replace the fail-closed shell
   heuristic on the read path with direct execution from a parsed `argv`
@@ -81,6 +94,37 @@ These are the highest-priority forward items.
   (`vim`, `mysql`, …) are handled by the per-service adapters (Feature 2) or
   blocked. **Depends on the #22 argv-exec foundation; build after it.**
 
+- **Background-job verb (launch / poll / kill).** A first-class long-job
+  capability so the agent can start a long command detached and poll it, instead
+  of hand-rolling `nohup … & echo $!` (which trips the write classifier on the
+  redirect/`&`). The gate owns the `nohup`/logfile/PID-dir plumbing (trusted)
+  and classifies/approves **only the inner command**; `status`/`output` are
+  reads, `kill` of an own-job is a low-risk control op. State lives in OS
+  processes + a job dir on the target, so the gate stays stateless. Proposed
+  agent tools: `job_run` (→ job handle + PID), `job_status` (→ running/exited +
+  exit code + log tail), `job_kill` — with matching gate verbs `SSHGATE_JOB_RUN`
+  / `SSHGATE_JOB_STATUS` / `SSHGATE_JOB_KILL` (the `SSHGATE_` prefix keeps them
+  from colliding with a real command on the gate's command parse; the MCP tools
+  are already namespaced under the `sshgate` server, so they stay unprefixed and
+  consistent with `run`/`status`/`revoke_server`). **Recommended right after the
+  grants/reveal/audit set, but NOT blocking the migration:** with a standing
+  grant on the target box the manual `nohup` launch already auto-signs, so this
+  is a UX upgrade rather than a prerequisite.
+  - *Context (settles three related questions):* multi-**connection**
+    concurrency already works natively — sshd forks a separate gate process per
+    connection and the gate is stateless per-connection, so multiple
+    users/sessions are handled independently (cap = sshd `MaxStartups`/
+    `MaxSessions`); there is no multiplexer to build. The only "a single agent
+    shouldn't block on a long job" gap is closed by this async job handle, not by
+    SSH multiplexing (the agent's turn is single-threaded). Live-output streaming
+    to a **human** (progress bars, %) needs the tier-6b *streaming* enhancement
+    — teeing the gate's already-redacted output to the live log as it arrives
+    (the basic rolling log only captures each command's final output *after* it
+    completes, so it is NOT a live intra-command view on its own); then
+    `tail -f` shows real-time progress; full interactive Ctrl-C / PTY / "normal SSH terminal" is the
+    gated interactive session (#25) — this job verb is the non-interactive
+    fire-and-poll complement to it, not a duplicate.
+
 - **Friendlier gate responses (#26).** When the gate denies a write (or any
   command needing a signature), return a clear, structured, agent-friendly
   message stating *what* is needed and *how* to get it ("this is a write — it
@@ -89,6 +133,13 @@ These are the highest-priority forward items.
   this is the handshake that tells the agent to go get approval and resubmit.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
+
+- **Gate auto-update (`SSHGATE_UPDATE`).** A signed control verb to update the
+  gate binary in place (a stub handler already exists in the gate). Deferred
+  until its security is designed separately: an update path is a code-execution
+  path, so it must be at least as strict as the signing model — signed,
+  versioned, fail-closed, and audited. Until then, a changed gate is redeployed
+  via the `sshgate` CLI (revoke + re-add).
 
 - **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
   posture and merge the deferred redactor work.

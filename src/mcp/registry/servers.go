@@ -27,6 +27,14 @@ type Entry struct {
 	// it (/sshgate:revoke) and re-provisions with `sshgate add` (no
 	// --read-only); a smoother in-place upgrade is a flagged follow-up.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// Fingerprint is the target's TOFU-pinned SSH host-key fingerprint
+	// (OpenSSH "SHA256:..." form), recorded by provisioning. The MCP supplies
+	// it — from HERE, the trusted registry, never an agent parameter — in the
+	// sign request so the signed payload binds to this exact host; the gate
+	// self-derives its own host fingerprint and rejects a signature whose
+	// binding names a different server. omitempty so a registry written before
+	// this field existed still round-trips.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // Servers is the alias → Entry map backed by the file at Path. All

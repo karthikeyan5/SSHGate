@@ -15,13 +15,13 @@ import (
 )
 
 // connectAllTools mirrors Server.Serve's agent-facing tool registration
-// (the five tools the agent can call) over the SDK's in-memory
+// (the seven tools the agent can call) over the SDK's in-memory
 // transport. The existing connectInProcess helper wires only
-// run/run_batch; this one closes the gap so list_servers, status, and
-// revoke_server are also exercised at the SDK boundary (request →
-// handler → structured result). add_server is intentionally absent: it
-// is no longer an MCP tool — provisioning is the human-only `sshgate`
-// CLI.
+// run/run_batch; this one closes the gap so list_servers, status,
+// revoke_server, request_grant, and revoke_grant are also exercised at
+// the SDK boundary (request → handler → structured result). add_server is
+// intentionally absent: it is no longer an MCP tool — provisioning is the
+// human-only `sshgate` CLI.
 //
 // Handlers here are thin shims that call the same Runner methods the
 // production handlers in server.go call — no production behavior is
@@ -66,6 +66,26 @@ func connectAllTools(t *testing.T, server *mcp.Server) (*mcpsdk.ClientSession, f
 		out, err := server.Runner.RevokeServer(ctx, in)
 		if err != nil {
 			return nil, tools.RevokeServerOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameRequestGrant,
+		Description: "Request a standing grant.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RequestGrantInput) (*mcpsdk.CallToolResult, tools.RequestGrantOutput, error) {
+		out, err := server.Runner.RequestGrant(ctx, in)
+		if err != nil {
+			return nil, tools.RequestGrantOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNameRevokeGrant,
+		Description: "Revoke a standing grant.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.RevokeGrantInput) (*mcpsdk.CallToolResult, tools.RevokeGrantOutput, error) {
+		out, err := server.Runner.RevokeGrant(ctx, in)
+		if err != nil {
+			return nil, tools.RevokeGrantOutput{}, err
 		}
 		return nil, out, nil
 	})
@@ -186,5 +206,79 @@ func TestServer_RevokeServer_SDKBoundaryUnknownAlias(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Error("IsError = false; want true for unknown alias revoke")
+	}
+}
+
+func TestServer_RequestGrant_SDKBoundary(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "throwaway", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{
+		Servers: r,
+		Sign:    &fakeSign{grantID: "g_sdk", grantExpiryUnix: 1700000000},
+		SSH:     &fakeSSH{},
+	}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameRequestGrant,
+		Arguments: map[string]any{"alias": "throwaway", "scope": "all", "duration_hours": 8},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError=true: %+v", res.Content)
+	}
+	var out tools.RequestGrantOutput
+	decodeStructured(t, res, &out)
+	if out.GrantID != "g_sdk" || out.ExpiryUnix != 1700000000 {
+		t.Errorf("out = %+v; want grant_id g_sdk expiry 1700000000", out)
+	}
+}
+
+func TestServer_RequestGrant_SDKBoundaryBadDuration(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameRequestGrant,
+		Arguments: map[string]any{"alias": "h1", "scope": "all", "duration_hours": 99},
+	})
+	if err != nil {
+		t.Fatalf("CallTool returned protocol err: %v", err)
+	}
+	if !res.IsError {
+		t.Error("IsError = false; want true for out-of-range duration")
+	}
+}
+
+func TestServer_RevokeGrant_SDKBoundary(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "prod", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{}}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNameRevokeGrant,
+		Arguments: map[string]any{"alias": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError=true: %+v", res.Content)
+	}
+	var out tools.RevokeGrantOutput
+	decodeStructured(t, res, &out)
+	if !out.Revoked {
+		t.Error("Revoked = false; want true")
 	}
 }

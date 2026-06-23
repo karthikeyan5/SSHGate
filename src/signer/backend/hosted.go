@@ -118,6 +118,24 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 		return nil, err
 	}
 
+	// Fail-CLOSED on secret-reveal. The v2 wire structs (signRequestCmdV2
+	// here, signRequestCmd on the server) carry only server/cmd/ttl_seconds —
+	// they do NOT carry the reveal flag or its mandatory reason. If we let a
+	// reveal request through, the server would sign it as an ordinary
+	// (reveal=false) approval and a future v2 web UI could render it as a
+	// plain write — no scary banner, no reason shown — which a human could
+	// approve unknowingly. That is fail-SAFE only by accident today (the gate
+	// redactor still strips the output). We make it fail-CLOSED instead:
+	// reject reveal here, BEFORE any HTTP call, so no future v2 build can
+	// silently ship an un-bannered reveal. The hosted path may enable reveal
+	// only once the wire structs + web UI carry the reason and the scary
+	// approval banner end-to-end (that is the v2 feature work, out of scope).
+	for _, c := range req.Commands {
+		if c.Reveal {
+			return nil, errors.New("hosted: secret-reveal is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
+		}
+	}
+
 	pollWait := h.PollWait
 	if pollWait == 0 {
 		pollWait = 30 * time.Second
@@ -311,6 +329,18 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 			return
 		}
 	}
+}
+
+// RequestGrant fails CLOSED on the hosted (Tier-3) backend. The v2 wire
+// protocol + web UI do not yet carry the distinct "STANDING GRANT" banner
+// (alias + scope + duration + the "auto-signs WITHOUT further taps"
+// warning), so a grant routed here could be rendered as an ordinary
+// approval and minted unknowingly. We reject it BEFORE any HTTP call —
+// exactly like reveal (see Request) — so no future v2 build silently
+// ships an un-bannered grant. Re-enable only once the hosted approval UI
+// carries the grant semantics end-to-end (out of scope here).
+func (h *HostedServerBackend) RequestGrant(_ context.Context, _ GrantApprovalRequest) (<-chan Result, error) {
+	return nil, errors.New("hosted: standing grants are not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
 }
 
 // validate returns the first config error, if any.

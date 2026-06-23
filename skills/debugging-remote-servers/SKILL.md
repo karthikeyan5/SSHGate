@@ -6,9 +6,11 @@ description: This skill should be used when the user asks to debug, diagnose, or
 # Debugging remote servers with SSHGate
 
 SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly five tools — `sshgate.run`, `sshgate.run_batch`,
-`sshgate.list_servers`, `sshgate.status`, and `sshgate.revoke_server` — and
-debugging mostly uses the first three. Read commands run instantly. Write
+tool surface is exactly seven tools — `sshgate.run`, `sshgate.run_batch`,
+`sshgate.list_servers`, `sshgate.status`, `sshgate.revoke_server`,
+`sshgate.request_grant`, and `sshgate.revoke_grant` — and debugging mostly
+uses the first three (the grant pair is for unattended write windows; see
+**Standing grants** below). Read commands run instantly. Write
 commands need the user to tap a Telegram approval button on their phone.
 Optimise for: fast diagnosis, one approval per fix, no surprises.
 
@@ -50,6 +52,30 @@ probably away from the laptop; each prompt is a small interruption.
 Read commands cost nothing. Run as many as you need to understand
 the situation.
 
+## Standing grants — a tap-free write window
+
+When you expect **many writes** on one server over a stretch where the
+user can't tap each (an overnight maintenance run, a migration, a long
+unattended build), ask for a **standing grant** instead of N approvals:
+
+- **`sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)`**
+  *requests* a grant — it does **not** create one. The user must approve a
+  distinct "STANDING GRANT" Telegram message (alias + scope + duration). You
+  can never self-grant. Once approved, matching writes **auto-sign for the
+  window with no further tap**.
+- **`scope`:** prefer `commands` — only the exact command strings you list
+  (exact match, no patterns) auto-sign; everything else still prompts. Use
+  `scope=all` (every write auto-signs) **only** for a throwaway/dedicated
+  target, never a live box that holds anything that matters.
+- **Bounds:** `duration_hours` ≤ 24h, and the grant lives **in-memory in the
+  signer** — it dies on signer restart. **Reveal never auto-signs** — a
+  secret-read always prompts even under a grant.
+- **`sshgate.revoke_grant(alias)`** drops the grant early. Pure
+  de-escalation: always safe, no approval, no-op if none exists. Drop a grant
+  as soon as the window's work is done.
+
+Always show the user the exact scope + command set before requesting.
+
 ## Diagnostics — the free part
 
 For "what's wrong with X" questions, lead with these:
@@ -89,6 +115,33 @@ sequence if any step fails). Surface the per-step output verbatim
 when it comes back. After a successful batch, run one more diagnostic
 read (`systemctl status nginx`, `nginx -t`, whatever proves the fix)
 to confirm.
+
+## Long-running tasks — launch detached, then poll (don't block)
+
+For anything that runs more than ~a minute (DB dumps/restores, `rsync`,
+backups, builds, package installs), do **not** call a blocking
+`sshgate.run` and wait. A synchronous `run` holds your whole turn for the
+duration **and** dies if the SSH pipe drops (the remote job gets SIGHUP and
+is killed). Instead launch it **detached** and poll:
+
+1. **Launch** (one write — the redirect/`&` make it a write; under a standing
+   grant on that server it auto-approves with no tap):
+   `sshgate.run <alias> "nohup <cmd> >~/job.log 2>&1 & echo $!"` → returns the
+   **PID** immediately. For an exit code, launch as
+   `nohup sh -c '<cmd>; echo done:$? >~/job.done' &`.
+2. **Poll with reads** (free, no tap): `sshgate.run <alias> "tail -n 40 ~/job.log"`,
+   `sshgate.run <alias> "ps -p <pid> -o pid=,stat=,etime="`, or
+   `sshgate.run <alias> "cat ~/job.done"` for completion.
+3. **Cancel** (your "Ctrl-C"): `sshgate.run <alias> "kill <pid>"` (a write).
+
+The detached job **survives a dropped pipe**; a synchronous long `run` does
+not. State lives in the OS + the logfile on the target, so nothing is lost if
+your session is interrupted — reconnect and `tail` the log.
+
+> A first-class `job_run` / `job_status` / `job_kill` tool family (gate verbs
+> `SSHGATE_JOB_RUN` / `SSHGATE_JOB_STATUS` / `SSHGATE_JOB_KILL`) is planned —
+> see the roadmap. When it ships, prefer it over hand-rolled `nohup`; until
+> then, use the `nohup` + poll pattern above.
 
 ## Read-only (Tier-1) servers — writes refused before any tap
 

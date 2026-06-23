@@ -80,10 +80,16 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 	}
 	// Spec defines CmdReq.Server as the registered alias (recorded
 	// in the signer audit log), not the underlying hostname.
+	//
+	// SSHGATE_REVOKE is a SIGNED admin command, so the gate enforces the
+	// per-server host-key binding on it too — bind it to this server's
+	// registry fingerprint (read in code, never from the agent) or the gate
+	// rejects the revoke with ErrHostMismatch.
 	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{
 		Server: in.Alias,
 		Cmd:    "SSHGATE_REVOKE",
 		TTLSec: RevokeTTLSec,
+		Host:   entry.Fingerprint,
 	}})
 	if err != nil {
 		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: sign revoke: %w", err)

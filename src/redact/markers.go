@@ -5,7 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 )
+
+// regexpQuoteMarkerPrefix returns a regex source that matches the
+// literal MarkerPrefix bytes (the `[` is escaped). Used by the
+// marker-forgery guard rule.
+func regexpQuoteMarkerPrefix() string {
+	return regexp.QuoteMeta(MarkerPrefix)
+}
 
 // MarkerPrefix and MarkerSuffix bracket every inline redaction marker.
 // The fixed prefix lets a downstream consumer find marker boundaries
@@ -14,6 +22,21 @@ const (
 	MarkerPrefix = "[SSHGATE_REDACTED key="
 	MarkerSuffix = "]"
 )
+
+// NeutralizedMarkerPrefix is what a literal MarkerPrefix appearing in
+// CHILD output is rewritten to (MAJOR 6: marker forgery). The leading
+// bracket is swapped for a paren and a `~` is inserted so the result no
+// longer contains the verbatim MarkerPrefix substring — a downstream
+// reader scanning for MarkerPrefix can therefore trust that any
+// surviving MarkerPrefix was emitted by the gate, not forged by the
+// child. The replacement is intentionally human-legible so an operator
+// reading the stream can see that the child tried to print a marker.
+const NeutralizedMarkerPrefix = "(SSHGATE_REDACTED~key="
+
+// markerForgeryRuleID is the sentinel rule ID the scanner recognises to
+// rewrite a child-printed literal MarkerPrefix into
+// NeutralizedMarkerPrefix instead of replacing it with a fresh marker.
+const markerForgeryRuleID = "sshgate-marker-forgery"
 
 // MarkerKey returns the 8-hex-character key for secret under
 // sessionSalt. It is the first 4 bytes of HMAC-SHA256(salt, secret)
@@ -34,9 +57,23 @@ const (
 // recognise-same-secret use case. It is NOT a cryptographic identifier;
 // `redact.why <key>` (R5) is the only sanctioned way to resolve a
 // key back to its source rule.
+// markerKeyInputLimit caps how many bytes of the secret feed the HMAC
+// that derives a marker key. A high-confidence over-long secret (e.g. a
+// multi-kilobyte JWT exempted from MaxLen — MINOR 7) is redacted in
+// full, but only its first markerKeyInputLimit bytes key the marker, so
+// marker derivation stays O(limit) regardless of secret size. The
+// recognise-same-secret property holds for any two secrets that differ
+// within the first limit bytes (the overwhelming common case); the
+// trade is bounded and deliberate.
+const markerKeyInputLimit = 8 * 1024
+
 func MarkerKey(sessionSalt [32]byte, secret []byte) string {
 	mac := hmac.New(sha256.New, sessionSalt[:])
-	mac.Write(secret)
+	if len(secret) > markerKeyInputLimit {
+		mac.Write(secret[:markerKeyInputLimit])
+	} else {
+		mac.Write(secret)
+	}
 	sum := mac.Sum(nil)
 	return hex.EncodeToString(sum[:4])
 }

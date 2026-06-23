@@ -47,16 +47,16 @@ func captureStdout(t *testing.T, fn func()) string {
 // large-output streaming, and empty-command rejection.
 func TestExec(t *testing.T) {
 	t.Run("echo returns 0 and writes to stdout", func(t *testing.T) {
-		var exit int
+		var res gate.ExecResult
 		var err error
 		out := captureStdout(t, func() {
-			exit, err = gate.ExecWithRedaction(context.Background(), "echo hello", gate.ExecOpts{})
+			res, err = gate.ExecWithRedaction(context.Background(), "echo hello", gate.ExecOpts{})
 		})
 		if err != nil {
 			t.Fatalf("err = %v, want nil", err)
 		}
-		if exit != 0 {
-			t.Errorf("exit = %d, want 0", exit)
+		if res.ExitCode != 0 {
+			t.Errorf("exit = %d, want 0", res.ExitCode)
 		}
 		if out != "hello\n" {
 			t.Errorf("stdout = %q, want %q", out, "hello\n")
@@ -64,31 +64,31 @@ func TestExec(t *testing.T) {
 	})
 
 	t.Run("false returns exit 1", func(t *testing.T) {
-		exit, err := gate.ExecWithRedaction(context.Background(), "false", gate.ExecOpts{})
+		res, err := gate.ExecWithRedaction(context.Background(), "false", gate.ExecOpts{})
 		if err != nil {
 			t.Fatalf("err = %v, want nil (false's nonzero exit is not a start error)", err)
 		}
-		if exit != 1 {
-			t.Errorf("exit = %d, want 1", exit)
+		if res.ExitCode != 1 {
+			t.Errorf("exit = %d, want 1", res.ExitCode)
 		}
 	})
 
 	t.Run("explicit exit code passes through", func(t *testing.T) {
-		exit, err := gate.ExecWithRedaction(context.Background(), "sh -c 'exit 42'", gate.ExecOpts{})
+		res, err := gate.ExecWithRedaction(context.Background(), "sh -c 'exit 42'", gate.ExecOpts{})
 		if err != nil {
 			t.Fatalf("err = %v, want nil", err)
 		}
-		if exit != 42 {
-			t.Errorf("exit = %d, want 42", exit)
+		if res.ExitCode != 42 {
+			t.Errorf("exit = %d, want 42", res.ExitCode)
 		}
 	})
 
 	t.Run("nonexistent command exits nonzero", func(t *testing.T) {
-		exit, err := gate.ExecWithRedaction(context.Background(), "/nonexistent/path/binary", gate.ExecOpts{})
+		res, err := gate.ExecWithRedaction(context.Background(), "/nonexistent/path/binary", gate.ExecOpts{})
 		if err != nil {
 			t.Fatalf("err = %v, want nil (nonzero exit is not a start error)", err)
 		}
-		if exit == 0 {
+		if res.ExitCode == 0 {
 			t.Errorf("exit = 0, want nonzero")
 		}
 	})
@@ -97,13 +97,13 @@ func TestExec(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		start := time.Now()
-		exit, err := gate.ExecWithRedaction(ctx, "sleep 10", gate.ExecOpts{})
+		res, err := gate.ExecWithRedaction(ctx, "sleep 10", gate.ExecOpts{})
 		dur := time.Since(start)
 		if dur > 5*time.Second {
 			t.Fatalf("exec ran %v, expected to be killed promptly", dur)
 		}
 		_ = err
-		if exit == 0 {
+		if res.ExitCode == 0 {
 			t.Errorf("exit = 0, want nonzero (process should have been killed)")
 		}
 	})
@@ -129,9 +129,9 @@ func TestExec(t *testing.T) {
 	})
 
 	t.Run("empty cmd is rejected", func(t *testing.T) {
-		exit, err := gate.ExecWithRedaction(context.Background(), "", gate.ExecOpts{})
+		res, err := gate.ExecWithRedaction(context.Background(), "", gate.ExecOpts{})
 		if err == nil {
-			t.Errorf("err = nil, want error for empty cmd; exit=%d", exit)
+			t.Errorf("err = nil, want error for empty cmd; exit=%d", res.ExitCode)
 		}
 	})
 }

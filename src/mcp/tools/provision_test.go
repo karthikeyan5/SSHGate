@@ -266,6 +266,8 @@ func TestProvision_ReadOnlyHappyPath(t *testing.T) {
 		t.Error("registry missing tier-1 alias")
 	} else if !e.ReadOnly {
 		t.Error("registry entry not marked read-only for tier-1 add")
+	} else if e.Fingerprint != "SHA256:ro" {
+		t.Errorf("registry entry Fingerprint = %q; want the pinned dial fingerprint SHA256:ro", e.Fingerprint)
 	}
 }
 
@@ -306,6 +308,13 @@ func TestProvision_WriteHappyPath(t *testing.T) {
 		t.Error("registry entry marked read-only for a tier-2 add")
 	} else if e.Port != 2222 || e.User != "deploy" || e.Host != "h.example.com" {
 		t.Errorf("registry entry fields wrong: %+v", e)
+	} else if e.Fingerprint != "SHA256:rw" {
+		// The pinned host-key fingerprint must be stored so the MCP can later
+		// bind sign requests to this host.
+		t.Errorf("registry entry Fingerprint = %q; want the pinned dial fingerprint SHA256:rw", e.Fingerprint)
+	}
+	if out.Fingerprint != "SHA256:rw" {
+		t.Errorf("output Fingerprint = %q; want SHA256:rw", out.Fingerprint)
 	}
 }
 

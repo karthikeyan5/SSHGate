@@ -52,14 +52,17 @@ func Rules() []redact.Rule {
 		),
 
 		// JWT — header.payload.sig, all three base64url. We anchor on
-		// the structurally-identifiable header prefix `eyJ`.
+		// the structurally-identifiable header prefix `eyJ`. High-
+		// confidence: a JWT is unmistakable, so an over-4096-char token
+		// is still redacted (MaxLen is advisory here, not a drop —
+		// MINOR 7).
 		redact.CompileRule(
 			"sshgate-jwt",
 			"JSON Web Token (eyJ-prefixed three-part base64url)",
 			`\b(eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\b`,
 			[]string{"eyJ"},
 			1, 30, 4096,
-		),
+		).WithHighConfidence(),
 
 		// HTTP Authorization: Bearer header. Token value only.
 		// Upper bound is 999 (RE2 max repeat is 1000); MaxLen filter
@@ -72,14 +75,23 @@ func Rules() []redact.Rule {
 			1, 8, 1024,
 		),
 
-		// password=foo / pwd=foo / passwd=foo (URL-/env-style). The
+		// password=foo / *_pwd=foo / passwd=foo (URL-/env-style). The
 		// rule fires on the value only; common log noise like
 		// "password = ****" passes through because the value-character
 		// class excludes spaces and the like.
+		//
+		// `password`/`passwd` match bare (a `\b` before them) since they
+		// are unambiguous secret keys. `pwd` is the cwd-env-var landmine:
+		// bare `PWD=/home/...` and `OLDPWD=/home/...` appear in EVERY
+		// `env`/`printenv` dump and must NOT have their value scrubbed, or
+		// the operator goes blind to its own working directory. So `pwd`
+		// only matches as a `_`/`-`-separated suffix (`DB_PWD=`,
+		// `MYSQL_PWD=`); `OLDPWD` (no separator before `pwd`) and bare
+		// `PWD` are deliberately excluded.
 		redact.CompileRule(
 			"sshgate-password-kv",
-			"password=/pwd=/passwd= key-value (URL or env form)",
-			`(?i)\b(?:password|passwd|pwd)\s*[=:]\s*['"]?([^\s'";&,<>]{4,256})['"]?`,
+			"password=/*_pwd=/passwd= key-value (URL or env form)",
+			`(?i)(?:\b(?:password|passwd)|[a-z0-9]+[_-]pwd)\s*[=:]\s*['"]?([^\s'";&,<>]{4,256})['"]?`,
 			[]string{"password", "passwd", "pwd"},
 			1, 4, 256,
 		),
@@ -118,6 +130,157 @@ func Rules() []redact.Rule {
 			`AccountKey=([A-Za-z0-9+/=]{40,200})`,
 			[]string{"AccountKey="},
 			1, 40, 200,
+		),
+
+		// --- BLOCKER 3(a): secret VALUES behind common assignment
+		// shapes. The existing sshgate-password-kv rule only covers
+		// password/passwd/pwd; an env dump / .env / `printenv` leaks a
+		// far wider surface — *_KEY, *_TOKEN, *_SECRET, *_PASSWORD,
+		// *_PASS, PGPASSWORD, etc. These rules redact the VALUE only and
+		// bias toward over-redacting: some assignment values that aren't
+		// truly secret will be scrubbed, which is the safe failure mode
+		// for a single-tap unsigned read path.
+
+		// Assignment of a secret-looking value to a key whose NAME ends
+		// in a sensitive word (KEY/TOKEN/SECRET/PASSWORD/PASS/PASSWD/PWD/
+		// APIKEY/ACCESSKEY/PRIVATEKEY/CREDENTIAL). Matches `NAME=value`,
+		// `NAME = value`, `NAME: value`, optional `export ` prefix, and
+		// quoted values (which may contain spaces). Value group is #2.
+		//
+		// The unquoted value class excludes whitespace/quotes/shell
+		// metacharacters so we redact one token, not the rest of the
+		// line. Quoted values capture everything up to the closing quote
+		// (so `PASSWORD="my secret"` is fully covered).
+		// SecretGroup 1 captures the whole value — including its
+		// surrounding quotes when present — so a quoted value with
+		// spaces (`PASSWORD="my secret"`) is redacted in full while the
+		// variable NAME and the `=`/`:` separator survive.
+		//
+		// Boundary discipline (over-redaction guard): the keyword stem
+		// must begin at a non-alphanumeric boundary — `(?:^|[^A-Za-z0-9])`
+		// — so a stem can never match *inside* a longer alphanumeric run
+		// (`KEYBOARD=` / `TOKENIZER=`). The leading class is `[^A-Za-z0-9]`
+		// (NOT `[^A-Za-z0-9_-]`) so a `_`/`-` separator inside a multi-part
+		// name still acts as the boundary — `MY_DB_PASSWORD=` matches on
+		// the `_` before `PASSWORD`. The bulk of the stems (KEY/TOKEN/
+		// SECRET/PASSWORD/PASSWD/CREDENTIAL, with an optional `NAME_`
+		// prefix) tolerate sitting at name-start. PWD and PASS are the
+		// exception: they are short, extremely common English fragments
+		// (`PWD`, `OLDPWD`, `COMPASS`, `BYPASS`, `WHISKEY`/`MONKEY` for the
+		// KEY case) so they get a stricter branch — `[A-Z0-9]+[_-](?:PWD|
+		// PASS)` REQUIRES a `_`/`-` separator before them. Thus `DB_PWD=`/
+		// `DB_PASS=` still redact, but the bare cwd env var `PWD=…` and
+		// `OLDPWD=…` (present in every `env`/`printenv` dump) pass through
+		// verbatim so the operator can still see its own working directory.
+		redact.CompileRule(
+			"sshgate-sensitive-assignment",
+			"Secret value assigned to a *KEY/*TOKEN/*SECRET/*PASSWORD/*PASS-named variable",
+			`(?i)(?:^|[^A-Za-z0-9])(?:export\s+)?(?:(?:[A-Z0-9]+[_-])?(?:API[_-]?KEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)|[A-Z0-9]+[_-](?:PWD|PASS))\s*[:=]\s*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{4,1000})`,
+			[]string{"key", "token", "secret", "password", "pass", "passwd", "pwd", "credential"},
+			1, 4, 0,
+		),
+
+		// PGPASSWORD is special-cased: the libpq env var name has no
+		// `_PASS` boundary the rule above keys on cleanly, and it is an
+		// extremely common leak in `env` / `ps -e` dumps.
+		redact.CompileRule(
+			"sshgate-pgpassword",
+			"PGPASSWORD libpq environment variable",
+			`(?i)\bPGPASSWORD\s*[:=]\s*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{1,1000})`,
+			[]string{"pgpassword"},
+			1, 1, 0,
+		),
+
+		// --- BLOCKER 3(b): URL-embedded credentials
+		// scheme://user:PASSWORD@host. Redacts the password component of
+		// a userinfo-bearing URL for the common DB / cache / web schemes.
+		// SecretGroup 1 is the password between the first ':' after the
+		// scheme and the '@'.
+		redact.CompileRule(
+			"sshgate-url-userinfo-password",
+			"Password embedded in a scheme://user:pass@host URL",
+			`(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|https?|ftp|ssh)://[^\s:/@]*:([^\s:/@]+)@`,
+			[]string{"://"},
+			1, 1, 4096,
+		),
+
+		// --- BLOCKER 3(c): modern provider prefixes the vendored
+		// gitleaks snapshot predates. Anchored on a structural prefix so
+		// the pre-filter keyword carries its weight.
+
+		// OpenAI project keys (sk-proj-...) and legacy (sk-...). We anchor
+		// on `sk-proj-` and `sk-ant-api03-` separately so the bare `sk-`
+		// stays out (too noisy). Order in the alternation matters: the
+		// longer, more specific prefixes are tried first.
+		redact.CompileRule(
+			"sshgate-openai-project-key",
+			"OpenAI project/secret key (sk-proj-, sk-svcacct-)",
+			`\b(sk-(?:proj|svcacct|None|admin)-[A-Za-z0-9_\-]{20,300})\b`,
+			[]string{"sk-proj-", "sk-svcacct-", "sk-none-", "sk-admin-"},
+			1, 24, 320,
+		),
+
+		// Anthropic API keys (sk-ant-api03-...).
+		redact.CompileRule(
+			"sshgate-anthropic-key",
+			"Anthropic API key (sk-ant-...)",
+			`\b(sk-ant-[A-Za-z0-9_\-]{20,300})\b`,
+			[]string{"sk-ant-"},
+			1, 24, 320,
+		),
+
+		// DigitalOcean PATs (dop_v1_<64 hex>) and OAuth (doo_v1_, dor_v1_).
+		redact.CompileRule(
+			"sshgate-digitalocean-token",
+			"DigitalOcean token (dop_v1_/doo_v1_/dor_v1_)",
+			`\b(do[opr]_v1_[a-f0-9]{64})\b`,
+			[]string{"dop_v1_", "doo_v1_", "dor_v1_"},
+			1, 71, 71,
+		),
+
+		// xAI (Grok) API keys (xai-...).
+		redact.CompileRule(
+			"sshgate-xai-key",
+			"xAI / Grok API key (xai-...)",
+			`\b(xai-[A-Za-z0-9_\-]{20,200})\b`,
+			[]string{"xai-"},
+			1, 24, 220,
+		),
+
+		// Groq API keys (gsk_...).
+		redact.CompileRule(
+			"sshgate-groq-key",
+			"Groq API key (gsk_...)",
+			`\b(gsk_[A-Za-z0-9]{40,200})\b`,
+			[]string{"gsk_"},
+			1, 44, 220,
+		),
+
+		// Google API keys (AIza...) — Maps/Firebase/etc.
+		redact.CompileRule(
+			"sshgate-google-api-key",
+			"Google API key (AIza...)",
+			`\b(AIza[A-Za-z0-9_\-]{35})\b`,
+			[]string{"AIza"},
+			1, 39, 39,
+		),
+
+		// Hugging Face access tokens (hf_...).
+		redact.CompileRule(
+			"sshgate-huggingface-token",
+			"Hugging Face access token (hf_...)",
+			`\b(hf_[A-Za-z0-9]{30,200})\b`,
+			[]string{"hf_"},
+			1, 33, 220,
+		),
+
+		// npm automation/access tokens (npm_...).
+		redact.CompileRule(
+			"sshgate-npm-token",
+			"npm access token (npm_...)",
+			`\b(npm_[A-Za-z0-9]{36})\b`,
+			[]string{"npm_"},
+			1, 40, 40,
 		),
 	}
 }

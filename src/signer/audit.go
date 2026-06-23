@@ -49,13 +49,11 @@ type AuditLog struct {
 }
 
 // OpenAuditLog opens (or creates) path for append-only JSON-Lines
-// writes. The file is opened with mode 0640: owner-writable, group-
-// readable (so the operator's user can `tail -f` the log if a group
-// is granted), world-blocked. Umask may strip the group bit on systems
-// where the daemon runs under a tighter mask; the test only asserts
-// world bits are off.
+// writes. The file is opened with mode 0600 (owner-only): it carries the
+// command text of every approval request, so it must not be group- or
+// world-readable. (A tighter umask can only restrict further.)
 func OpenAuditLog(path string) (*AuditLog, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open audit log: %w", err)
 	}
