@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -166,6 +167,27 @@ func validateAPIBaseURL(base string) error {
 	}
 }
 
+// botTokenRe matches the bot token as it appears embedded in a Telegram
+// Bot-API request URL path: "bot<bot_id>:<secret>" (e.g.
+// "bot123456789:AAF…"). The go-telegram-bot-api library puts the token in
+// the URL PATH (<base>/bot<TOKEN>/<method>), and Go stdlib's
+// *url.Error.Error() embeds the full URL — so any transport error that is
+// logged or returned would otherwise leak the token verbatim.
+var botTokenRe = regexp.MustCompile(`bot\d+:[A-Za-z0-9_-]+`)
+
+// redactToken renders err.Error() with any embedded bot token replaced by
+// "bot<REDACTED>". This is the single choke point every Telegram error
+// that can reach a log line, a returned-error string, or the wire MUST
+// pass through, so the @BotFather token can never escape to the systemd
+// journal or the MCP/agent. Returns "<nil>" for a nil error so call sites
+// stay one-liners.
+func redactToken(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return botTokenRe.ReplaceAllString(err.Error(), "bot<REDACTED>")
+}
+
 // NewTelegramBackend builds a TelegramBackend, verifies the token via
 // getMe (so a misconfigured production daemon fails on startup, not on
 // the first approval request — daemon.md §11), and returns the
@@ -187,7 +209,12 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 	}
 	bot, err := tgbotapi.NewBotAPIWithAPIEndpoint(opts.BotToken, endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("telegram getMe: %w", err)
+		// %s + redactToken (not %w): the underlying *url.Error embeds the
+		// token in its URL path, and this error bubbles to main.go's fatal
+		// startup log. No caller unwraps this error (verified: no
+		// errors.Is/As on the getMe path in signer or mcp/sign), so
+		// dropping the wrap chain costs nothing.
+		return nil, fmt.Errorf("telegram getMe: %s", redactToken(err))
 	}
 
 	logger := opts.Logger
@@ -357,7 +384,7 @@ func (t *TelegramBackend) handleStart(m *tgbotapi.Message) {
 		masked := maskUserID(t.allowedUserID)
 		reply := tgbotapi.NewMessage(m.Chat.ID, fmt.Sprintf("this bot only serves %s — message ignored", masked))
 		if _, err := t.bot.Send(reply); err != nil {
-			t.logger.Printf("send refusal: %v", err)
+			t.logger.Printf("send refusal: %s", redactToken(err))
 		}
 		fromID := int64(0)
 		if m.From != nil {
@@ -374,7 +401,7 @@ func (t *TelegramBackend) handleStart(m *tgbotapi.Message) {
 	}
 	reply := tgbotapi.NewMessage(m.Chat.ID, "Linked — SSHGate approvals will now reach you here.")
 	if _, err := t.bot.Send(reply); err != nil {
-		t.logger.Printf("send link confirmation: %v", err)
+		t.logger.Printf("send link confirmation: %s", redactToken(err))
 	}
 	t.logger.Printf("/start: linked chat_id=%d for user_id=%d", m.Chat.ID, m.From.ID)
 }
@@ -386,7 +413,7 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 		// their client but DO NOT touch any pending request.
 		ans := tgbotapi.NewCallbackWithAlert(cb.ID, "not authorized")
 		if _, err := t.bot.Request(ans); err != nil {
-			t.logger.Printf("answer unauthorized callback: %v", err)
+			t.logger.Printf("answer unauthorized callback: %s", redactToken(err))
 		}
 		fromID := int64(0)
 		if cb.From != nil {
@@ -400,7 +427,7 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	if !ok {
 		ans := tgbotapi.NewCallback(cb.ID, "invalid request")
 		if _, err := t.bot.Request(ans); err != nil {
-			t.logger.Printf("answer invalid-data callback: %v", err)
+			t.logger.Printf("answer invalid-data callback: %s", redactToken(err))
 		}
 		return
 	}
@@ -409,7 +436,7 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	if !ok {
 		ans := tgbotapi.NewCallback(cb.ID, "expired or already resolved")
 		if _, err := t.bot.Request(ans); err != nil {
-			t.logger.Printf("answer unknown-reqid callback: %v", err)
+			t.logger.Printf("answer unknown-reqid callback: %s", redactToken(err))
 		}
 		return
 	}
@@ -435,7 +462,7 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	// Answer the callback so the user's client clears its spinner.
 	ans := tgbotapi.NewCallback(cb.ID, strings.ToLower(verbPast))
 	if _, err := t.bot.Request(ans); err != nil {
-		t.logger.Printf("answer callback: %v", err)
+		t.logger.Printf("answer callback: %s", redactToken(err))
 	}
 
 	// Edit the original message to remove buttons and record outcome.
@@ -446,7 +473,7 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	}
 	edit := tgbotapi.NewEditMessageText(ps.chatID, ps.messageID, origText+footer)
 	if _, err := t.bot.Send(edit); err != nil {
-		t.logger.Printf("edit message: %v", err)
+		t.logger.Printf("edit message: %s", redactToken(err))
 	}
 }
 
@@ -482,7 +509,12 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 	)
 	sent, err := t.bot.Send(msg)
 	if err != nil {
-		return nil, fmt.Errorf("telegram send: %w", err)
+		// %s + redactToken (not %w): a transport-level send failure is a
+		// *url.Error embedding the token in its URL path, and this error
+		// bubbles to the daemon's respondError -> journal + wire `error`
+		// field. No caller unwraps it (verified: daemon.go stringifies via
+		// %v, no errors.Is/As on this path), so the wrap chain is expendable.
+		return nil, fmt.Errorf("telegram send: %s", redactToken(err))
 	}
 
 	ch := make(chan Result, 1)
@@ -557,7 +589,12 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalReq
 	)
 	sent, err := t.bot.Send(msg)
 	if err != nil {
-		return nil, fmt.Errorf("telegram send: %w", err)
+		// %s + redactToken (not %w): a transport-level send failure is a
+		// *url.Error embedding the token in its URL path, and this error
+		// bubbles to the daemon's respondError -> journal + wire `error`
+		// field. No caller unwraps it (verified: daemon.go stringifies via
+		// %v, no errors.Is/As on this path), so the wrap chain is expendable.
+		return nil, fmt.Errorf("telegram send: %s", redactToken(err))
 	}
 
 	ch := make(chan Result, 1)
@@ -620,7 +657,7 @@ func (t *TelegramBackend) timeout(reqID string, ps *pendingState) {
 	// rejects, the user just sees stale buttons that no longer work.
 	edit := tgbotapi.NewEditMessageText(ps.chatID, ps.messageID, fmt.Sprintf("⏰ Expired (no response in %s)", t.reqTimeout))
 	if _, err := t.bot.Send(edit); err != nil {
-		t.logger.Printf("edit-on-timeout: %v", err)
+		t.logger.Printf("edit-on-timeout: %s", redactToken(err))
 	}
 }
 
@@ -637,7 +674,7 @@ func (t *TelegramBackend) classifyAndLog(err error) {
 		t.logger.Printf("getUpdates %s error code=%d msg=%q", class, apiErr.Code, apiErr.Message)
 		return
 	}
-	t.logger.Printf("getUpdates transport error: %v", err)
+	t.logger.Printf("getUpdates transport error: %s", redactToken(err))
 }
 
 // PanicsTotal returns the number of recovered panics across the
