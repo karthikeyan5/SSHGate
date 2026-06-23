@@ -192,6 +192,19 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return nil, fmt.Errorf("sign: malformed response: %w", err)
 	}
+	// A daemon error response can legitimately carry an EMPTY request_id —
+	// it is set before the daemon has parsed/echoed our id (a malformed
+	// request, or a backend-send failure reported with no id). Surface the
+	// real reason from resp.Error rather than the opaque correlation
+	// mismatch below, which would mask why the request failed. We only
+	// treat a NON-EMPTY mismatched id as a true correlation error (the
+	// concurrency/correlation guarantee is unchanged for that case).
+	if resp.RequestID == "" && resp.Status == "error" {
+		if resp.Error == "" {
+			return nil, fmt.Errorf("sign: daemon reported error (no detail)")
+		}
+		return nil, fmt.Errorf("sign: daemon error: %s", resp.Error)
+	}
 	if resp.RequestID != requestID {
 		return nil, fmt.Errorf("sign: response request_id %q != %q", resp.RequestID, requestID)
 	}
