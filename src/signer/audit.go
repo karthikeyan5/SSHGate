@@ -19,17 +19,20 @@ import (
 // approved request was signed but the response write to the MCP
 // failed (so the operator-visible decision did not reach the caller).
 //
-// ApprovedBy is the human-readable identifier of the approver when the
-// backend can provide one (Telegram populates it with the user's first
-// name). Empty when the backend doesn't track identity (stub) or when
-// the outcome is non-approved.
+// ApprovedBy is the human-readable identifier of the actor the backend
+// associates with the verdict (Telegram populates it with the tapping user's
+// name). It is NOT a proxy for "was authorised": the real Telegram backend
+// records the DENIER's name on a DENY too, so a non-empty approved_by can
+// accompany a denied/timeout outcome. Empty when the backend doesn't track
+// identity (stub).
 //
-// AuthMode records HOW the request was authorised, decoupled from the
-// approved_by prefix so the log carries both WHO ("approved_by") and HOW
-// ("auth_mode"): "human" = a real-time human approval; "grant:<id>" = a
+// AuthMode records HOW the request was authorised — and ONLY when it was.
+// Decoupled from approved_by so the log carries both WHO ("approved_by") and
+// HOW ("auth_mode"): "human" = a real-time human approval; "grant:<id>" = a
 // standing-grant auto-sign; empty for a denied/timeout/error/read where
-// nothing was authorised. It is set via authModeFromApprovedBy — the SAME
-// helper the socket response uses — so the audit and the wire never drift.
+// nothing was authorised. It is set via the authMode helper — the SAME helper
+// the socket response uses, gated on the approval state — so the audit and the
+// wire never drift, and a DENY never reads as "human".
 type AuditEvent struct {
 	TS         time.Time `json:"ts"`
 	RequestID  string    `json:"request_id"`

@@ -34,6 +34,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -265,19 +266,36 @@ func execChild(cmd string, reveal bool, captureLimit int) (int, gate.ExecResult)
 	return res.ExitCode, res
 }
 
+// auditRulesOnce + cachedAuditRules MEMOIZE the production ruleset compile so
+// redactrules.Combined() (the ~1 MB regex compile) runs at most ONCE per gate
+// process. This is distinct from the redactRules test-injection seam: when
+// that seam is nil (production) the two consumers of auditRules() within one
+// gate invocation — output redaction (execChild) and command-string redaction
+// (redactAuditCommand) — would otherwise each trigger a fresh Combined(),
+// paying the compile twice per executed write. The cache collapses them to one.
+var (
+	auditRulesOnce   sync.Once
+	cachedAuditRules []redact.Rule
+)
+
 // auditRules resolves the redaction ruleset the gate scrubs with. It is the
-// single lazy-compile point shared by output redaction (execChild) and
+// single compile point shared by output redaction (execChild) and
 // command-string redaction (redactAuditCommand): a test may inject the
-// redactRules package-var seam, otherwise the real v1.2 ruleset
-// (redactrules.Combined() — sshgate-native + gitleaks-vendored) is compiled
-// on demand. Compiling here keeps the deny/verify-fail/probe paths free of
-// the ~1 MB regex-compile cost, and reusing it for the command string adds
-// NO second compile or new state — the gate stays stateless/pure.
+// redactRules package-var seam (the explicit override — returned verbatim,
+// uncached), otherwise the real v1.2 ruleset (redactrules.Combined() —
+// sshgate-native + gitleaks-vendored) is compiled ONCE via auditRulesOnce and
+// cached for the rest of the process. Compiling lazily keeps the
+// deny/verify-fail/probe paths free of the ~1 MB regex-compile cost, and the
+// once-cache guarantees the two consumers within a single executed write share
+// ONE compile rather than triggering it twice.
 func auditRules() []redact.Rule {
 	if redactRules != nil {
 		return redactRules
 	}
-	return redactrules.Combined()
+	auditRulesOnce.Do(func() {
+		cachedAuditRules = redactrules.Combined()
+	})
+	return cachedAuditRules
 }
 
 // redactAuditCommand scrubs a command string about to be persisted to the

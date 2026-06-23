@@ -145,18 +145,31 @@ type signResponse struct {
 	ProtoVersion int               `json:"proto_version,omitempty"`
 }
 
-// authModeFromApprovedBy derives the F4 auth-mode marker from a backend
-// Result's ApprovedBy. It is the SINGLE source of truth shared by the socket
-// response (respond) and the audit log (audit), so the two can never drift:
-//   - "grant:<id>" → returned verbatim (a standing-grant auto-sign).
-//   - any other non-empty value → "human" (a real-time approval; the
-//     approver name lives in approved_by, the HOW is just "human").
-//   - "" → "" (denied / timeout / error / a read — nothing was authorised).
+// authMode derives the F4 auth-mode marker. It is the SINGLE source of truth
+// shared by the socket response (respond) and the audit log (audit), so the
+// two can never drift. It is gated on the APPROVAL STATE — NOT on ApprovedBy
+// alone — because the real Telegram backend sets Result.ApprovedBy to the
+// DENIER's name on a DENY too (callbackApprover returns a non-empty
+// "@user"/"id:N" for both approve and deny). Keying on non-emptiness alone
+// (the old behaviour) therefore stamped auth_mode="human" on a real DENY,
+// corrupting the F4 forensics into implying the write was authorised. The mock
+// backend masked this by leaving ApprovedBy empty on deny.
 //
-// Keying on ApprovedBy makes it correct for both "approved" and
-// "approved-undelivered" (both carry the approver/grant id) and empty for
-// denied/timeout/error.
-func authModeFromApprovedBy(approvedBy string) string {
+//   - approved==false → "" (denied / timeout / error / a read — NOTHING was
+//     authorised, regardless of any approver name the backend carries).
+//   - "grant:<id>"    → returned verbatim (a standing-grant auto-sign).
+//   - any other non-empty value → "human" (a real-time tap; the approver name
+//     lives in approved_by, the HOW is just "human").
+//   - approved==true but empty approvedBy → "" (no authoriser recorded).
+//
+// Callers pass approved==true for both "approved" and "approved-undelivered"
+// (both are decided approvals carrying the approver/grant id), so an
+// approved-undelivered still records human/grant; all the non-approved
+// outcomes record "".
+func authMode(approved bool, approvedBy string) string {
+	if !approved {
+		return ""
+	}
 	if strings.HasPrefix(approvedBy, "grant:") {
 		return approvedBy
 	}
@@ -406,11 +419,13 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 // response/audit pair is intentionally produced inside one function so
 // the two cannot drift.
 func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result) error {
-	// AuthMode (F4) is derived from the SAME helper the audit uses, keyed on
-	// ApprovedBy, so the socket response and the audit row never disagree on
-	// how a write was authorised. It is empty for denied/timeout, "human" for
-	// a real-time tap, and "grant:<id>" for a standing-grant auto-sign.
-	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authModeFromApprovedBy(result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
+	// AuthMode (F4) is derived from the SAME helper the audit uses, gated on
+	// the APPROVAL STATE (not ApprovedBy alone — the real Telegram backend
+	// carries the denier's name on a DENY too), so the socket response and the
+	// audit row never disagree on how a write was authorised. It is empty for
+	// denied/timeout/error, "human" for a real-time tap, and "grant:<id>" for a
+	// standing-grant auto-sign.
+	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authMode(result.Status == backend.StatusApproved, result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
 
 	if result.Status == backend.StatusApproved {
 		// Two paths:
@@ -952,8 +967,13 @@ func (d *Daemon) audit(req signRequest, status, approvedBy string) error {
 		ApprovedBy: approvedBy,
 		// First-class auth_mode (F4-B4): same helper as the socket response so
 		// the authoritative log carries both WHO (approved_by) and HOW
-		// (auth_mode) and the two never drift.
-		AuthMode: authModeFromApprovedBy(approvedBy),
+		// (auth_mode) and the two never drift. Gated on the APPROVAL STATE via
+		// the already-mapped status string: an approval is "approved" OR
+		// "approved-undelivered" (HasPrefix "approved"), so an approved-
+		// undelivered still records human/grant, while denied/denied-undelivered
+		// /timeout/timeout-undelivered/error all record "" — even though the
+		// real Telegram backend hands the denier's name through approvedBy.
+		AuthMode: authMode(strings.HasPrefix(status, "approved"), approvedBy),
 	}
 	if err := d.Audit.Write(ev); err != nil {
 		return fmt.Errorf("audit: %w", err)

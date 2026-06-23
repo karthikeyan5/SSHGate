@@ -16,13 +16,13 @@ import (
 )
 
 // connectAllTools mirrors Server.Serve's agent-facing tool registration
-// (the seven tools the agent can call) over the SDK's in-memory
+// (the eight tools the agent can call) over the SDK's in-memory
 // transport. The existing connectInProcess helper wires only
 // run/run_batch; this one closes the gap so list_servers, status,
-// revoke_server, request_grant, and revoke_grant are also exercised at
-// the SDK boundary (request → handler → structured result). add_server is
-// intentionally absent: it is no longer an MCP tool — provisioning is the
-// human-only `sshgate` CLI.
+// revoke_server, request_grant, revoke_grant, and list_grants are also
+// exercised at the SDK boundary (request → handler → structured result).
+// add_server is intentionally absent: it is no longer an MCP tool —
+// provisioning is the human-only `sshgate` CLI.
 //
 // Handlers here are thin shims that call the same Runner methods the
 // production handlers in server.go call — no production behavior is
