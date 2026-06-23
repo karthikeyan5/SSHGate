@@ -276,9 +276,14 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 		Classification: out.Kind,
 		ExitCode:       out.ExitCode,
 		Approved:       out.Approved,
-		Revealed:       out.Revealed,
-		Stdout:         stdout,
-		Stderr:         stderr,
+		// AuthMode (F4) is the single human-vs-grant surface: "human" for a
+		// real-time tap, "grant:<id>" for a standing-grant auto-sign, "" for a
+		// read. It is metadata, NOT secret output, so it is KEPT even for a
+		// revealed write (whose stdout/stderr were blanked above).
+		AuthMode: out.AuthMode,
+		Revealed: out.Revealed,
+		Stdout:   stdout,
+		Stderr:   stderr,
 	})
 	// Also pack a TextContent block so older MCP clients (without
 	// structured content support) see a human-readable result.
@@ -319,6 +324,15 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		if r.Revealed {
 			stdout, stderr = "", ""
 		}
+		// AuthMode (F4) applies only to a WRITE: the one batch sign request
+		// authorised the writes, so each write carries the batch-level
+		// auth_mode ("human" / "grant:<id>"); the reads ran direct, never
+		// part of the approval, so they carry no auth mode — mirroring the
+		// Approved logic on the line below.
+		authMode := ""
+		if r.Kind == "write" {
+			authMode = out.AuthMode
+		}
 		s.LiveLog.Log(livelog.Entry{
 			Server: out.Server,
 			// Redact a secret embedded in the command STRING (F5). Fail-open.
@@ -329,6 +343,7 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 			// single bulk approval only authorised the batch's WRITES; the reads
 			// ran direct and were never part of the human tap.
 			Approved: out.Approved && r.Kind == "write",
+			AuthMode: authMode,
 			Revealed: r.Revealed,
 			Stdout:   stdout,
 			Stderr:   stderr,

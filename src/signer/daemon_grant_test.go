@@ -70,16 +70,32 @@ type grantResp struct {
 	Error      string `json:"error"`
 }
 
-// grantSignResp is the decoded sign response shape (with the approver carried
-// in the audit, not the wire; we read approver from the audit log).
+// grantSignResp is the decoded sign response shape. AuthMode is the F4
+// human-vs-grant marker the daemon now stamps on the socket response
+// (the approver name still lives only in the audit, read via approverFor).
 type grantSignResp struct {
 	RequestID  string `json:"request_id"`
 	Status     string `json:"status"`
+	AuthMode   string `json:"auth_mode"`
 	Signatures []struct {
 		Cmd string `json:"cmd"`
 		Sig string `json:"sig"`
 	} `json:"signatures"`
 	Error string `json:"error"`
+}
+
+// authModeFor scans the audit log for the row matching reqID and returns its
+// auth_mode — the F4-B4 first-class HOW field on the signer's authoritative
+// log, decoupled from approved_by (WHO).
+func authModeFor(t *testing.T, auditPath, reqID string) string {
+	t.Helper()
+	for _, ev := range readAudit(t, auditPath) {
+		if ev.RequestID == reqID {
+			return ev.AuthMode
+		}
+	}
+	t.Fatalf("no audit row for request_id %q", reqID)
+	return ""
 }
 
 // createGrant drives the real request_grant path through the daemon and
@@ -209,6 +225,58 @@ func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
 	// Audit proves the grant path (not a human prompt).
 	if got := approverFor(t, auditPath, "s_auto"); !strings.HasPrefix(got, "grant:") {
 		t.Errorf("approved_by = %q; want grant:<id> (auto-approved)", got)
+	}
+}
+
+// TestGrant_AuthModeOnSignResponseAndAudit pins F4: a grant auto-sign carries
+// auth_mode="grant:<id>" on BOTH the socket response and the signer audit;
+// a human-tap sign carries auth_mode="human" on both. The socket response is
+// the new single-surface human-vs-grant field (gate-invisible, signature
+// unchanged); the audit's auth_mode is the same value via the shared helper.
+func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
+	defer audit.Close()
+
+	// Grant auto-sign path.
+	mock.Approve("g_req", "karthi")
+	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
+	if gr.Status != "approved" {
+		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
+	}
+	// Sign reqID UNARMED — only the grant can resolve it.
+	auto := signOne(t, d, "s_auto", "prod", "systemctl restart nginx", grantHost, false, "")
+	if auto.Status != "approved" {
+		t.Fatalf("auto sign status = %q; want approved", auto.Status)
+	}
+	// Socket response auth_mode is exactly "grant:<grant_id>" — the same
+	// "grant:<id>" string approved_by carries (the shared helper returns it
+	// verbatim). createGrant returns the bare id, so prefix it here.
+	wantGrantMode := "grant:" + gr.GrantID
+	if auto.AuthMode != wantGrantMode {
+		t.Errorf("auto sign-response auth_mode = %q; want %q", auto.AuthMode, wantGrantMode)
+	}
+	// approved_by carries the same value, and the audit's first-class
+	// auth_mode equals it — proving the response and the audit never drift.
+	if got := approverFor(t, auditPath, "s_auto"); got != wantGrantMode {
+		t.Errorf("auto approved_by = %q; want %q", got, wantGrantMode)
+	}
+	if got := authModeFor(t, auditPath, "s_auto"); got != wantGrantMode {
+		t.Errorf("auto audit auth_mode = %q; want %q (must equal the socket response)", got, wantGrantMode)
+	}
+
+	// Human-tap path (different alias so no grant covers it).
+	mock.Approve("s_human", "karthi")
+	human := signOne(t, d, "s_human", "other", "rm /tmp/x", grantHost, false, "")
+	if human.Status != "approved" {
+		t.Fatalf("human sign status = %q; want approved", human.Status)
+	}
+	if human.AuthMode != "human" {
+		t.Errorf("human sign-response auth_mode = %q; want human", human.AuthMode)
+	}
+	if got := authModeFor(t, auditPath, "s_human"); got != "human" {
+		t.Errorf("human audit auth_mode = %q; want human", got)
 	}
 }
 

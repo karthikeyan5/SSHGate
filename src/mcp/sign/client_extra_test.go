@@ -123,18 +123,18 @@ func TestSign_ApprovedMultiSignature_OrderedOneToOne(t *testing.T) {
 		{Server: "s", Cmd: "cmd-2", TTLSec: 60},
 	}
 	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
-	out, err := c.Sign(context.Background(), "rN", in)
+	res, err := c.Sign(context.Background(), "rN", in)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if len(out) != 3 {
-		t.Fatalf("got %d signed; want 3", len(out))
+	if len(res.Signed) != 3 {
+		t.Fatalf("got %d signed; want 3", len(res.Signed))
 	}
 	for i := 0; i < 3; i++ {
 		wantCmd := fmt.Sprintf("cmd-%d", i)
 		wantSig := fmt.Sprintf("SIG%d", i)
-		if out[i].Cmd != wantCmd || out[i].Sig != wantSig {
-			t.Errorf("out[%d] = %+v; want {Cmd:%q Sig:%q} (order/1:1 broken)", i, out[i], wantCmd, wantSig)
+		if res.Signed[i].Cmd != wantCmd || res.Signed[i].Sig != wantSig {
+			t.Errorf("out[%d] = %+v; want {Cmd:%q Sig:%q} (order/1:1 broken)", i, res.Signed[i], wantCmd, wantSig)
 		}
 	}
 }
@@ -401,13 +401,13 @@ func TestSign_ParallelOnOneClient_RaceSafe(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			rid := fmt.Sprintf("r-%d", i)
-			out, err := c.Sign(context.Background(), rid, []sign.CmdReq{{Server: "s", Cmd: "x", TTLSec: 60}})
+			res, err := c.Sign(context.Background(), rid, []sign.CmdReq{{Server: "s", Cmd: "x", TTLSec: 60}})
 			if err != nil {
 				errs[i] = err
 				return
 			}
-			if len(out) != 1 || out[0].Sig != "S" {
-				errs[i] = fmt.Errorf("goroutine %d: bad result %+v", i, out)
+			if len(res.Signed) != 1 || res.Signed[0].Sig != "S" {
+				errs[i] = fmt.Errorf("goroutine %d: bad result %+v", i, res.Signed)
 			}
 		}(i)
 	}

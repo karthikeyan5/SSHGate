@@ -51,6 +51,12 @@ type RunBatchOutput struct {
 	// a short machine-readable string.
 	Denied bool   `json:"denied,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// AuthMode (F4) reports HOW the batch's writes were authorised — "human"
+	// (one real-time tap) or "grant:<id>" (a standing-grant auto-sign); empty
+	// for a read-only batch or an old signer. The ONE sign request covers all
+	// writes, so a single batch-level value applies to every write result;
+	// reads carry no auth mode.
+	AuthMode string `json:"auth_mode,omitempty"`
 }
 
 // BatchWriteTTLSec is the per-command TTL used when building a bulk
@@ -154,7 +160,7 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 		if err != nil {
 			return RunBatchOutput{}, fmt.Errorf("tools: request id: %w", err)
 		}
-		signed, err := r.Sign.Sign(ctx, reqID, writeCmds)
+		res, err := r.Sign.Sign(ctx, reqID, writeCmds)
 		if err != nil {
 			// Map the sentinel to a short Reason; the tool layer
 			// returns the structured Denied result rather than a Go
@@ -164,12 +170,16 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			out.Denied = true
 			return out, nil
 		}
-		if len(signed) != len(writeCmds) {
-			return RunBatchOutput{}, fmt.Errorf("tools: expected %d signatures; got %d", len(writeCmds), len(signed))
+		if len(res.Signed) != len(writeCmds) {
+			return RunBatchOutput{}, fmt.Errorf("tools: expected %d signatures; got %d", len(writeCmds), len(res.Signed))
 		}
-		for i, s := range signed {
+		for i, s := range res.Signed {
 			signedByIdx[writeIdx[i]] = s.Sig + " " + writeCmds[i].Cmd
 		}
+		// AuthMode (F4) reports HOW the batch's writes were authorised — "human"
+		// (one tap) or "grant:<id>" (auto-signed). It rides up into each write
+		// result's live-log entry. Reads have no auth mode.
+		out.AuthMode = res.AuthMode
 		out.Approved = true
 	}
 

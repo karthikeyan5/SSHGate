@@ -29,17 +29,21 @@ func (f *hookFakeSSH) Run(_ context.Context, _, _ string, _ int, _ string) ([]by
 	return f.stdout, f.stderr, f.exit, nil
 }
 
-// hookFakeSign returns canned signatures for the write path.
-type hookFakeSign struct{ signed []signpkg.Signed }
+// hookFakeSign returns canned signatures for the write path. authMode lets a
+// test drive the F4 auth_mode threaded through to the live-log entry.
+type hookFakeSign struct {
+	signed   []signpkg.Signed
+	authMode string
+}
 
-func (f *hookFakeSign) Sign(_ context.Context, _ string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error) {
+func (f *hookFakeSign) Sign(_ context.Context, _ string, cmds []signpkg.CmdReq) (signpkg.SignResult, error) {
 	// One signature per requested command (matches the runner's
 	// expectation).
 	out := make([]signpkg.Signed, len(cmds))
 	for i := range cmds {
 		out[i] = signpkg.Signed{Sig: "SSHGATE_SIG:fake"}
 	}
-	return out, nil
+	return signpkg.SignResult{Signed: out, AuthMode: f.authMode}, nil
 }
 
 // RequestGrant / RevokeGrant satisfy SignClient; the live-log hook tests
@@ -218,6 +222,93 @@ func TestRunHandlerNormalCommandKeepsOutputAndRevealedFalse(t *testing.T) {
 	}
 	if v, ok := r0["revealed"]; ok && v != false {
 		t.Errorf("normal entry revealed = %v; want false/absent", v)
+	}
+}
+
+// TestRunHandlerWritesAuthModeToLiveLog proves F4 end-to-end through
+// runHandler: a write the signer authorised under a standing grant emits a
+// live-log entry whose auth_mode is "grant:<id>" (the value the sign response
+// carried), and a read emits an entry with no auth_mode key (omitempty).
+func TestRunHandlerWritesAuthModeToLiveLog(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit-live.log")
+	ll := livelog.New(logPath, 1<<20)
+	r := hookRegistry(t, "web1")
+	runner := &tools.Runner{
+		Servers: r,
+		Sign:    &hookFakeSign{authMode: "grant:g_42"},
+		SSH:     &hookFakeSSH{stdout: []byte("done\n")},
+	}
+	srv := &Server{Runner: runner, Logger: log.New(io.Discard, "", 0), LiveLog: ll}
+
+	// A write (rm classifies as a write) → auth_mode = grant:g_42.
+	if _, _, err := srv.runHandler(context.Background(), nil, tools.RunInput{Alias: "web1", Command: "rm /tmp/x"}); err != nil {
+		t.Fatalf("runHandler write: %v", err)
+	}
+	// A read → no auth_mode.
+	if _, _, err := srv.runHandler(context.Background(), nil, tools.RunInput{Alias: "web1", Command: "cat /etc/hostname"}); err != nil {
+		t.Fatalf("runHandler read: %v", err)
+	}
+
+	recs := liveRecords(t, logPath)
+	if len(recs) != 2 {
+		t.Fatalf("got %d live-log records, want 2", len(recs))
+	}
+	if recs[0]["auth_mode"] != "grant:g_42" {
+		t.Errorf("write entry auth_mode = %v; want grant:g_42", recs[0]["auth_mode"])
+	}
+	if v, ok := recs[1]["auth_mode"]; ok {
+		t.Errorf("read entry has auth_mode = %v; want the key omitted", v)
+	}
+}
+
+// TestRunHandlerRevealKeepsAuthModeBlanksOutput proves a SECRET-REVEAL write
+// still records its auth_mode (metadata, not secret) while blanking the raw
+// stdout/stderr (which carry the revealed secret). A reveal always prompts a
+// human, so auth_mode is "human".
+func TestRunHandlerRevealKeepsAuthModeBlanksOutput(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit-live.log")
+	ll := livelog.New(logPath, 1<<20)
+	r := hookRegistry(t, "web1")
+	const secret = "SECRET=hunter2-RAW"
+	runner := &tools.Runner{
+		Servers: r,
+		Sign:    &hookFakeSign{authMode: "human"},
+		SSH:     &hookFakeSSH{stdout: []byte(secret + "\n")},
+	}
+	srv := &Server{Runner: runner, Logger: log.New(io.Discard, "", 0), LiveLog: ll}
+
+	if _, _, err := srv.runHandler(context.Background(), nil, tools.RunInput{
+		Alias:   "web1",
+		Command: "cat /etc/secret.env",
+		Reveal:  true,
+		Reason:  "verify db password",
+	}); err != nil {
+		t.Fatalf("runHandler: %v", err)
+	}
+
+	// The raw secret must not be on disk.
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read live log: %v", err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("live log persisted the raw revealed secret:\n%s", raw)
+	}
+
+	recs := liveRecords(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records; want 1", len(recs))
+	}
+	r0 := recs[0]
+	if r0["revealed"] != true {
+		t.Errorf("revealed = %v; want true", r0["revealed"])
+	}
+	// auth_mode is metadata — KEPT even though output was blanked.
+	if r0["auth_mode"] != "human" {
+		t.Errorf("revealed entry auth_mode = %v; want human (metadata kept while output blanked)", r0["auth_mode"])
+	}
+	if v, ok := r0["stdout"]; ok && v != "" {
+		t.Errorf("revealed entry leaked stdout: %v", v)
 	}
 }
 

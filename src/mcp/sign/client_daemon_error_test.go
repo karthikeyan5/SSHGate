@@ -173,11 +173,11 @@ func TestSign_MatchingIDSuccessStillWorks(t *testing.T) {
 	defer stop()
 
 	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
-	out, err := c.Sign(context.Background(), "r_real", []sign.CmdReq{{Server: "s", Cmd: "x", TTLSec: 60}})
+	res, err := c.Sign(context.Background(), "r_real", []sign.CmdReq{{Server: "s", Cmd: "x", TTLSec: 60}})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if len(out) != 1 || out[0].Cmd != "x" || out[0].Sig != "SSHGATE_SIG:a:b" {
-		t.Errorf("got %+v", out)
+	if len(res.Signed) != 1 || res.Signed[0].Cmd != "x" || res.Signed[0].Sig != "SSHGATE_SIG:a:b" {
+		t.Errorf("got %+v", res.Signed)
 	}
 }

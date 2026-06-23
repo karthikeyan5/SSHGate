@@ -77,14 +77,14 @@ func TestSign_Approved(t *testing.T) {
 	defer stop()
 
 	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
-	out, err := c.Sign(context.Background(), "r1", []sign.CmdReq{
+	res, err := c.Sign(context.Background(), "r1", []sign.CmdReq{
 		{Server: "prod-db", Cmd: "rm /tmp/x", TTLSec: 60},
 	})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if len(out) != 1 || out[0].Cmd != "rm /tmp/x" || out[0].Sig != "SSHGATE_SIG:abc:def" {
-		t.Errorf("got %+v", out)
+	if len(res.Signed) != 1 || res.Signed[0].Cmd != "rm /tmp/x" || res.Signed[0].Sig != "SSHGATE_SIG:abc:def" {
+		t.Errorf("got %+v", res.Signed)
 	}
 	select {
 	case req := <-gotReq:
@@ -96,6 +96,73 @@ func TestSign_Approved(t *testing.T) {
 		}
 	default:
 		t.Error("server received no request")
+	}
+}
+
+// TestSign_AuthModeGrant pins F4-B: a sign response carrying
+// "auth_mode":"grant:g_abc" surfaces on the SignResult.AuthMode (the
+// MCP-side single human-vs-grant surface), and the signed wire strings are
+// still returned in SignResult.Signed.
+func TestSign_AuthModeGrant(t *testing.T) {
+	t.Parallel()
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
+		return `{"request_id":"r1","status":"approved","auth_mode":"grant:g_abc","signatures":[{"cmd":"rm /tmp/x","sig":"SSHGATE_SIG:abc:def"}]}`
+	})
+	defer stop()
+
+	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
+	res, err := c.Sign(context.Background(), "r1", []sign.CmdReq{{Server: "prod", Cmd: "rm /tmp/x", TTLSec: 60}})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if res.AuthMode != "grant:g_abc" {
+		t.Errorf("AuthMode = %q; want grant:g_abc", res.AuthMode)
+	}
+	if len(res.Signed) != 1 || res.Signed[0].Sig != "SSHGATE_SIG:abc:def" {
+		t.Errorf("Signed = %+v", res.Signed)
+	}
+}
+
+// TestSign_AuthModeHuman pins that a human-tap response surfaces
+// auth_mode="human".
+func TestSign_AuthModeHuman(t *testing.T) {
+	t.Parallel()
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
+		return `{"request_id":"r1","status":"approved","auth_mode":"human","signatures":[{"cmd":"x","sig":"SSHGATE_SIG:a:b"}]}`
+	})
+	defer stop()
+
+	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
+	res, err := c.Sign(context.Background(), "r1", []sign.CmdReq{{Server: "prod", Cmd: "x", TTLSec: 60}})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if res.AuthMode != "human" {
+		t.Errorf("AuthMode = %q; want human", res.AuthMode)
+	}
+}
+
+// TestSign_AuthModeAbsentOldSigner pins backward-compat: a response with NO
+// auth_mode field (an old signer that predates F4) unmarshals to "" and is
+// NOT an error — the client uses plain json.Unmarshal, not
+// DisallowUnknownFields, so the missing field is "unknown", handled gracefully.
+func TestSign_AuthModeAbsentOldSigner(t *testing.T) {
+	t.Parallel()
+	path, _, stop := startFakeSigner(t, func(req map[string]any) string {
+		return `{"request_id":"r1","status":"approved","signatures":[{"cmd":"x","sig":"SSHGATE_SIG:a:b"}]}`
+	})
+	defer stop()
+
+	c := &sign.Client{SocketPath: path, Timeout: 2 * time.Second}
+	res, err := c.Sign(context.Background(), "r1", []sign.CmdReq{{Server: "prod", Cmd: "x", TTLSec: 60}})
+	if err != nil {
+		t.Fatalf("Sign (old signer, no auth_mode): %v", err)
+	}
+	if res.AuthMode != "" {
+		t.Errorf("AuthMode = %q; want \"\" (old signer omits the field)", res.AuthMode)
+	}
+	if len(res.Signed) != 1 {
+		t.Errorf("Signed = %+v; want one signature", res.Signed)
 	}
 }
 

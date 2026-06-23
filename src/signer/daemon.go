@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,12 +128,42 @@ type signRequestCmd struct {
 // signResponse is the wire-format response. Status is one of "approved",
 // "denied", "timeout", "error". Signatures is populated only on
 // approved; Error is populated only on error.
+//
+// AuthMode (F4) reports HOW the request was authorised — "human" for a
+// real-time Telegram tap, "grant:<id>" for a standing-grant auto-sign,
+// empty for any non-approved outcome. It rides the gate-INVISIBLE
+// MCP↔signer socket RPC, NOT the signed payload: a grant signature is
+// byte-identical to a human one by design, so the gate neither sees nor
+// could see this. omitempty keeps a legacy (no-auth_mode) response's wire
+// shape byte-identical, and an old signer that omits it unmarshals to "".
 type signResponse struct {
 	RequestID    string            `json:"request_id"`
 	Status       string            `json:"status"`
+	AuthMode     string            `json:"auth_mode,omitempty"`
 	Signatures   []signResponseSig `json:"signatures,omitempty"`
 	Error        string            `json:"error,omitempty"`
 	ProtoVersion int               `json:"proto_version,omitempty"`
+}
+
+// authModeFromApprovedBy derives the F4 auth-mode marker from a backend
+// Result's ApprovedBy. It is the SINGLE source of truth shared by the socket
+// response (respond) and the audit log (audit), so the two can never drift:
+//   - "grant:<id>" → returned verbatim (a standing-grant auto-sign).
+//   - any other non-empty value → "human" (a real-time approval; the
+//     approver name lives in approved_by, the HOW is just "human").
+//   - "" → "" (denied / timeout / error / a read — nothing was authorised).
+//
+// Keying on ApprovedBy makes it correct for both "approved" and
+// "approved-undelivered" (both carry the approver/grant id) and empty for
+// denied/timeout/error.
+func authModeFromApprovedBy(approvedBy string) string {
+	if strings.HasPrefix(approvedBy, "grant:") {
+		return approvedBy
+	}
+	if approvedBy != "" {
+		return "human"
+	}
+	return ""
 }
 
 type signResponseSig struct {
@@ -375,7 +406,11 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 // response/audit pair is intentionally produced inside one function so
 // the two cannot drift.
 func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result) error {
-	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
+	// AuthMode (F4) is derived from the SAME helper the audit uses, keyed on
+	// ApprovedBy, so the socket response and the audit row never disagree on
+	// how a write was authorised. It is empty for denied/timeout, "human" for
+	// a real-time tap, and "grant:<id>" for a standing-grant auto-sign.
+	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authModeFromApprovedBy(result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
 
 	if result.Status == backend.StatusApproved {
 		// Two paths:
@@ -915,6 +950,10 @@ func (d *Daemon) audit(req signRequest, status, approvedBy string) error {
 		Commands:   cmds,
 		Servers:    servers,
 		ApprovedBy: approvedBy,
+		// First-class auth_mode (F4-B4): same helper as the socket response so
+		// the authoritative log carries both WHO (approved_by) and HOW
+		// (auth_mode) and the two never drift.
+		AuthMode: authModeFromApprovedBy(approvedBy),
 	}
 	if err := d.Audit.Write(ev); err != nil {
 		return fmt.Errorf("audit: %w", err)

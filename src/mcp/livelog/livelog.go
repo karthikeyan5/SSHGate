@@ -41,8 +41,18 @@ type Entry struct {
 	Classification string `json:"classification"`
 	// ExitCode is the command's exit code.
 	ExitCode int `json:"exit_code"`
-	// Approved is true when the command was a write that a human approved.
+	// Approved is true when the command was a write the signer approved —
+	// by EITHER a real-time human Telegram tap OR a standing-grant
+	// auto-sign. It does NOT by itself mean a human approved this specific
+	// write (a live grant auto-signs without a tap), so it cannot
+	// distinguish the two. Use AuthMode for that human-vs-grant distinction.
 	Approved bool `json:"approved"`
+	// AuthMode records HOW an approved write was authorised, decoupled from
+	// the Approved bool: "human" = a real-time Telegram approval; "grant:<id>"
+	// = a standing-grant auto-sign (no tap); empty for reads and any
+	// non-approved outcome. omitempty keeps a read entry's wire shape
+	// unchanged.
+	AuthMode string `json:"auth_mode,omitempty"`
 	// Revealed is true when the command ran as a SECRET-REVEAL (its output
 	// bypassed the gate redactor). For a revealed entry the caller MUST leave
 	// Stdout/Stderr empty: the live log records THAT a reveal ran (command,

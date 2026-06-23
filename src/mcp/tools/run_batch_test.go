@@ -22,16 +22,17 @@ type batchSign struct {
 	gotReqID string
 	gotCmds  []signpkg.CmdReq
 	signed   []signpkg.Signed
+	authMode string
 	err      error
 }
 
-func (f *batchSign) Sign(_ context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error) {
+func (f *batchSign) Sign(_ context.Context, requestID string, cmds []signpkg.CmdReq) (signpkg.SignResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.gotReqID = requestID
 	f.gotCmds = append([]signpkg.CmdReq(nil), cmds...)
-	return f.signed, f.err
+	return signpkg.SignResult{Signed: f.signed, AuthMode: f.authMode}, f.err
 }
 
 // RequestGrant / RevokeGrant satisfy SignClient; batch tests never use

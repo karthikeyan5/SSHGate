@@ -25,6 +25,7 @@ type fakeSign struct {
 	gotReqID   string
 	gotCmds    []signpkg.CmdReq
 	signed     []signpkg.Signed
+	authMode   string
 	err        error
 
 	// RequestGrant capture + canned result.
@@ -52,13 +53,13 @@ type fakeSign struct {
 	listGrantsErr    error
 }
 
-func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error) {
+func (f *fakeSign) Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) (signpkg.SignResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.signCalled = true
 	f.gotReqID = requestID
 	f.gotCmds = cmds
-	return f.signed, f.err
+	return signpkg.SignResult{Signed: f.signed, AuthMode: f.authMode}, f.err
 }
 
 func (f *fakeSign) RequestGrant(ctx context.Context, requestID, alias, scope string, commands []string, durationSec int64) (string, int64, error) {
@@ -237,6 +238,43 @@ func TestRun_WritePassesRegistryFingerprint(t *testing.T) {
 	}
 	if sign.gotCmds[0].Host != wantFP {
 		t.Errorf("sign CmdReq.Host = %q; want %q (must come from the registry entry, not the agent)", sign.gotCmds[0].Host, wantFP)
+	}
+}
+
+// TestRun_WritePropagatesAuthMode pins F4: the auth_mode the signer returns
+// on the sign response (here "grant:g_1") propagates onto RunOutput.AuthMode,
+// and a READ carries an empty AuthMode (no sign call, nothing to authorise).
+func TestRun_WritePropagatesAuthMode(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now()})
+	payload := sigwire.SigPayload{Cmd: "rm /tmp/x", TS: 1, Exp: 60, Nonce: "abc"}
+	wire, err := sigwire.EncodeSigned([]byte("0123456789012345678901234567890123456789012345678901234567890123"), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign := &fakeSign{
+		signed:   []signpkg.Signed{{Cmd: "rm /tmp/x", Sig: wire}},
+		authMode: "grant:g_1",
+	}
+	ssh := &fakeSSH{stdout: []byte("ok\n")}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	// Write → auth_mode propagates.
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	if err != nil {
+		t.Fatalf("Run write: %v", err)
+	}
+	if out.AuthMode != "grant:g_1" {
+		t.Errorf("write RunOutput.AuthMode = %q; want grant:g_1", out.AuthMode)
+	}
+
+	// Read → empty auth_mode (no sign request).
+	readOut, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "df -h"})
+	if err != nil {
+		t.Fatalf("Run read: %v", err)
+	}
+	if readOut.AuthMode != "" {
+		t.Errorf("read RunOutput.AuthMode = %q; want \"\"", readOut.AuthMode)
 	}
 }
 

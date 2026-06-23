@@ -29,8 +29,9 @@ func TestMain(m *testing.M) {
 
 // fakeSign returns canned signatures.
 type fakeSign struct {
-	signed []signpkg.Signed
-	err    error
+	signed   []signpkg.Signed
+	authMode string
+	err      error
 
 	grantID         string
 	grantExpiryUnix int64
@@ -41,8 +42,8 @@ type fakeSign struct {
 	listGrantsErr    error
 }
 
-func (f *fakeSign) Sign(_ context.Context, _ string, _ []signpkg.CmdReq) ([]signpkg.Signed, error) {
-	return f.signed, f.err
+func (f *fakeSign) Sign(_ context.Context, _ string, _ []signpkg.CmdReq) (signpkg.SignResult, error) {
+	return signpkg.SignResult{Signed: f.signed, AuthMode: f.authMode}, f.err
 }
 
 // RequestGrant / RevokeGrant satisfy SignClient. The grant* fields let a

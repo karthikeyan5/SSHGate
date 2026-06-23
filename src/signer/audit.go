@@ -23,6 +23,13 @@ import (
 // backend can provide one (Telegram populates it with the user's first
 // name). Empty when the backend doesn't track identity (stub) or when
 // the outcome is non-approved.
+//
+// AuthMode records HOW the request was authorised, decoupled from the
+// approved_by prefix so the log carries both WHO ("approved_by") and HOW
+// ("auth_mode"): "human" = a real-time human approval; "grant:<id>" = a
+// standing-grant auto-sign; empty for a denied/timeout/error/read where
+// nothing was authorised. It is set via authModeFromApprovedBy — the SAME
+// helper the socket response uses — so the audit and the wire never drift.
 type AuditEvent struct {
 	TS         time.Time `json:"ts"`
 	RequestID  string    `json:"request_id"`
@@ -30,6 +37,7 @@ type AuditEvent struct {
 	Commands   []string  `json:"commands"`
 	Servers    []string  `json:"servers"`
 	ApprovedBy string    `json:"approved_by,omitempty"`
+	AuthMode   string    `json:"auth_mode,omitempty"`
 }
 
 // AuditLog is an append-only JSON-Lines file with fsync per record.

@@ -85,7 +85,7 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 	// per-server host-key binding on it too — bind it to this server's
 	// registry fingerprint (read in code, never from the agent) or the gate
 	// rejects the revoke with ErrHostMismatch.
-	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{
+	res, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{
 		Server: in.Alias,
 		Cmd:    "SSHGATE_REVOKE",
 		TTLSec: RevokeTTLSec,
@@ -94,10 +94,10 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 	if err != nil {
 		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: sign revoke: %w", err)
 	}
-	if len(signed) != 1 {
-		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: expected 1 signature; got %d", len(signed))
+	if len(res.Signed) != 1 {
+		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: expected 1 signature; got %d", len(res.Signed))
 	}
-	wireCmd := signed[0].Sig + " SSHGATE_REVOKE"
+	wireCmd := res.Signed[0].Sig + " SSHGATE_REVOKE"
 
 	stdout, stderr, exit, err := r.SSH.Run(ctx, entry.Host, entry.User, entry.Port, wireCmd)
 	if err != nil {

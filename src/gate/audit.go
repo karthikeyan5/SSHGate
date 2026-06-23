@@ -185,6 +185,13 @@ type AuditRecord struct {
 	//   "unsigned" — an unsigned read (Tier-1 or signed-server read path).
 	//   "denied"   — the gate refused the command (see ExitCode for why:
 	//                77 = missing sig / read-only, 65 = bad/expired sig).
+	//
+	// NOTE (F4): the gate cannot and MUST NOT distinguish a standing-grant
+	// auto-sign from a real-time human Telegram tap — both arrive as a
+	// byte-identical "signed" signature by design (the gate is stateless and
+	// never learns grants exist). The human-vs-grant "auth_mode" lives only in
+	// the signer audit (src/signer/audit.go) and the MCP live-log
+	// (src/mcp/livelog), never here.
 	ApprovalStatus string `json:"approval_status"`
 	// ExitCode is the gate's exit code for the command (the child's code,
 	// or the deny code on a rejection).
