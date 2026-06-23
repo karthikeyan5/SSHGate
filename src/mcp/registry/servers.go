@@ -1,9 +1,11 @@
 package registry
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +14,14 @@ import (
 	"sync"
 	"time"
 )
+
+// warnw is the sink for non-fatal warnings (the deprecated-wrapper notice in
+// Load and the best-effort reload-failure notices in reloadIfChanged). It
+// defaults to os.Stderr; tests swap it for a buffer to assert warn-once
+// behaviour. Unexported on purpose. Not safe to swap concurrently with code
+// that writes to it — tests that swap it must not run in parallel with each
+// other or with stderr-capturing tests.
+var warnw io.Writer = os.Stderr
 
 // Entry is the on-disk record for one server alias. AddedAt is
 // persisted in JSON so the audit log can correlate "when was this
@@ -47,14 +57,18 @@ type Servers struct {
 
 	mu   sync.Mutex
 	data map[string]Entry
-	// lastMod / lastSize record the identity of the file as it was last
-	// loaded into data, so reloadIfChanged can detect an out-of-band rewrite
-	// (e.g. a human `sshgate add` in a separate process). loaded reports
-	// whether the file existed at last Load (so an appear/disappear is also a
-	// change). All three are guarded by mu.
-	lastMod  time.Time
-	lastSize int64
-	loaded   bool
+	// lastHash is the sha256 of the file BODY as it was last SEEN by a reload
+	// — recorded whether the subsequent decode succeeded OR failed. Comparing
+	// the current body's hash against it is the change signal: it catches an
+	// equal-size, same-mtime-tick out-of-band edit that a (mtime,size) signal
+	// would miss (a stale Host/Fingerprint is a trust-boundary leak), and it
+	// suppresses re-warning on an unchanged bad version (warn once per distinct
+	// file version). hasHash distinguishes "never observed" from "observed".
+	// filePresent records whether the file existed at the last observation so a
+	// disappear/appear is also treated as a change. All guarded by mu.
+	lastHash    [sha256.Size]byte
+	hasHash     bool
+	filePresent bool
 }
 
 // New opens the registry at path. It performs the permission check
@@ -83,9 +97,7 @@ func (s *Servers) Load() error {
 		s.data = make(map[string]Entry)
 		// File absent: remember that so reloadIfChanged treats a later
 		// "file appeared" as a change worth reloading.
-		s.loaded = false
-		s.lastMod = time.Time{}
-		s.lastSize = 0
+		s.recordHashLocked([sha256.Size]byte{}, false)
 		s.mu.Unlock()
 		return nil
 	}
@@ -99,10 +111,11 @@ func (s *Servers) Load() error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", s.path, err)
 	}
+	bodyHash := sha256.Sum256(body)
 	if len(body) == 0 {
 		s.mu.Lock()
 		s.data = make(map[string]Entry)
-		s.recordIdentityLocked(info)
+		s.recordHashLocked(bodyHash, true)
 		s.mu.Unlock()
 		return nil
 	}
@@ -148,7 +161,7 @@ func (s *Servers) Load() error {
 				// the common fresh-install case. Normalise to an empty
 				// registry and warn; failing here would brick every Tier-1
 				// setup that used the old seed snippet.
-				fmt.Fprintf(os.Stderr, "sshgate: registry %s uses the deprecated wrapped {\"servers\":...} format; treating as empty — convert it to a bare alias→server map (see docs/install-step-by-step.md)\n", s.path)
+				fmt.Fprintf(warnw, "sshgate: registry %s uses the deprecated wrapped {\"servers\":...} format; treating as empty — convert it to a bare alias→server map (see docs/install-step-by-step.md)\n", s.path)
 				loaded = make(map[string]Entry)
 			} else {
 				// Legacy POPULATED wrapper — a bare-map read would silently
@@ -166,61 +179,84 @@ func (s *Servers) Load() error {
 
 	s.mu.Lock()
 	s.data = loaded
-	s.recordIdentityLocked(info)
+	s.recordHashLocked(bodyHash, true)
 	s.mu.Unlock()
 	return nil
 }
 
-// recordIdentityLocked stamps the file's last-loaded identity (mod time +
-// size) from info so reloadIfChanged can detect an out-of-band rewrite. The
-// caller must already hold s.mu.
-func (s *Servers) recordIdentityLocked(info os.FileInfo) {
-	s.loaded = true
-	s.lastMod = info.ModTime()
-	s.lastSize = info.Size()
+// recordHashLocked stamps the identity of the file version most recently SEEN:
+// the sha256 of its body (zero value when the file is absent) and whether it
+// was present. reloadIfChanged compares against this to decide whether to
+// reload. It is recorded whether the decode succeeded OR failed, so an
+// unchanged bad version is not reprocessed/re-warned (warn once per distinct
+// file version). The caller must already hold s.mu.
+func (s *Servers) recordHashLocked(hash [sha256.Size]byte, present bool) {
+	s.lastHash = hash
+	s.hasHash = true
+	s.filePresent = present
 }
 
-// reloadIfChanged re-reads the file if it has changed on disk since the last
-// successful Load — covering a human `sshgate add` running in a separate
-// process, which rewrites servers.json while this MCP is live. It is
-// BEST-EFFORT: a stat error or a Load error leaves the in-memory data
-// untouched (the running MCP keeps serving the last good registry) and is
-// reported to stderr only — never propagated, never panics. Callers (Get/List)
+// reloadIfChanged re-reads the file if its CONTENT has changed on disk since
+// the last version we saw — covering a human `sshgate add` running in a
+// separate process, which rewrites servers.json while this MCP is live. The
+// change signal is a sha256 of the file body, NOT (mtime,size): an out-of-band
+// edit that preserves byte length and lands in the same coarse mtime tick would
+// be missed by (mtime,size) and serve a STALE Host/Fingerprint (a trust-boundary
+// value), whereas a content hash always catches it. The registry is <1KB on a
+// low-frequency interactive path, so read+hash per Get/List is cheap.
+//
+// It is BEST-EFFORT: a stat/read error or a Load error leaves the in-memory
+// data untouched (the running MCP keeps serving the last good registry) and is
+// reported to warnw only — never propagated, never panics. The hash of the body
+// we just SAW is recorded whether Load succeeded or FAILED, so an unchanged bad
+// version (corrupt JSON, perm-loosened file) is not reprocessed and the warning
+// fires once per distinct file version, not on every Get/List. Callers (Get/List)
 // invoke it WITHOUT holding s.mu, because Load acquires s.mu itself.
 //
 // The production writer (persist) uses tmp+rename, so a concurrent stat/read
 // here always sees a complete old-or-new file, never a partial one.
 func (s *Servers) reloadIfChanged() {
-	info, err := os.Stat(s.path)
-
 	s.mu.Lock()
-	hadFile := s.loaded
-	curMod := s.lastMod
-	curSize := s.lastSize
+	hasHash := s.hasHash
+	wasPresent := s.filePresent
+	curHash := s.lastHash
 	s.mu.Unlock()
 
+	body, err := os.ReadFile(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
-		// File disappeared after having been present — reload so the empty
-		// registry is reflected (Load handles ErrNotExist as empty).
-		if hadFile {
+		// File absent. Only a transition present→absent is a change worth
+		// reloading (Load reflects it as an empty registry). If it was already
+		// known absent (same version), do nothing — and don't re-warn.
+		if !hasHash || wasPresent {
 			if lerr := s.Load(); lerr != nil {
-				fmt.Fprintf(os.Stderr, "sshgate: registry %s reload failed (%v); keeping last-known servers\n", s.path, lerr)
+				fmt.Fprintf(warnw, "sshgate: registry %s reload failed (%v); keeping last-known servers\n", s.path, lerr)
 			}
 		}
 		return
 	}
 	if err != nil {
-		// Transient stat error: keep last-known data, do not reload.
-		fmt.Fprintf(os.Stderr, "sshgate: registry %s stat failed (%v); keeping last-known servers\n", s.path, err)
+		// Transient read error (e.g. EACCES on the file itself, no body to
+		// hash): keep last-known data, do not reload. No identity to dedupe on,
+		// so this is not warn-once.
+		fmt.Fprintf(warnw, "sshgate: registry %s read failed (%v); keeping last-known servers\n", s.path, err)
 		return
 	}
 
-	// File present. Reload if it newly appeared or its identity changed.
-	if hadFile && info.ModTime().Equal(curMod) && info.Size() == curSize {
+	// File present. Unchanged content (same hash, still present) → nothing to do.
+	bodyHash := sha256.Sum256(body)
+	if hasHash && wasPresent && bodyHash == curHash {
 		return
 	}
+
+	// New version. Record its hash NOW (before Load) so that even if Load fails
+	// to parse it we don't reprocess/re-warn until the bytes change again. On
+	// Load success Load re-stamps the identical hash (harmless).
+	s.mu.Lock()
+	s.recordHashLocked(bodyHash, true)
+	s.mu.Unlock()
+
 	if lerr := s.Load(); lerr != nil {
-		fmt.Fprintf(os.Stderr, "sshgate: registry %s reload failed (%v); keeping last-known servers\n", s.path, lerr)
+		fmt.Fprintf(warnw, "sshgate: registry %s reload failed (%v); keeping last-known servers\n", s.path, lerr)
 	}
 }
 
