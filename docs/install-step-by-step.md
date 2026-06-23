@@ -157,7 +157,7 @@ strips `src/` and `bin/` from the plugin cache.
 mkdir -p ~/.config/sshgate/ssh && chmod 700 ~/.config/sshgate/ssh
 ssh-keygen -t ed25519 -N '' -C 'sshgate-dedicated' \
     -f ~/.config/sshgate/ssh/sshgate_ed25519
-echo '{"servers":{}}' > ~/.config/sshgate/servers.json
+echo '{}' > ~/.config/sshgate/servers.json
 ```
 
 Confirm the private key is mode 0600:

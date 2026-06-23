@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -97,6 +99,57 @@ func (s *Servers) Load() error {
 	if loaded == nil {
 		loaded = make(map[string]Entry)
 	}
+
+	// Legacy {"servers":...} wrapper detection.
+	//
+	// The registry is a BARE alias→Entry map: top-level JSON keys ARE the
+	// aliases. Two older install snippets, however, seeded the file with a
+	// WRAPPED shape — {"servers":{}} or {"servers":{<real servers>}}. Read as
+	// a bare map that mismatch is silent and dangerous:
+	//   - {"servers":{}} decodes to ONE alias literally named "servers" whose
+	//     {} becomes a zero-value Entry — a PHANTOM server surfaced by
+	//     list_servers/status (empty host, AddedAt 0001-01-01).
+	//   - {"servers":{<real servers>}} decodes the inner object into a single
+	//     Entry (its keys don't match Entry fields) and the real servers are
+	//     SILENTLY DROPPED with no error — the fleet collapses.
+	//
+	// We trigger ONLY on the unambiguous wrapper signature: exactly one key,
+	// it is "servers", and its Entry is the zero value. A REAL server aliased
+	// "servers" has a non-empty Host (provisioning requires one), so it does
+	// not match and loads normally.
+	if len(loaded) == 1 {
+		if e, ok := loaded["servers"]; ok && e == (Entry{}) {
+			// Re-inspect the raw body to split empty-vs-populated wrappers
+			// without re-deciding from the lossy bare-map decode above.
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(body, &top); err != nil {
+				return fmt.Errorf("unmarshal %s: %w", s.path, err)
+			}
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal(top["servers"], &inner); err != nil {
+				return fmt.Errorf("unmarshal %s: %w", s.path, err)
+			}
+			if len(inner) == 0 {
+				// Legacy EMPTY wrapper ({"servers":{}} or {"servers":null}) —
+				// the common fresh-install case. Normalise to an empty
+				// registry and warn; failing here would brick every Tier-1
+				// setup that used the old seed snippet.
+				fmt.Fprintf(os.Stderr, "sshgate: registry %s uses the deprecated wrapped {\"servers\":...} format; treating as empty — convert it to a bare alias→server map (see docs/install-step-by-step.md)\n", s.path)
+				loaded = make(map[string]Entry)
+			} else {
+				// Legacy POPULATED wrapper — a bare-map read would silently
+				// drop these real servers. Refuse to start so the operator
+				// converts the file instead of losing the fleet.
+				sortedKeys := make([]string, 0, len(inner))
+				for k := range inner {
+					sortedKeys = append(sortedKeys, k)
+				}
+				sort.Strings(sortedKeys)
+				return fmt.Errorf("registry %s uses the unsupported wrapped {\"servers\":...} format; %d server(s) (%s) would be silently dropped — convert it to a bare alias→server map (see docs/install-step-by-step.md)", s.path, len(inner), strings.Join(sortedKeys, ", "))
+			}
+		}
+	}
+
 	s.mu.Lock()
 	s.data = loaded
 	s.mu.Unlock()
