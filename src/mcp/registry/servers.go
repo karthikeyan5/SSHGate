@@ -47,6 +47,14 @@ type Servers struct {
 
 	mu   sync.Mutex
 	data map[string]Entry
+	// lastMod / lastSize record the identity of the file as it was last
+	// loaded into data, so reloadIfChanged can detect an out-of-band rewrite
+	// (e.g. a human `sshgate add` in a separate process). loaded reports
+	// whether the file existed at last Load (so an appear/disappear is also a
+	// change). All three are guarded by mu.
+	lastMod  time.Time
+	lastSize int64
+	loaded   bool
 }
 
 // New opens the registry at path. It performs the permission check
@@ -73,6 +81,11 @@ func (s *Servers) Load() error {
 	if errors.Is(err, fs.ErrNotExist) {
 		s.mu.Lock()
 		s.data = make(map[string]Entry)
+		// File absent: remember that so reloadIfChanged treats a later
+		// "file appeared" as a change worth reloading.
+		s.loaded = false
+		s.lastMod = time.Time{}
+		s.lastSize = 0
 		s.mu.Unlock()
 		return nil
 	}
@@ -89,6 +102,7 @@ func (s *Servers) Load() error {
 	if len(body) == 0 {
 		s.mu.Lock()
 		s.data = make(map[string]Entry)
+		s.recordIdentityLocked(info)
 		s.mu.Unlock()
 		return nil
 	}
@@ -152,12 +166,68 @@ func (s *Servers) Load() error {
 
 	s.mu.Lock()
 	s.data = loaded
+	s.recordIdentityLocked(info)
 	s.mu.Unlock()
 	return nil
 }
 
+// recordIdentityLocked stamps the file's last-loaded identity (mod time +
+// size) from info so reloadIfChanged can detect an out-of-band rewrite. The
+// caller must already hold s.mu.
+func (s *Servers) recordIdentityLocked(info os.FileInfo) {
+	s.loaded = true
+	s.lastMod = info.ModTime()
+	s.lastSize = info.Size()
+}
+
+// reloadIfChanged re-reads the file if it has changed on disk since the last
+// successful Load — covering a human `sshgate add` running in a separate
+// process, which rewrites servers.json while this MCP is live. It is
+// BEST-EFFORT: a stat error or a Load error leaves the in-memory data
+// untouched (the running MCP keeps serving the last good registry) and is
+// reported to stderr only — never propagated, never panics. Callers (Get/List)
+// invoke it WITHOUT holding s.mu, because Load acquires s.mu itself.
+//
+// The production writer (persist) uses tmp+rename, so a concurrent stat/read
+// here always sees a complete old-or-new file, never a partial one.
+func (s *Servers) reloadIfChanged() {
+	info, err := os.Stat(s.path)
+
+	s.mu.Lock()
+	hadFile := s.loaded
+	curMod := s.lastMod
+	curSize := s.lastSize
+	s.mu.Unlock()
+
+	if errors.Is(err, fs.ErrNotExist) {
+		// File disappeared after having been present — reload so the empty
+		// registry is reflected (Load handles ErrNotExist as empty).
+		if hadFile {
+			if lerr := s.Load(); lerr != nil {
+				fmt.Fprintf(os.Stderr, "sshgate: registry %s reload failed (%v); keeping last-known servers\n", s.path, lerr)
+			}
+		}
+		return
+	}
+	if err != nil {
+		// Transient stat error: keep last-known data, do not reload.
+		fmt.Fprintf(os.Stderr, "sshgate: registry %s stat failed (%v); keeping last-known servers\n", s.path, err)
+		return
+	}
+
+	// File present. Reload if it newly appeared or its identity changed.
+	if hadFile && info.ModTime().Equal(curMod) && info.Size() == curSize {
+		return
+	}
+	if lerr := s.Load(); lerr != nil {
+		fmt.Fprintf(os.Stderr, "sshgate: registry %s reload failed (%v); keeping last-known servers\n", s.path, lerr)
+	}
+}
+
 // Get returns the entry for alias, or false if it is not registered.
 func (s *Servers) Get(alias string) (Entry, bool) {
+	// Pick up an out-of-band `sshgate add` before reading; best-effort.
+	s.reloadIfChanged()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.data[alias]
@@ -167,6 +237,8 @@ func (s *Servers) Get(alias string) (Entry, bool) {
 // List returns a copy of the registry. Mutating the returned map does
 // not affect the Servers state.
 func (s *Servers) List() map[string]Entry {
+	// Pick up an out-of-band `sshgate add` before reading; best-effort.
+	s.reloadIfChanged()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make(map[string]Entry, len(s.data))
