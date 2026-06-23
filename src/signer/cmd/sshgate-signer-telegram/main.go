@@ -33,6 +33,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -48,6 +49,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/signer"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -208,10 +210,24 @@ func run(args []string) int {
 		return 1
 	}
 
+	// F5 — per-process state for COMMAND-STRING redaction in the signer
+	// audit log. The salt is a fresh random 32 bytes; the ruleset is the
+	// same rules.Combined() the gate scrubs OUTPUT with. Both are computed
+	// ONCE here at startup — the signer is a long-running daemon, so we must
+	// NOT compile the ~1 MB ruleset per request. A crypto/rand failure is
+	// fatal: we will not serve with a predictable salt for HMAC marker keys.
+	var redactSalt [32]byte
+	if _, err := rand.Read(redactSalt[:]); err != nil {
+		logf("redact salt: %v", err)
+		return 1
+	}
+
 	daemon := &signer.Daemon{
-		Key:     priv,
-		Backend: bk,
-		Audit:   audit,
+		Key:         priv,
+		Backend:     bk,
+		Audit:       audit,
+		RedactSalt:  redactSalt,
+		RedactRules: redactrules.Combined(),
 	}
 	// HandlerTimeout bounds the WHOLE connection (request read + approval
 	// wait + response write) under serveOne's single absolute deadline.

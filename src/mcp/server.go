@@ -12,6 +12,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/mcp/livelog"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
+	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
 // isCleanShutdown reports whether err is one of the expected
@@ -118,6 +119,31 @@ type Server struct {
 	Runner  *tools.Runner
 	Logger  *log.Logger
 	LiveLog *livelog.Log
+
+	// RedactSalt + RedactRules scrub a secret embedded in the COMMAND
+	// STRING before it is written to the Tier-6b live log (F5). The salt is
+	// a per-process random 32 bytes generated ONCE at startup; the ruleset
+	// is rules.Combined() compiled ONCE at startup (the MCP is a
+	// long-running daemon — never compile per-command). Both are wired by
+	// main. A zero salt + nil rules is a valid no-op: RedactString
+	// fast-paths nil rules and logs the command verbatim, so a Server built
+	// without them (older tests) still works.
+	RedactSalt  [32]byte
+	RedactRules []redact.Rule
+}
+
+// redactCommand scrubs a command string about to be written to the live
+// log, reusing the server's per-process salt + compiled ruleset. FAIL-OPEN:
+// if RedactString reports an internal error, the raw command is logged
+// rather than the audit line being dropped. A benign command (no secret
+// pattern) and a server with no ruleset wired both return the input
+// unchanged.
+func (s *Server) redactCommand(cmd string) string {
+	red, ok := redact.RedactString(cmd, s.RedactSalt, s.RedactRules)
+	if !ok {
+		return cmd
+	}
+	return red
 }
 
 // Serve runs the MCP server over the provided stdio pipes. It
@@ -243,8 +269,10 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 		stdout, stderr = "", ""
 	}
 	s.LiveLog.Log(livelog.Entry{
-		Server:         in.Alias,
-		Command:        in.Command,
+		Server: in.Alias,
+		// Redact a secret embedded in the command STRING before it lands in
+		// the at-rest live log (F5). Fail-open; benign commands pass through.
+		Command:        s.redactCommand(in.Command),
 		Classification: out.Kind,
 		ExitCode:       out.ExitCode,
 		Approved:       out.Approved,
@@ -292,8 +320,9 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 			stdout, stderr = "", ""
 		}
 		s.LiveLog.Log(livelog.Entry{
-			Server:         out.Server,
-			Command:        r.Command,
+			Server: out.Server,
+			// Redact a secret embedded in the command STRING (F5). Fail-open.
+			Command:        s.redactCommand(r.Command),
 			Classification: r.Kind,
 			ExitCode:       r.ExitCode,
 			// A read inside an approved batch is correctly Approved:false — the

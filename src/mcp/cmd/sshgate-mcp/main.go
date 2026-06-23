@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,6 +40,7 @@ import (
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 const (
@@ -155,7 +157,25 @@ func buildServer(cfgRoot, socketPath string, logger *log.Logger) (*mcp.Server, e
 	// resolution error simply means "no live log."
 	liveLog := buildLiveLog(cfgRoot, logger)
 
-	return &mcp.Server{Runner: runner, Logger: logger, LiveLog: liveLog}, nil
+	// F5 — per-process state for COMMAND-STRING redaction in the live log.
+	// The salt is a fresh random 32 bytes; the ruleset is the same
+	// rules.Combined() the gate scrubs OUTPUT with. Both are computed ONCE
+	// here at startup — the MCP is a long-running daemon, so we must NOT
+	// compile the ~1 MB ruleset per command. A crypto/rand failure is fatal:
+	// we will not serve with a predictable salt for HMAC marker keys.
+	var redactSalt [32]byte
+	if _, err := rand.Read(redactSalt[:]); err != nil {
+		return nil, fmt.Errorf("redact salt: %w", err)
+	}
+	redactRules := redactrules.Combined()
+
+	return &mcp.Server{
+		Runner:      runner,
+		Logger:      logger,
+		LiveLog:     liveLog,
+		RedactSalt:  redactSalt,
+		RedactRules: redactRules,
+	}, nil
 }
 
 // defaultLiveLogCapBytes is the default size cap of the Tier-6b rolling

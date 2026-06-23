@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
@@ -74,6 +75,17 @@ type Daemon struct {
 	// grants" property).
 	grants   map[string]grant
 	grantsMu sync.RWMutex
+
+	// RedactSalt + RedactRules scrub a secret embedded in the COMMAND
+	// STRING before it is recorded in the signer audit log (F5). The salt is
+	// a per-process random 32 bytes generated ONCE at startup; the ruleset
+	// is rules.Combined() compiled ONCE at startup (the signer is a
+	// long-running daemon — never compile per-request). Both are wired by
+	// cmd/main. A zero salt + nil rules is a valid no-op: RedactString
+	// fast-paths nil rules and records the command verbatim, so a Daemon
+	// built without them still works.
+	RedactSalt  [32]byte
+	RedactRules []redact.Rule
 }
 
 // signRequest is the wire-format request sent over the Unix socket.
@@ -883,7 +895,17 @@ func (d *Daemon) audit(req signRequest, status, approvedBy string) error {
 	cmds := make([]string, len(req.Commands))
 	servers := make([]string, len(req.Commands))
 	for i, c := range req.Commands {
-		cmds[i] = c.Cmd
+		// Redact a secret embedded in the command STRING before persisting it
+		// (F5). The audit log carries the full command text of every approval
+		// request; a `printf 'PASSWORD=...'` would otherwise land verbatim.
+		// Fail-OPEN: on an internal redactor error, record the raw command
+		// rather than drop the audit line. Benign commands pass through, and a
+		// Daemon with no ruleset wired (nil) records verbatim too.
+		red, ok := redact.RedactString(c.Cmd, d.RedactSalt, d.RedactRules)
+		if !ok {
+			red = c.Cmd
+		}
+		cmds[i] = red
 		servers[i] = c.Server
 	}
 	ev := AuditEvent{
