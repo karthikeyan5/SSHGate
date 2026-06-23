@@ -76,6 +76,16 @@ unattended build), ask for a **standing grant** instead of N approvals:
 
 Always show the user the exact scope + command set before requesting.
 
+## Secret-reveal — the rare "see a value" escape hatch
+
+Your reads are **redacted by default**. To see ONE secret value raw, call
+`sshgate.run(alias, command, reveal=true, reason="…")` — it bypasses the
+redactor for that single command. It takes its **own distinct approval**, a
+**mandatory** `reason`, is **single-command only** (never in `run_batch`),
+and is **never** auto-signed under a standing grant (every secret-read
+prompts, even mid-grant). The raw value enters your context → transcript, so
+use it sparingly; prefer moving secret-bearing files box-to-box instead.
+
 ## Diagnostics — the free part
 
 For "what's wrong with X" questions, lead with these:
