@@ -21,10 +21,25 @@ const (
 	// MaxSigValidity, which bounds the signed token's lifetime once minted.
 	ApprovalWindow time.Duration = 5 * time.Minute
 
+	// ResponseWriteGrace is the budget RESERVED, out of the connection's
+	// total lifetime, purely for writing the verdict line back to the MCP.
+	// serveOne bounds the approval-WAIT to SignerHandlerTimeout -
+	// ResponseWriteGrace and the daemon resets the connection's write
+	// deadline to now()+ResponseWriteGrace immediately before each response
+	// write. That guarantees a verdict resolving at the very end of the wait
+	// window (a human's last-second DENY) still has a fresh, non-racing
+	// budget to reach the client, instead of racing one shared absolute
+	// deadline to zero (F1: verdict-undelivered). It is carved from the
+	// existing 30s slack between ApprovalWindow and SignerHandlerTimeout, so
+	// no timeout value changes and ApprovalWindow + ResponseWriteGrace still
+	// fits inside SignerHandlerTimeout by construction.
+	ResponseWriteGrace = 5 * time.Second
+
 	// SignerHandlerTimeout bounds the whole signer connection — request
-	// read + ApprovalWindow + response write — under serveOne's single
-	// absolute deadline. It must exceed ApprovalWindow so a tap near the
-	// limit still has deadline left to deliver the signed response.
+	// read + ApprovalWindow + response write — under serveOne's deadlines.
+	// It must exceed ApprovalWindow + ResponseWriteGrace so a tap near the
+	// limit still has both the wait budget to resolve AND the reserved grace
+	// left to deliver the response (see timeouts_test.go's layering check).
 	SignerHandlerTimeout = ApprovalWindow + 30*time.Second
 
 	// ClientSignTimeout is the MCP-side total budget for one sign call

@@ -387,6 +387,60 @@ func TestDaemon_ApprovedButWriteFails_AuditRecordsUndelivered(t *testing.T) {
 	}
 }
 
+// TestDaemon_VerdictWriteFails_AuditRecordsUndelivered is the F1 audit-
+// completeness guard: when the response write fails, the asymmetry must be
+// logged distinctly for EVERY verdict, not just approved. A write-lost DENY
+// recorded as a plain "denied" would hide that the human's NO never reached
+// the agent; it must read "denied-undelivered". Same for timeout.
+func TestDaemon_VerdictWriteFails_AuditRecordsUndelivered(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		reqID      string
+		arm        func(m *backend.MockBackend, reqID string)
+		wantStatus string
+	}{
+		{
+			name:       "denied write-lost",
+			reqID:      "r_deny_und",
+			arm:        func(m *backend.MockBackend, id string) { m.Deny(id) },
+			wantStatus: "denied-undelivered",
+		},
+		{
+			name:       "timeout write-lost",
+			reqID:      "r_to_und",
+			arm:        func(m *backend.MockBackend, id string) { m.Timeout(id) },
+			wantStatus: "timeout-undelivered",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mock := backend.NewMockBackend()
+			d, _, audit, auditPath := newDaemon(t, mock)
+			defer audit.Close()
+			tc.arm(mock, tc.reqID)
+
+			req := `{"kind":"sign","request_id":"` + tc.reqID + `","commands":[{"server":"prod","cmd":"rm -rf /srv","ttl_seconds":60}]}`
+			conn := &failingWriter{in: bytes.NewReader([]byte(req + "\n"))}
+
+			if err := d.HandleSignRequest(context.Background(), conn); err == nil {
+				t.Fatal("expected a write error; got nil")
+			}
+			audit.Close()
+			got := readAudit(t, auditPath)
+			if len(got) != 1 {
+				t.Fatalf("audit rows = %d; want 1: %+v", len(got), got)
+			}
+			if got[0].Status != tc.wantStatus {
+				t.Errorf("audit Status = %q; want %q (a write-lost %s must be logged distinctly, not as a delivered verdict)",
+					got[0].Status, tc.wantStatus, tc.name)
+			}
+		})
+	}
+}
+
 func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
 	t.Parallel()
 	// Simulates a HostedServerBackend that returned pre-signed wire

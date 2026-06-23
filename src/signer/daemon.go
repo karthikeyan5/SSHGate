@@ -361,17 +361,16 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 	}
 
 	if err := writeJSONLine(conn, resp); err != nil {
-		// Audit-on-write-failure: the daemon signed and decided
-		// "approved" but the MCP never received the signatures, so
-		// from the operator's perspective the action was not
-		// delivered. Record this asymmetry explicitly rather than
-		// folding it into "approved" — daemon.md §5.1/§6 treat the
-		// audit log as authoritative; a row that says "approved" must
-		// imply "signatures left the daemon."
-		auditStatus := result.Status.String()
-		if result.Status == backend.StatusApproved {
-			auditStatus = "approved-undelivered"
-		}
+		// Audit-on-write-failure: the daemon decided a verdict but the
+		// MCP never received the response line, so from the operator's
+		// perspective the action was not delivered. Record this asymmetry
+		// explicitly with an "<verdict>-undelivered" status rather than
+		// folding it into the bare verdict — daemon.md §5.1/§6 treat the
+		// audit log as authoritative; a row that says "approved" must imply
+		// "signatures left the daemon", and (F1) the SAME distinction must
+		// hold for denied/timeout so a write-lost DENY is visibly logged as
+		// such, not as an ordinary delivered "denied".
+		auditStatus := undeliveredStatus(result.Status)
 		if auditErr := d.audit(req, auditStatus, result.ApprovedBy); auditErr != nil {
 			// Surface the audit error to operators rather than dropping
 			// it on the floor; the write-response error is the more
@@ -381,6 +380,25 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 		return fmt.Errorf("write response: %w", err)
 	}
 	return d.audit(req, result.Status.String(), result.ApprovedBy)
+}
+
+// undeliveredStatus maps a resolved verdict to its "<verdict>-undelivered"
+// audit status, used when the response write fails after the daemon already
+// decided. Mirrors the original approved-undelivered marker for ALL verdicts
+// (F1) so a write-lost denied/timeout is logged distinctly from a delivered
+// one. An unknown/error status keeps its own string (no -undelivered suffix:
+// there is no decided verdict to strand).
+func undeliveredStatus(s backend.ResultStatus) string {
+	switch s {
+	case backend.StatusApproved:
+		return "approved-undelivered"
+	case backend.StatusDenied:
+		return "denied-undelivered"
+	case backend.StatusTimeout:
+		return "timeout-undelivered"
+	default:
+		return s.String()
+	}
 }
 
 // respondError writes an {status: error} response with the given
@@ -791,7 +809,20 @@ func newGrantID() (string, error) {
 }
 
 // writeJSONLine marshals v and writes it followed by a newline.
+//
+// Immediately before the write it RESETS the connection's write deadline to
+// now + sigwire.ResponseWriteGrace (see setWriteGrace). serveOne bounds the
+// approval WAIT to SignerHandlerTimeout - ResponseWriteGrace, so a verdict
+// that resolves at the wait deadline would otherwise have ~zero budget left
+// to write its response line — the verdict would race the connection to
+// teardown and the MCP would see a bare EOF / i-o-timeout with no sentinel
+// (F1: verdict-undelivered). The reset hands every response write a fresh,
+// non-racing budget regardless of how long the wait took. Centralised here
+// so no verdict/error write site (respond, respondError, the grant/revoke
+// paths) can be missed. It no-ops for non-deadline writers, so test fakes
+// that pass a *bytes.Buffer are unaffected.
 func writeJSONLine(w io.Writer, v any) error {
+	setWriteGrace(w)
 	b, err := jsonMarshal(v)
 	if err != nil {
 		return err
@@ -799,6 +830,17 @@ func writeJSONLine(w io.Writer, v any) error {
 	b = append(b, '\n')
 	_, err = w.Write(b)
 	return err
+}
+
+// setWriteGrace resets w's write deadline to now + sigwire.ResponseWriteGrace
+// when w is a deadline-capable connection. The response helpers take a plain
+// io.Writer (so tests can pass a *bytes.Buffer), hence the type assertion:
+// it applies the fresh write budget to a real *net.Conn and is a no-op for
+// anything that does not expose SetDeadline.
+func setWriteGrace(w io.Writer) {
+	if c, ok := w.(interface{ SetDeadline(time.Time) error }); ok {
+		_ = c.SetDeadline(time.Now().Add(sigwire.ResponseWriteGrace))
+	}
 }
 
 // jsonMarshal is a thin alias kept so the daemon imports encoding/json

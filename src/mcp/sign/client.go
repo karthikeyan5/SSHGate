@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -36,6 +37,18 @@ var ErrUnreachable = errors.New("sign: signer unreachable")
 // from ErrUnreachable so the user gets "log out and back in" guidance
 // instead of "the daemon is dead".
 var ErrSignerPermission = errors.New("sign: signer socket permission denied")
+
+// ErrVerdictUnknown is returned when the request was FULLY WRITTEN but the
+// response read then failed with EOF or a net/deadline timeout while the
+// caller's context was still live. The signer may already have reached a
+// verdict (including a human DENY) that simply did not make it back over the
+// socket — the outcome is INDETERMINATE. It is deliberately distinct from
+// the transport sentinels so the run/run_batch layer can fail SAFE: do NOT
+// auto-retry (a retry could re-attempt a write a human denied); surface the
+// audit/Telegram thread to the human instead. Contrast a genuine
+// malformed/partial reply or an unreachable daemon, which stay their own
+// (retryable-or-diagnosable) errors.
+var ErrVerdictUnknown = errors.New("sign: verdict undelivered (signer decided but the response did not arrive)")
 
 // Client is the signer socket client. SocketPath is the absolute
 // path to the Unix socket; Timeout is the total per-request budget
@@ -192,6 +205,16 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("sign: %w", ctxErr)
 		}
+		// The request was fully written above; a CLEAN EOF (no bytes) or a
+		// net/deadline timeout here means the daemon may have decided a
+		// verdict (incl. a human DENY) that never reached us — the outcome
+		// is INDETERMINATE. Return ErrVerdictUnknown so the run/run_batch
+		// layer fails SAFE and does NOT auto-retry. A PARTIAL line (some
+		// bytes arrived then EOF) is a genuine malformed reply, not a lost
+		// verdict, so it stays the generic read-response error below.
+		if isVerdictLost(err, len(line)) {
+			return nil, fmt.Errorf("%w: %v", ErrVerdictUnknown, err)
+		}
 		return nil, fmt.Errorf("sign: read response: %w", err)
 	}
 
@@ -298,6 +321,29 @@ func isPermErrno(err error) bool {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		return errno == syscall.EACCES || errno == syscall.EPERM
+	}
+	return false
+}
+
+// isVerdictLost reports whether a read error that occurred AFTER the request
+// was fully written means the verdict is indeterminate (signer decided but
+// the response did not arrive). nRead is how many bytes ReadBytes returned
+// before the error. True for a CLEAN EOF (nRead==0 — the peer closed with no
+// reply at all), a net timeout (the client's own read deadline fired while
+// the daemon was wedged), or os.ErrDeadlineExceeded. A PARTIAL line
+// (nRead>0 with EOF) is a genuine malformed/truncated reply, not a lost
+// verdict — bytes DID come back — so it stays the generic read-response wrap.
+// Likewise any other read error (e.g. connection reset) is not verdict-lost.
+func isVerdictLost(err error, nRead int) bool {
+	if errors.Is(err, io.EOF) {
+		return nRead == 0
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
 	}
 	return false
 }

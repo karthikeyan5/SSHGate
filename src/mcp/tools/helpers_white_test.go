@@ -185,8 +185,10 @@ func TestClassifySignErr(t *testing.T) {
 		{"timeout", signpkg.ErrTimeout, "timeout"},
 		{"permission", signpkg.ErrSignerPermission, "permission"},
 		{"unreachable", signpkg.ErrUnreachable, "unreachable"},
+		{"verdict_unknown", signpkg.ErrVerdictUnknown, "verdict_unknown"},
 		{"wrapped denied still maps", fmtWrap(signpkg.ErrDenied), "denied"},
 		{"wrapped unreachable still maps", fmtWrap(signpkg.ErrUnreachable), "unreachable"},
+		{"wrapped verdict_unknown still maps", fmtWrap(signpkg.ErrVerdictUnknown), "verdict_unknown"},
 		{"arbitrary error falls through", errors.New("boom"), "error"},
 	}
 	for _, c := range cases {

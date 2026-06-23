@@ -220,8 +220,8 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 }
 
 // classifySignErr maps a sign-layer error to one of {"denied",
-// "timeout", "permission", "unreachable", "error"} for the structured
-// output.
+// "timeout", "permission", "unreachable", "verdict_unknown", "error"} for
+// the structured output.
 func classifySignErr(err error) string {
 	switch {
 	case errors.Is(err, signpkg.ErrDenied):
@@ -232,6 +232,11 @@ func classifySignErr(err error) string {
 		return "permission"
 	case errors.Is(err, signpkg.ErrUnreachable):
 		return "unreachable"
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		// FAIL-SAFE token: the signer decided but the response was lost.
+		// Distinct from the generic "error" bucket so the agent does NOT
+		// treat it as a retryable transport blip (a human may have denied).
+		return "verdict_unknown"
 	default:
 		return "error"
 	}
@@ -244,6 +249,11 @@ func classifySignErr(err error) string {
 // model gets the same guidance regardless of which tool was called.
 func (r *Runner) classifySignErrReason(err error) string {
 	switch {
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		// FAIL-SAFE: keep the machine-readable token AND spell out the
+		// do-not-retry guidance so the agent treats a lost verdict as a
+		// possible human DENY, not a retryable error.
+		return "verdict_unknown: the signer reached a decision but the response did not arrive — a human may have DENIED this. Do NOT auto-retry. Check sshgate.status and the Telegram approval thread before resubmitting."
 	case errors.Is(err, signpkg.ErrSignerPermission):
 		return fmt.Sprintf(
 			"signer socket %s is present but not accessible (permission denied) — your shell/session is not yet in the sshgatesigner group. Log out and back in, then relaunch Claude Code, before writes will work.",
@@ -274,4 +284,3 @@ func kindLabel(k classify.Kind) string {
 		return "unknown"
 	}
 }
-

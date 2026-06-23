@@ -233,6 +233,15 @@ func (c *Client) roundtrip(ctx context.Context, requestID string, body any, labe
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("%s: %w", label, ctxErr)
 		}
+		// The request was fully written above; a clean EOF or net/deadline
+		// timeout means the daemon may have decided a verdict (incl. a human
+		// DENY of the grant) that never reached us — INDETERMINATE. Return
+		// ErrVerdictUnknown so the caller fails SAFE rather than re-requesting
+		// a grant a human may have denied. Mirrors Sign's read path; a
+		// partial/malformed line stays the generic read-response error.
+		if isVerdictLost(err, len(line)) {
+			return nil, fmt.Errorf("%w: %v", ErrVerdictUnknown, err)
+		}
 		return nil, fmt.Errorf("%s: read response: %w", label, err)
 	}
 	return line, nil

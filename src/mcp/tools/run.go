@@ -301,6 +301,15 @@ func readOnlyWriteErr(alias string) error {
 // present-but-dead daemon.
 func (r *Runner) remediateSignErr(err error) error {
 	switch {
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		// FAIL-SAFE: the signer reached a decision but its response never
+		// arrived (the connection dropped/timed out after the request was
+		// sent). A human may have DENIED this write — auto-retrying could
+		// re-attempt something a human explicitly refused. Tell the agent to
+		// STOP and verify out-of-band before resubmitting. Sentinel preserved.
+		return fmt.Errorf(
+			"tools: the signer reached a decision but the response did not arrive — a human may have DENIED this write. Do NOT auto-retry. Check sshgate.status and the Telegram approval thread to confirm the verdict before resubmitting: %w",
+			err)
 	case errors.Is(err, signpkg.ErrSignerPermission):
 		return fmt.Errorf(
 			"tools: signer socket %s is present but not accessible (permission denied) — your shell/session is not yet in the sshgatesigner group. Log out and back in, then relaunch Claude Code, before writes will work: %w",

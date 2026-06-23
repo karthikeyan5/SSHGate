@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // RequestHandler is the per-connection callback the Server invokes once
@@ -173,11 +175,29 @@ func (s *Server) serveOne(ctx context.Context, conn net.Conn, timeout time.Durat
 		}
 	}()
 
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+	// Split the connection's lifetime into a WAIT budget and a reserved
+	// write grace. The initial connection deadline AND connCtx (which the
+	// backend waits on) are bounded by the wait budget = timeout -
+	// ResponseWriteGrace, so the verdict resolves with the grace still
+	// unspent. The daemon then resets the write deadline to now + grace
+	// immediately before writing each response (see daemon.go setWriteGrace),
+	// guaranteeing a verdict that resolves at the wait deadline still has a
+	// fresh, non-racing budget to reach the client (F1: verdict-undelivered).
+	// Max connection lifetime stays <= timeout (= SignerHandlerTimeout), so
+	// ClientSignTimeout still dominates the race.
+	//
+	// Guard: if the configured timeout is <= the grace (only possible with a
+	// deliberately tiny test/stub HandlerTimeout), fall back to the full
+	// timeout as the wait budget rather than a non-positive deadline.
+	waitBudget := timeout - sigwire.ResponseWriteGrace
+	if waitBudget <= 0 {
+		waitBudget = timeout
+	}
+	if err := conn.SetDeadline(time.Now().Add(waitBudget)); err != nil {
 		fmt.Fprintf(os.Stderr, "signer: set deadline: %v\n", err)
 		return
 	}
-	connCtx, cancel := context.WithTimeout(ctx, timeout)
+	connCtx, cancel := context.WithTimeout(ctx, waitBudget)
 	defer cancel()
 
 	if err := s.Handler.HandleSignRequest(connCtx, conn); err != nil {
