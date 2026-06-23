@@ -310,7 +310,7 @@ If the file is empty (a fresh `touch` left it 0 bytes), write the
 empty-registry JSON skeleton:
 
 ```bash
-test -s "${HOME}/.config/sshgate/servers.json" || echo '{"servers":{}}' > "${HOME}/.config/sshgate/servers.json"
+test -s "${HOME}/.config/sshgate/servers.json" || echo '{}' > "${HOME}/.config/sshgate/servers.json"
 ```
 
 ### T1.5 — Summarise
