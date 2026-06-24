@@ -16,6 +16,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -59,6 +60,24 @@ type TelegramBackend struct {
 	// call. Defaults to 5s if zero. Independent of reqTimeout.
 	ExplainerTimeout time.Duration
 
+	// RedactSalt + RedactRules scrub a secret embedded in the COMMAND STRING
+	// before it is rendered into the approval/grant-approval MESSAGE text
+	// posted to Telegram (F5, the 4th sink). ONLY the matched secret is
+	// replaced by a per-session marker — the command SHAPE stays visible, so
+	// the human still sees WHAT runs (and that a secret is present), just not
+	// the literal secret, and the secret never reaches Telegram's servers.
+	//
+	// This is DISPLAY-ONLY: the command that flows through signing/execution
+	// is the RAW request command, never the redacted display copy. The salt is
+	// a per-process random 32 bytes and the ruleset is rules.Combined(), both
+	// generated ONCE at startup and shared with the signer Daemon (cmd/main
+	// wires the SAME salt + already-compiled slice — never compile per-message).
+	// A zero salt + nil rules is a valid no-op: RedactString fast-paths nil
+	// rules and renders the command verbatim, so a backend built without them
+	// (any test/stub) still works.
+	RedactSalt  [32]byte
+	RedactRules []redact.Rule
+
 	// Telegram client. Constructed in NewTelegramBackend (which calls
 	// GetMe to fail fast on a bad token); shared by Run + Request.
 	bot *tgbotapi.BotAPI
@@ -86,9 +105,9 @@ type TelegramBackend struct {
 type pendingState struct {
 	ch        chan Result
 	once      sync.Once
-	chatID    int64       // DM chat where the request message was posted
-	messageID int         // for editing the message on resolution
-	stopTimer func()      // tears down the timer + ctx-watcher goroutine
+	chatID    int64  // DM chat where the request message was posted
+	messageID int    // for editing the message on resolution
+	stopTimer func() // tears down the timer + ctx-watcher goroutine
 }
 
 // TelegramOptions configures a TelegramBackend.
@@ -490,7 +509,7 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 	}
 
 	explanations, explainErr := t.runExplainer(ctx, req.Commands)
-	text := formatApprovalMessage(req, t.reqTimeout, explanations, explainErr)
+	text := formatApprovalMessage(req, t.reqTimeout, explanations, explainErr, t.RedactSalt, t.RedactRules)
 	msg := tgbotapi.NewMessage(chatID, text)
 	// The approve button label makes a SECRET-REVEAL unmistakable: a normal
 	// write reads "✓ Approve all"; a reveal reads "✓ Approve SECRET-REVEAL" so
@@ -575,7 +594,7 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalReq
 		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
 	}
 
-	text := formatGrantApprovalMessage(req, t.reqTimeout)
+	text := formatGrantApprovalMessage(req, t.reqTimeout, t.RedactSalt, t.RedactRules)
 	msg := tgbotapi.NewMessage(chatID, text)
 	// A standing grant gets its own unmistakable approve label so the
 	// operator cannot tap through on muscle memory. Callback data is the
@@ -793,6 +812,22 @@ func sanitiseExplainerErr(err error) string {
 	return msg
 }
 
+// redactForDisplay scrubs a secret embedded in a command STRING before it is
+// rendered into the approval/grant message text (F5, 4th sink). It replaces
+// ONLY the matched secret substring with a per-session marker, leaving the
+// command structure visible. Fail-OPEN: on an internal redactor error it
+// returns the RAW command (consistent with the three at-rest F5 sinks — a
+// visible command is better than a dropped/garbled approval prompt). A nil
+// ruleset fast-paths to the raw command via RedactString. This is purely the
+// DISPLAY copy — the caller's request command is never mutated.
+func redactForDisplay(cmd string, salt [32]byte, rules []redact.Rule) string {
+	red, ok := redact.RedactString(cmd, salt, rules)
+	if !ok {
+		return cmd
+	}
+	return red
+}
+
 // formatApprovalMessage renders the message body per spec
 // §"Approval message shape." We pick plain text (no Markdown/HTML
 // parse-mode) because commands can contain '*', '_', '`', etc., that
@@ -803,7 +838,12 @@ func sanitiseExplainerErr(err error) string {
 // render "→ (no explanation)". When explainErr is non-nil we fall
 // back to commands-only and append a single "(no explanations: …)"
 // footer line.
-func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanations []string, explainErr error) string {
+//
+// Each command STRING is redacted secret-only (F5) before rendering: the
+// matched secret is replaced by a per-session marker, the command shape stays
+// visible. This is display-only — req.Commands is read, never mutated, so the
+// raw command still flows through signing/execution.
+func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanations []string, explainErr error, salt [32]byte, rules []redact.Rule) string {
 	var b strings.Builder
 	server := ""
 	if len(req.Commands) > 0 {
@@ -845,7 +885,9 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 
 	renderExplanations := explainErr == nil && len(explanations) == len(req.Commands)
 	for i, c := range req.Commands {
-		fmt.Fprintf(&b, "%d. %s\n", i+1, c.Cmd)
+		// Redact the secret in the DISPLAY copy only; c.Cmd (and thus the
+		// signed/executed command) is untouched.
+		fmt.Fprintf(&b, "%d. %s\n", i+1, redactForDisplay(c.Cmd, salt, rules))
 		if renderExplanations {
 			line := explanations[i]
 			if line == "" {
@@ -876,7 +918,13 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 // (the signer records the authoritative expiry off its own injected
 // clock); a few-ms skew between this render and the stored expiry is
 // irrelevant.
-func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration) string {
+//
+// Each scoped command STRING is redacted secret-only (F5) before rendering,
+// exactly like formatApprovalMessage: the matched secret is replaced by a
+// per-session marker, the command shape stays visible, and req.Commands is
+// read but never mutated (the grant is stored from the RAW command list, not
+// this display copy).
+func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration, salt [32]byte, rules []redact.Rule) string {
 	var b strings.Builder
 	b.WriteString("⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.\n\n")
 	fmt.Fprintf(&b, "🟠 SSHGate STANDING GRANT — %s\n\n", req.Alias)
@@ -886,7 +934,9 @@ func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration)
 	case "commands":
 		b.WriteString("Scope: ONLY these exact commands:\n")
 		for i, c := range req.Commands {
-			fmt.Fprintf(&b, "%d. %s\n", i+1, c)
+			// Redact the secret in the DISPLAY copy only; the grant is stored
+			// from the RAW req.Commands, so the scoped command is untouched.
+			fmt.Fprintf(&b, "%d. %s\n", i+1, redactForDisplay(c, salt, rules))
 		}
 	default:
 		fmt.Fprintf(&b, "Scope: %s\n", req.Scope)

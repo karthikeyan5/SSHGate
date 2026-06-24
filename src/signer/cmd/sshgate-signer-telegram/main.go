@@ -49,6 +49,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/signer"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
@@ -204,21 +205,24 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	bk, err := buildBackend(ctx, cfg.Backend)
-	if err != nil {
-		logf("build backend: %v", err)
-		return 1
-	}
-
-	// F5 — per-process state for COMMAND-STRING redaction in the signer
-	// audit log. The salt is a fresh random 32 bytes; the ruleset is the
-	// same rules.Combined() the gate scrubs OUTPUT with. Both are computed
-	// ONCE here at startup — the signer is a long-running daemon, so we must
-	// NOT compile the ~1 MB ruleset per request. A crypto/rand failure is
-	// fatal: we will not serve with a predictable salt for HMAC marker keys.
+	// F5 — per-process state for COMMAND-STRING redaction. The salt is a fresh
+	// random 32 bytes; the ruleset is the same rules.Combined() the gate scrubs
+	// OUTPUT with. Both are computed ONCE here at startup — the signer is a
+	// long-running daemon, so we must NOT compile the ~1 MB ruleset per request.
+	// A crypto/rand failure is fatal: we will not serve with a predictable salt
+	// for HMAC marker keys. The SAME salt + already-compiled slice are reused by
+	// the Daemon (signer audit log) AND the Telegram backend (the approval/grant
+	// MESSAGE text, the 4th F5 sink) — one salt, one ruleset, for the process.
 	var redactSalt [32]byte
 	if _, err := rand.Read(redactSalt[:]); err != nil {
 		logf("redact salt: %v", err)
+		return 1
+	}
+	redactRules := redactrules.Combined()
+
+	bk, err := buildBackend(ctx, cfg.Backend, redactSalt, redactRules)
+	if err != nil {
+		logf("build backend: %v", err)
 		return 1
 	}
 
@@ -227,7 +231,7 @@ func run(args []string) int {
 		Backend:     bk,
 		Audit:       audit,
 		RedactSalt:  redactSalt,
-		RedactRules: redactrules.Combined(),
+		RedactRules: redactRules,
 	}
 	// HandlerTimeout bounds the WHOLE connection (request read + approval
 	// wait + response write) under serveOne's single absolute deadline.
@@ -296,12 +300,12 @@ func buildBackend(ctx context.Context, bcfg struct {
 	Type     string         `toml:"type"`
 	Telegram telegramConfig `toml:"telegram"`
 	Hosted   hostedConfig   `toml:"hosted"`
-}) (backend.Backend, error) {
+}, redactSalt [32]byte, redactRules []redact.Rule) (backend.Backend, error) {
 	switch bcfg.Type {
 	case "stub":
 		return backend.StubBackend{}, nil
 	case "telegram":
-		return buildTelegramBackend(ctx, bcfg.Telegram)
+		return buildTelegramBackend(ctx, bcfg.Telegram, redactSalt, redactRules)
 	case "hosted":
 		return buildHostedBackend(bcfg.Hosted)
 	default:
@@ -357,7 +361,7 @@ func buildHostedBackend(c hostedConfig) (backend.Backend, error) {
 // buildTelegramBackend reads the bot token, constructs the backend
 // (which calls getMe internally — daemon.md §11 "fail fast at the
 // boundary"), and starts the polling goroutine before returning.
-func buildTelegramBackend(ctx context.Context, c telegramConfig) (backend.Backend, error) {
+func buildTelegramBackend(ctx context.Context, c telegramConfig, redactSalt [32]byte, redactRules []redact.Rule) (backend.Backend, error) {
 	if c.TokenPath == "" {
 		return nil, errors.New(`config missing backend.telegram.token_path`)
 	}
@@ -400,6 +404,12 @@ func buildTelegramBackend(ctx context.Context, c telegramConfig) (backend.Backen
 	if err != nil {
 		return nil, fmt.Errorf("new telegram backend: %w", err)
 	}
+	// F5 (4th sink): wire the SAME per-process salt + already-compiled ruleset
+	// the Daemon uses so the approval/grant MESSAGE text redacts the secret
+	// (secret-only — the command shape stays visible). Display-only: the signed/
+	// executed command is the raw request command, never this display copy.
+	tb.RedactSalt = redactSalt
+	tb.RedactRules = redactRules
 	if apiEndpoint != "" {
 		// apiBase carries no token — safe to log; helps the operator
 		// confirm the bypass endpoint is active.

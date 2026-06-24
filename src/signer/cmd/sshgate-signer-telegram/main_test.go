@@ -163,7 +163,7 @@ func TestBuildBackend_StubAndUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	bk, err := buildBackend(t.Context(), cfg.Backend)
+	bk, err := buildBackend(t.Context(), cfg.Backend, [32]byte{}, nil)
 	if err != nil {
 		t.Fatalf("buildBackend(stub) = %v; want nil", err)
 	}
@@ -172,7 +172,7 @@ func TestBuildBackend_StubAndUnknown(t *testing.T) {
 	}
 
 	cfg.Backend.Type = "nope-not-a-backend"
-	_, err = buildBackend(t.Context(), cfg.Backend)
+	_, err = buildBackend(t.Context(), cfg.Backend, [32]byte{}, nil)
 	if err == nil {
 		t.Fatal("buildBackend(unknown) = nil error; want rejection")
 	}
@@ -250,7 +250,7 @@ func TestBuildTelegram_MissingFields(t *testing.T) {
 			t.Parallel()
 			// ctx is never used because validation fails before any
 			// network call; pass the test context for hygiene.
-			_, err := buildTelegramBackend(t.Context(), tc.cfg)
+			_, err := buildTelegramBackend(t.Context(), tc.cfg, [32]byte{}, nil)
 			if err == nil {
 				t.Fatalf("buildTelegramBackend(%s) = nil; want error naming %q", tc.name, tc.wantSubstr)
 			}
@@ -268,7 +268,7 @@ func TestBuildTelegram_EmptyKeyFile(t *testing.T) {
 		TokenPath:     empty,
 		AllowedUserID: 42,
 		ChatStorePath: filepath.Join(t.TempDir(), "cs.json"),
-	})
+	}, [32]byte{}, nil)
 	if err == nil {
 		t.Fatal("buildTelegramBackend(empty token) = nil; want error before getMe")
 	}

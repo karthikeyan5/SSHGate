@@ -26,7 +26,7 @@ func TestFormatApprovalMessage_RevealBanner(t *testing.T) {
 		},
 		Submitted: time.Now(),
 	}
-	got := formatApprovalMessage(req, 5*time.Second, nil, nil)
+	got := formatApprovalMessage(req, 5*time.Second, nil, nil, [32]byte{}, nil)
 
 	// A reveal-specific banner that names the danger.
 	if !strings.Contains(got, "SECRET-REVEAL") {
@@ -58,7 +58,7 @@ func TestFormatApprovalMessage_NormalWriteNoBanner(t *testing.T) {
 		},
 		Submitted: time.Now(),
 	}
-	got := formatApprovalMessage(req, 5*time.Second, nil, nil)
+	got := formatApprovalMessage(req, 5*time.Second, nil, nil, [32]byte{}, nil)
 	if strings.Contains(got, "SECRET-REVEAL") {
 		t.Errorf("normal write wrongly rendered a reveal banner:\n%s", got)
 	}

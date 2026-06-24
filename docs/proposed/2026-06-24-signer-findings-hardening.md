@@ -106,11 +106,20 @@ The redactor only runs over command OUTPUT. A secret embedded in the command str
 the gate audit, signer audit, MCP live-log, and the Telegram approval message.
 
 Fix: new `redact.RedactString(s, salt, rules) (string, bool)` reusing the streaming Writer + `Combined()`
-ruleset (fail-open: on error return input + `false`). Apply at every command-string sink:
+ruleset (fail-open: on error return input + `false`). Apply at every command-string sink (all four
+shipped):
 - gate `execAndAudit` + `auditNoExec` (reuse the gate's existing salt + lazily-compiled `auditRules`);
 - MCP live-log run + run_batch (new per-process salt + `Combined()` on `Server`);
 - signer `audit()` (new per-process salt + `Combined()` on `Daemon`);
-- Telegram approval message (`formatApprovalMessage`).
+- Telegram approval **and** grant-approval message (`formatApprovalMessage` /
+  `formatGrantApprovalMessage`) — **shipped 2026-06-24, the 4th sink** (Karthi's decision, same date).
+  Redaction is **secret-only**: only the matched secret substring is replaced by the per-session marker,
+  the command SHAPE stays visible, so the human approver still sees WHAT runs (and that a secret is
+  present) — just not the literal secret, which therefore never reaches Telegram's servers. It is
+  **display-only**: the signed/executed command is the RAW request command, untouched (the format
+  functions only read `req.Commands`). The backend reuses the SAME per-process salt + already-compiled
+  `Combined()` slice as the `Daemon` (wired once in `cmd/sshgate-signer-telegram/main.go`); a backend
+  with no ruleset wired (nil) renders verbatim via `RedactString`'s nil-rules fast-path.
 Documented residual gap (NOT closed here): `mysql -p<secret>` (password-as-CLI-flag) has no covering
 rule — a ruleset concern, separate ticket. Pin it with an XFAIL test so it isn't silently assumed
 fixed.
