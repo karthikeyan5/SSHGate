@@ -18,6 +18,14 @@ paths = [
   '''src/redact/.*_test\.go$''',
   '''src/redact/rules/.*\.go$''',
   '''testdata/redact/.*''',
+  # The redactor golden GENERATOR and its Docker integration test hold a corpus
+  # of intentionally-fake, secret-SHAPED strings (Stripe's documented sk_test_
+  # key, fake JWTs, ACME-INTERNAL, xoxb-/ya29.-/key-/deadbeef- placeholders)
+  # whose entire purpose is to prove the redactor scrubs every secret class.
+  # All fake, committed 2026-06-03; path-scoped so a real secret elsewhere is
+  # still caught.
+  '''tools/gen-redact-goldens/.*\.go$''',
+  '''tests/integration/phase5_redact_test\.go$''',
 ]
 # The gate red-team rig (internal/redteam) references the SSH key FIXTURE
 # PATH "sshgate_ed25519.pub" — a filename, not a credential — which trips the
@@ -33,7 +41,17 @@ paths = [
 # redacted / reveal-bypassed / audited. It is a constant, never a real key.
 # Allowlist this exact token (NOT the gate package) so a real AWS key anywhere
 # in the tree is still caught.
+#
+# The "hunter2..." family (the canonical joke password) and the fake
+# "ghp_abcd1234efgh.../ghp_unredacted..." GitHub-PAT-SHAPED tokens are the
+# command-string redaction-sink fixtures added 2026-06-24 (F5/F4): tests across
+# src/gate, src/mcp, src/signer{,/backend} embed these intentionally-fake
+# secrets to prove each at-rest log + the Telegram approval message scrubs them.
+# Value-scoped (NOT package-scoped) so a real secret in any of those files is
+# still caught.
 regexes = [
   '''sshgate_ed25519\.pub''',
   '''AKIA1234567890ABCDEF''',
+  '''hunter2[A-Za-z0-9-]*''',
+  '''ghp_(abcd1234efgh|unredacted)[A-Za-z0-9]*''',
 ]
