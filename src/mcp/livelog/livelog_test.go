@@ -60,6 +60,50 @@ func TestLogAppendsFullOutput(t *testing.T) {
 	}
 }
 
+// TestLogCarriesAuthMode pins the F4 auth_mode field on a live-log entry:
+// a grant-auto-signed write records "grant:<id>", a human-tap write records
+// "human", and a read (empty AuthMode) OMITS the key entirely (omitempty).
+// This is the single human-vs-grant surface on the MCP-side log; the
+// Approved bool can no longer distinguish the two.
+func TestLogCarriesAuthMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit-live.log")
+	lg := New(path, 256*1024)
+
+	// Grant auto-sign → "grant:<id>" verbatim.
+	lg.Log(Entry{Server: "prod", Command: "systemctl restart nginx", Classification: "write", Approved: true, AuthMode: "grant:g_x"})
+	// Human Telegram tap → "human".
+	lg.Log(Entry{Server: "prod", Command: "rm /tmp/x", Classification: "write", Approved: true, AuthMode: "human"})
+	// A read → empty AuthMode → the key must be OMITTED (omitempty).
+	lg.Log(Entry{Server: "prod", Command: "df -h", Classification: "read", AuthMode: ""})
+
+	lines := readLines(t, path)
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3", len(lines))
+	}
+
+	var grantE, humanE, readE map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &grantE); err != nil {
+		t.Fatalf("bad json[0]: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &humanE); err != nil {
+		t.Fatalf("bad json[1]: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &readE); err != nil {
+		t.Fatalf("bad json[2]: %v", err)
+	}
+
+	if grantE["auth_mode"] != "grant:g_x" {
+		t.Errorf("grant entry auth_mode = %v; want grant:g_x", grantE["auth_mode"])
+	}
+	if humanE["auth_mode"] != "human" {
+		t.Errorf("human entry auth_mode = %v; want human", humanE["auth_mode"])
+	}
+	if v, ok := readE["auth_mode"]; ok {
+		t.Errorf("read entry has auth_mode = %v; want the key OMITTED (omitempty)", v)
+	}
+}
+
 func TestLogRollsDroppingOldest(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit-live.log")

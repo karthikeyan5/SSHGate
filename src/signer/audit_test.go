@@ -74,6 +74,92 @@ func TestAuditLog_WriteAndReopenParses(t *testing.T) {
 	}
 }
 
+// TestAuditEvent_AuthModeOnDisk pins F4-B4: the signer's authoritative audit
+// log carries a first-class auth_mode alongside approved_by, so the HOW
+// (human tap vs grant auto-sign) is recorded independently of the WHO. A
+// grant auto-sign event reads auth_mode="grant:<id>" with approved_by the
+// same "grant:<id>"; a human-tap event reads auth_mode="human" with the
+// approver's name. An empty auth_mode (denied/read) OMITS the key (omitempty).
+func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.log")
+	log, err := signer.OpenAuditLog(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	grant := signer.AuditEvent{
+		TS:         time.Now().UTC(),
+		RequestID:  "r_grant",
+		Status:     "approved",
+		Commands:   []string{"systemctl restart nginx"},
+		Servers:    []string{"prod"},
+		ApprovedBy: "grant:g_abc",
+		AuthMode:   "grant:g_abc",
+	}
+	human := signer.AuditEvent{
+		TS:         time.Now().UTC(),
+		RequestID:  "r_human",
+		Status:     "approved",
+		Commands:   []string{"rm /tmp/x"},
+		Servers:    []string{"prod"},
+		ApprovedBy: "karthi",
+		AuthMode:   "human",
+	}
+	denied := signer.AuditEvent{
+		TS:        time.Now().UTC(),
+		RequestID: "r_denied",
+		Status:    "denied",
+		Commands:  []string{"rm -rf /"},
+		Servers:   []string{"prod"},
+		// No ApprovedBy / AuthMode — the key must be omitted.
+	}
+	for _, ev := range []signer.AuditEvent{grant, human, denied} {
+		if err := log.Write(ev); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer f.Close()
+	var raw []map[string]any
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			t.Fatalf("parse %q: %v", sc.Text(), err)
+		}
+		raw = append(raw, m)
+	}
+	if len(raw) != 3 {
+		t.Fatalf("got %d events; want 3", len(raw))
+	}
+	// Grant row: auth_mode carries the grant id AND approved_by is the same.
+	if raw[0]["auth_mode"] != "grant:g_abc" {
+		t.Errorf("grant auth_mode = %v; want grant:g_abc", raw[0]["auth_mode"])
+	}
+	if raw[0]["approved_by"] != "grant:g_abc" {
+		t.Errorf("grant approved_by = %v; want grant:g_abc", raw[0]["approved_by"])
+	}
+	// Human row: auth_mode "human", approved_by the approver name.
+	if raw[1]["auth_mode"] != "human" {
+		t.Errorf("human auth_mode = %v; want human", raw[1]["auth_mode"])
+	}
+	if raw[1]["approved_by"] != "karthi" {
+		t.Errorf("human approved_by = %v; want karthi", raw[1]["approved_by"])
+	}
+	// Denied row: auth_mode omitted (omitempty).
+	if v, ok := raw[2]["auth_mode"]; ok {
+		t.Errorf("denied event has auth_mode = %v; want the key OMITTED", v)
+	}
+}
+
 func TestAuditLog_FileMode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -51,6 +51,12 @@ type RunBatchOutput struct {
 	// a short machine-readable string.
 	Denied bool   `json:"denied,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// AuthMode (F4) reports HOW the batch's writes were authorised — "human"
+	// (one real-time tap) or "grant:<id>" (a standing-grant auto-sign); empty
+	// for a read-only batch or an old signer. The ONE sign request covers all
+	// writes, so a single batch-level value applies to every write result;
+	// reads carry no auth mode.
+	AuthMode string `json:"auth_mode,omitempty"`
 }
 
 // BatchWriteTTLSec is the per-command TTL used when building a bulk
@@ -154,7 +160,7 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 		if err != nil {
 			return RunBatchOutput{}, fmt.Errorf("tools: request id: %w", err)
 		}
-		signed, err := r.Sign.Sign(ctx, reqID, writeCmds)
+		res, err := r.Sign.Sign(ctx, reqID, writeCmds)
 		if err != nil {
 			// Map the sentinel to a short Reason; the tool layer
 			// returns the structured Denied result rather than a Go
@@ -164,12 +170,16 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			out.Denied = true
 			return out, nil
 		}
-		if len(signed) != len(writeCmds) {
-			return RunBatchOutput{}, fmt.Errorf("tools: expected %d signatures; got %d", len(writeCmds), len(signed))
+		if len(res.Signed) != len(writeCmds) {
+			return RunBatchOutput{}, fmt.Errorf("tools: expected %d signatures; got %d", len(writeCmds), len(res.Signed))
 		}
-		for i, s := range signed {
+		for i, s := range res.Signed {
 			signedByIdx[writeIdx[i]] = s.Sig + " " + writeCmds[i].Cmd
 		}
+		// AuthMode (F4) reports HOW the batch's writes were authorised — "human"
+		// (one tap) or "grant:<id>" (auto-signed). It rides up into each write
+		// result's live-log entry. Reads have no auth mode.
+		out.AuthMode = res.AuthMode
 		out.Approved = true
 	}
 
@@ -220,8 +230,8 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 }
 
 // classifySignErr maps a sign-layer error to one of {"denied",
-// "timeout", "permission", "unreachable", "error"} for the structured
-// output.
+// "timeout", "permission", "unreachable", "verdict_unknown", "error"} for
+// the structured output.
 func classifySignErr(err error) string {
 	switch {
 	case errors.Is(err, signpkg.ErrDenied):
@@ -232,6 +242,11 @@ func classifySignErr(err error) string {
 		return "permission"
 	case errors.Is(err, signpkg.ErrUnreachable):
 		return "unreachable"
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		// FAIL-SAFE token: the signer decided but the response was lost.
+		// Distinct from the generic "error" bucket so the agent does NOT
+		// treat it as a retryable transport blip (a human may have denied).
+		return "verdict_unknown"
 	default:
 		return "error"
 	}
@@ -244,6 +259,11 @@ func classifySignErr(err error) string {
 // model gets the same guidance regardless of which tool was called.
 func (r *Runner) classifySignErrReason(err error) string {
 	switch {
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		// FAIL-SAFE: keep the machine-readable token AND spell out the
+		// do-not-retry guidance so the agent treats a lost verdict as a
+		// possible human DENY, not a retryable error.
+		return "verdict_unknown: the signer reached a decision but the response did not arrive — a human may have DENIED this. Do NOT auto-retry. Check sshgate.status and the Telegram approval thread before resubmitting."
 	case errors.Is(err, signpkg.ErrSignerPermission):
 		return fmt.Sprintf(
 			"signer socket %s is present but not accessible (permission denied) — your shell/session is not yet in the sshgatesigner group. Log out and back in, then relaunch Claude Code, before writes will work.",
@@ -274,4 +294,3 @@ func kindLabel(k classify.Kind) string {
 		return "unknown"
 	}
 }
-

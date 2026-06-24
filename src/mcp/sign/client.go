@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -36,6 +37,18 @@ var ErrUnreachable = errors.New("sign: signer unreachable")
 // from ErrUnreachable so the user gets "log out and back in" guidance
 // instead of "the daemon is dead".
 var ErrSignerPermission = errors.New("sign: signer socket permission denied")
+
+// ErrVerdictUnknown is returned when the request was FULLY WRITTEN but the
+// response read then failed with EOF or a net/deadline timeout while the
+// caller's context was still live. The signer may already have reached a
+// verdict (including a human DENY) that simply did not make it back over the
+// socket — the outcome is INDETERMINATE. It is deliberately distinct from
+// the transport sentinels so the run/run_batch layer can fail SAFE: do NOT
+// auto-retry (a retry could re-attempt a write a human denied); surface the
+// audit/Telegram thread to the human instead. Contrast a genuine
+// malformed/partial reply or an unreachable daemon, which stay their own
+// (retryable-or-diagnosable) errors.
+var ErrVerdictUnknown = errors.New("sign: verdict undelivered (signer decided but the response did not arrive)")
 
 // Client is the signer socket client. SocketPath is the absolute
 // path to the Unix socket; Timeout is the total per-request budget
@@ -95,6 +108,11 @@ type signRequest struct {
 	Kind      string           `json:"kind"`
 	RequestID string           `json:"request_id"`
 	Commands  []signRequestCmd `json:"commands"`
+	// ProtoVersion stamps the socket-RPC shape version. It MUST mirror the
+	// daemon's signRequest field exactly and is SET to sigwire.ProtoVersion
+	// on every request. The daemon checks it in its lenient peek before any
+	// strict decode; omitempty keeps a legacy (unset) request byte-identical.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 type signResponseSig struct {
@@ -103,28 +121,46 @@ type signResponseSig struct {
 }
 
 type signResponse struct {
-	RequestID  string            `json:"request_id"`
-	Status     string            `json:"status"`
-	Signatures []signResponseSig `json:"signatures,omitempty"`
-	Error      string            `json:"error,omitempty"`
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+	// AuthMode (F4) mirrors the daemon's signResponse field: "human" for a
+	// real-time Telegram tap, "grant:<id>" for a standing-grant auto-sign,
+	// empty for any non-approved outcome. It rides the gate-INVISIBLE socket
+	// RPC, never the signed payload. Decoded with plain json.Unmarshal (no
+	// DisallowUnknownFields), so an OLD signer that omits the field unmarshals
+	// to "" and is handled as "unknown" rather than erroring (forward-compat).
+	AuthMode     string            `json:"auth_mode,omitempty"`
+	Signatures   []signResponseSig `json:"signatures,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	ProtoVersion int               `json:"proto_version,omitempty"`
 }
 
-// Sign sends a sign request for cmds and returns the signed wire
-// strings on approval, or one of {ErrDenied, ErrTimeout,
-// ErrUnreachable, ErrSignerPermission, fmt.Errorf("...")} on any other
-// outcome.
+// SignResult is the outcome of a successful Sign: the signed wire strings
+// plus the F4 AuthMode marker reporting HOW the request was authorised
+// ("human" | "grant:<id>" | "" for an old signer that omits it). Bundling
+// them in one struct keeps the Sign signature stable as the socket RPC
+// gains gate-invisible metadata.
+type SignResult struct {
+	Signed   []Signed
+	AuthMode string
+}
+
+// Sign sends a sign request for cmds and returns a SignResult (the signed
+// wire strings + the F4 auth-mode marker) on approval, or one of {ErrDenied,
+// ErrTimeout, ErrUnreachable, ErrSignerPermission, fmt.Errorf("...")} on any
+// other outcome (with a zero SignResult).
 //
 // The request body is constructed locally (so the daemon never has
 // to trust the wire-level shape from the MCP).
-func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]Signed, error) {
+func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) (SignResult, error) {
 	if c.SocketPath == "" {
-		return nil, fmt.Errorf("sign: SocketPath is empty")
+		return SignResult{}, fmt.Errorf("sign: SocketPath is empty")
 	}
 	if requestID == "" {
-		return nil, fmt.Errorf("sign: requestID is empty")
+		return SignResult{}, fmt.Errorf("sign: requestID is empty")
 	}
 	if len(cmds) == 0 {
-		return nil, fmt.Errorf("sign: no commands")
+		return SignResult{}, fmt.Errorf("sign: no commands")
 	}
 
 	timeout := c.Timeout
@@ -137,7 +173,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 
 	conn, err := dialWithCtx(dialCtx, c.SocketPath)
 	if err != nil {
-		return nil, classifyDialError(err)
+		return SignResult{}, classifyDialError(err)
 	}
 	defer conn.Close()
 
@@ -161,20 +197,21 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 	}()
 
 	body := signRequest{
-		Kind:      "sign",
-		RequestID: requestID,
-		Commands:  make([]signRequestCmd, len(cmds)),
+		Kind:         "sign",
+		RequestID:    requestID,
+		Commands:     make([]signRequestCmd, len(cmds)),
+		ProtoVersion: sigwire.ProtoVersion,
 	}
 	for i, cmd := range cmds {
 		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host, Reveal: cmd.Reveal, Reason: cmd.Reason}
 	}
 	wire, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("sign: marshal: %w", err)
+		return SignResult{}, fmt.Errorf("sign: marshal: %w", err)
 	}
 	wire = append(wire, '\n')
 	if _, err := conn.Write(wire); err != nil {
-		return nil, fmt.Errorf("sign: write: %w", err)
+		return SignResult{}, fmt.Errorf("sign: write: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
@@ -183,14 +220,24 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 		// If ctx is the root cause, surface it verbatim so callers
 		// can distinguish cancellation from a malformed reply.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("sign: %w", ctxErr)
+			return SignResult{}, fmt.Errorf("sign: %w", ctxErr)
 		}
-		return nil, fmt.Errorf("sign: read response: %w", err)
+		// The request was fully written above; a CLEAN EOF (no bytes) or a
+		// net/deadline timeout here means the daemon may have decided a
+		// verdict (incl. a human DENY) that never reached us — the outcome
+		// is INDETERMINATE. Return ErrVerdictUnknown so the run/run_batch
+		// layer fails SAFE and does NOT auto-retry. A PARTIAL line (some
+		// bytes arrived then EOF) is a genuine malformed reply, not a lost
+		// verdict, so it stays the generic read-response error below.
+		if isVerdictLost(err, len(line)) {
+			return SignResult{}, fmt.Errorf("%w: %v", ErrVerdictUnknown, err)
+		}
+		return SignResult{}, fmt.Errorf("sign: read response: %w", err)
 	}
 
 	var resp signResponse
 	if err := json.Unmarshal(line, &resp); err != nil {
-		return nil, fmt.Errorf("sign: malformed response: %w", err)
+		return SignResult{}, fmt.Errorf("sign: malformed response: %w", err)
 	}
 	// A daemon error response can legitimately carry an EMPTY request_id —
 	// it is set before the daemon has parsed/echoed our id (a malformed
@@ -201,12 +248,12 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 	// concurrency/correlation guarantee is unchanged for that case).
 	if resp.RequestID == "" && resp.Status == "error" {
 		if resp.Error == "" {
-			return nil, fmt.Errorf("sign: daemon reported error (no detail)")
+			return SignResult{}, fmt.Errorf("sign: daemon reported error (no detail)")
 		}
-		return nil, fmt.Errorf("sign: daemon error: %s", resp.Error)
+		return SignResult{}, fmt.Errorf("sign: daemon error: %s", resp.Error)
 	}
 	if resp.RequestID != requestID {
-		return nil, fmt.Errorf("sign: response request_id %q != %q", resp.RequestID, requestID)
+		return SignResult{}, fmt.Errorf("sign: response request_id %q != %q", resp.RequestID, requestID)
 	}
 
 	switch resp.Status {
@@ -215,18 +262,20 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) ([]S
 		for i, s := range resp.Signatures {
 			out[i] = Signed{Cmd: s.Cmd, Sig: s.Sig}
 		}
-		return out, nil
+		// resp.AuthMode is "" for an old signer that omits the field — that is
+		// "unknown", handled gracefully, NOT an error.
+		return SignResult{Signed: out, AuthMode: resp.AuthMode}, nil
 	case "denied":
-		return nil, ErrDenied
+		return SignResult{}, ErrDenied
 	case "timeout":
-		return nil, ErrTimeout
+		return SignResult{}, ErrTimeout
 	case "error":
 		if resp.Error == "" {
-			return nil, fmt.Errorf("sign: daemon reported error (no detail)")
+			return SignResult{}, fmt.Errorf("sign: daemon reported error (no detail)")
 		}
-		return nil, fmt.Errorf("sign: daemon error: %s", resp.Error)
+		return SignResult{}, fmt.Errorf("sign: daemon error: %s", resp.Error)
 	default:
-		return nil, fmt.Errorf("sign: unknown status %q", resp.Status)
+		return SignResult{}, fmt.Errorf("sign: unknown status %q", resp.Status)
 	}
 }
 
@@ -291,6 +340,29 @@ func isPermErrno(err error) bool {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		return errno == syscall.EACCES || errno == syscall.EPERM
+	}
+	return false
+}
+
+// isVerdictLost reports whether a read error that occurred AFTER the request
+// was fully written means the verdict is indeterminate (signer decided but
+// the response did not arrive). nRead is how many bytes ReadBytes returned
+// before the error. True for a CLEAN EOF (nRead==0 — the peer closed with no
+// reply at all), a net timeout (the client's own read deadline fired while
+// the daemon was wedged), or os.ErrDeadlineExceeded. A PARTIAL line
+// (nRead>0 with EOF) is a genuine malformed/truncated reply, not a lost
+// verdict — bytes DID come back — so it stays the generic read-response wrap.
+// Likewise any other read error (e.g. connection reset) is not verdict-lost.
+func isVerdictLost(err error, nRead int) bool {
+	if errors.Is(err, io.EOF) {
+		return nRead == 0
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
 	}
 	return false
 }

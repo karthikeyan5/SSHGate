@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/sigwire"
+	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // MaxGrantDuration is the hard ceiling on a standing grant's lifetime.
@@ -74,6 +76,17 @@ type Daemon struct {
 	// grants" property).
 	grants   map[string]grant
 	grantsMu sync.RWMutex
+
+	// RedactSalt + RedactRules scrub a secret embedded in the COMMAND
+	// STRING before it is recorded in the signer audit log (F5). The salt is
+	// a per-process random 32 bytes generated ONCE at startup; the ruleset
+	// is rules.Combined() compiled ONCE at startup (the signer is a
+	// long-running daemon — never compile per-request). Both are wired by
+	// cmd/main. A zero salt + nil rules is a valid no-op: RedactString
+	// fast-paths nil rules and records the command verbatim, so a Daemon
+	// built without them still works.
+	RedactSalt  [32]byte
+	RedactRules []redact.Rule
 }
 
 // signRequest is the wire-format request sent over the Unix socket.
@@ -81,6 +94,12 @@ type signRequest struct {
 	Kind      string           `json:"kind"`
 	RequestID string           `json:"request_id"`
 	Commands  []signRequestCmd `json:"commands"`
+	// ProtoVersion is the client's sigwire.ProtoVersion. The strict per-kind
+	// decoder must KNOW the field (it uses DisallowUnknownFields), even though
+	// the authoritative version check already happened in the lenient
+	// kindPeek pre-pass. omitempty keeps a legacy (no-version) request's wire
+	// shape byte-identical.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 type signRequestCmd struct {
@@ -109,11 +128,55 @@ type signRequestCmd struct {
 // signResponse is the wire-format response. Status is one of "approved",
 // "denied", "timeout", "error". Signatures is populated only on
 // approved; Error is populated only on error.
+//
+// AuthMode (F4) reports HOW the request was authorised — "human" for a
+// real-time Telegram tap, "grant:<id>" for a standing-grant auto-sign,
+// empty for any non-approved outcome. It rides the gate-INVISIBLE
+// MCP↔signer socket RPC, NOT the signed payload: a grant signature is
+// byte-identical to a human one by design, so the gate neither sees nor
+// could see this. omitempty keeps a legacy (no-auth_mode) response's wire
+// shape byte-identical, and an old signer that omits it unmarshals to "".
 type signResponse struct {
-	RequestID  string          `json:"request_id"`
-	Status     string          `json:"status"`
-	Signatures []signResponseSig `json:"signatures,omitempty"`
-	Error      string          `json:"error,omitempty"`
+	RequestID    string            `json:"request_id"`
+	Status       string            `json:"status"`
+	AuthMode     string            `json:"auth_mode,omitempty"`
+	Signatures   []signResponseSig `json:"signatures,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	ProtoVersion int               `json:"proto_version,omitempty"`
+}
+
+// authMode derives the F4 auth-mode marker. It is the SINGLE source of truth
+// shared by the socket response (respond) and the audit log (audit), so the
+// two can never drift. It is gated on the APPROVAL STATE — NOT on ApprovedBy
+// alone — because the real Telegram backend sets Result.ApprovedBy to the
+// DENIER's name on a DENY too (callbackApprover returns a non-empty
+// "@user"/"id:N" for both approve and deny). Keying on non-emptiness alone
+// (the old behaviour) therefore stamped auth_mode="human" on a real DENY,
+// corrupting the F4 forensics into implying the write was authorised. The mock
+// backend masked this by leaving ApprovedBy empty on deny.
+//
+//   - approved==false → "" (denied / timeout / error / a read — NOTHING was
+//     authorised, regardless of any approver name the backend carries).
+//   - "grant:<id>"    → returned verbatim (a standing-grant auto-sign).
+//   - any other non-empty value → "human" (a real-time tap; the approver name
+//     lives in approved_by, the HOW is just "human").
+//   - approved==true but empty approvedBy → "" (no authoriser recorded).
+//
+// Callers pass approved==true for both "approved" and "approved-undelivered"
+// (both are decided approvals carrying the approver/grant id), so an
+// approved-undelivered still records human/grant; all the non-approved
+// outcomes record "".
+func authMode(approved bool, approvedBy string) string {
+	if !approved {
+		return ""
+	}
+	if strings.HasPrefix(approvedBy, "grant:") {
+		return approvedBy
+	}
+	if approvedBy != "" {
+		return "human"
+	}
+	return ""
 }
 
 type signResponseSig struct {
@@ -121,13 +184,24 @@ type signResponseSig struct {
 	Sig string `json:"sig"`
 }
 
-// kindPeek decodes only the "kind" field of a request line, WITHOUT
-// DisallowUnknownFields, so HandleSignRequest can dispatch to the
-// right typed decoder. The per-kind decoder then re-decodes the same
-// line with DisallowUnknownFields, so an unknown field is still
-// rejected for the kind it belongs to.
+// kindPeek decodes the routing/diagnostic fields of a request line,
+// WITHOUT DisallowUnknownFields, so HandleSignRequest can dispatch to the
+// right typed decoder. The per-kind decoder then re-decodes the same line
+// with DisallowUnknownFields, so an unknown field is still rejected for the
+// kind it belongs to.
+//
+// ProtoVersion and RequestID are read here LENIENTLY on purpose:
+//   - ProtoVersion must be checked BEFORE any strict per-kind decode,
+//     because those decoders use DisallowUnknownFields — a naive strict
+//     check would have an old daemon reject the proto_version field itself
+//     and re-create the build-skew outage this guards against.
+//   - RequestID is pulled out so a malformed-peek / version-mismatch error
+//     can echo a correlatable id instead of "" (closing the empty-id
+//     masking at the source).
 type kindPeek struct {
-	Kind string `json:"kind"`
+	Kind         string `json:"kind"`
+	ProtoVersion int    `json:"proto_version"`
+	RequestID    string `json:"request_id"`
 }
 
 // grantRequest is the wire-format "request_grant" request: a human
@@ -140,16 +214,20 @@ type grantRequest struct {
 	Scope       string   `json:"scope"`
 	Commands    []string `json:"commands,omitempty"`
 	DurationSec int64    `json:"duration_seconds"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 // grantResponse is the wire-format "request_grant" response. On approval
 // GrantID + ExpiryUnix are set; Error is set only on status "error".
 type grantResponse struct {
-	RequestID  string `json:"request_id"`
-	Status     string `json:"status"`
-	GrantID    string `json:"grant_id,omitempty"`
-	ExpiryUnix int64  `json:"expiry_unix,omitempty"`
-	Error      string `json:"error,omitempty"`
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	GrantID      string `json:"grant_id,omitempty"`
+	ExpiryUnix   int64  `json:"expiry_unix,omitempty"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
 // revokeGrantRequest is the wire-format "revoke_grant" request: drop a
@@ -160,13 +238,54 @@ type revokeGrantRequest struct {
 	Kind      string `json:"kind"`
 	RequestID string `json:"request_id"`
 	Alias     string `json:"alias"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
 }
 
 // revokeGrantResponse is the wire-format "revoke_grant" response.
 type revokeGrantResponse struct {
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
+}
+
+// listGrantsRequest is the wire-format "list_grants" request: a READ-ONLY
+// query of the daemon's in-memory live-grant table. It needs no human
+// approval and never reaches the backend (like revoke_grant). Alias is an
+// optional filter (empty = all live grants). It exists so the MCP can
+// re-learn true grant state after a request_grant whose verdict-write was
+// lost (the phantom-live-grant race).
+type listGrantsRequest struct {
+	Kind      string `json:"kind"`
 	RequestID string `json:"request_id"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	Alias     string `json:"alias,omitempty"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
+}
+
+// grantInfo is one live grant reported by list_grants. It echoes the
+// agent's own grant request back (scope/commands) plus the daemon-minted
+// grant_id and the absolute expiry — no key material, no capability.
+type grantInfo struct {
+	Alias      string   `json:"alias"`
+	Scope      string   `json:"scope"`
+	Commands   []string `json:"commands,omitempty"`
+	GrantID    string   `json:"grant_id"`
+	ExpiryUnix int64    `json:"expiry_unix"`
+}
+
+// listGrantsResponse is the wire-format "list_grants" response. Status is
+// "ok" on a successful read or "error" on a malformed request. Grants
+// carries the live (unexpired) grants matching the optional alias filter.
+type listGrantsResponse struct {
+	RequestID    string      `json:"request_id"`
+	Status       string      `json:"status"`
+	Grants       []grantInfo `json:"grants,omitempty"`
+	Error        string      `json:"error,omitempty"`
+	ProtoVersion int         `json:"proto_version,omitempty"`
 }
 
 // HandleSignRequest implements the one-request-per-connection protocol:
@@ -197,14 +316,27 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	// "unknown extra json field" case still fails on the sign path).
 	var peek kindPeek
 	if jerr := json.Unmarshal(line, &peek); jerr != nil {
-		// Malformed: respond with "error", audit with "error".
-		return d.respondError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+		// Malformed: respond with "error", audit with "error". Echo
+		// peek.RequestID (it may have decoded even when another field
+		// didn't) so a correlatable id is returned when available.
+		return d.respondError(conn, peek.RequestID, fmt.Sprintf("malformed request: %v", jerr))
+	}
+	// Protocol-version skew guard. This runs in the LENIENT pre-pass, BEFORE
+	// any strict per-kind decode, so an old daemon's DisallowUnknownFields
+	// can't reject the proto_version field itself and re-create the outage.
+	// proto_version == 0 (absent) ⇒ accept as legacy.
+	if peek.ProtoVersion != 0 && peek.ProtoVersion != sigwire.ProtoVersion {
+		return d.respondError(conn, peek.RequestID, fmt.Sprintf(
+			"proto_version mismatch: client v%d vs daemon v%d — signer and MCP are different builds; rebuild and restart both",
+			peek.ProtoVersion, sigwire.ProtoVersion))
 	}
 	switch peek.Kind {
 	case "request_grant":
 		return d.handleRequestGrant(ctx, conn, line)
 	case "revoke_grant":
 		return d.handleRevokeGrant(conn, line)
+	case "list_grants":
+		return d.handleListGrants(conn, line)
 	case "sign", "":
 		// "" falls through to the sign decoder, which rejects it as an
 		// unsupported kind — preserving the existing error wording.
@@ -287,7 +419,13 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 // response/audit pair is intentionally produced inside one function so
 // the two cannot drift.
 func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result) error {
-	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String()}
+	// AuthMode (F4) is derived from the SAME helper the audit uses, gated on
+	// the APPROVAL STATE (not ApprovedBy alone — the real Telegram backend
+	// carries the denier's name on a DENY too), so the socket response and the
+	// audit row never disagree on how a write was authorised. It is empty for
+	// denied/timeout/error, "human" for a real-time tap, and "grant:<id>" for a
+	// standing-grant auto-sign.
+	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authMode(result.Status == backend.StatusApproved, result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
 
 	if result.Status == backend.StatusApproved {
 		// Two paths:
@@ -324,17 +462,16 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 	}
 
 	if err := writeJSONLine(conn, resp); err != nil {
-		// Audit-on-write-failure: the daemon signed and decided
-		// "approved" but the MCP never received the signatures, so
-		// from the operator's perspective the action was not
-		// delivered. Record this asymmetry explicitly rather than
-		// folding it into "approved" — daemon.md §5.1/§6 treat the
-		// audit log as authoritative; a row that says "approved" must
-		// imply "signatures left the daemon."
-		auditStatus := result.Status.String()
-		if result.Status == backend.StatusApproved {
-			auditStatus = "approved-undelivered"
-		}
+		// Audit-on-write-failure: the daemon decided a verdict but the
+		// MCP never received the response line, so from the operator's
+		// perspective the action was not delivered. Record this asymmetry
+		// explicitly with an "<verdict>-undelivered" status rather than
+		// folding it into the bare verdict — daemon.md §5.1/§6 treat the
+		// audit log as authoritative; a row that says "approved" must imply
+		// "signatures left the daemon", and (F1) the SAME distinction must
+		// hold for denied/timeout so a write-lost DENY is visibly logged as
+		// such, not as an ordinary delivered "denied".
+		auditStatus := undeliveredStatus(result.Status)
 		if auditErr := d.audit(req, auditStatus, result.ApprovedBy); auditErr != nil {
 			// Surface the audit error to operators rather than dropping
 			// it on the floor; the write-response error is the more
@@ -346,12 +483,31 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 	return d.audit(req, result.Status.String(), result.ApprovedBy)
 }
 
+// undeliveredStatus maps a resolved verdict to its "<verdict>-undelivered"
+// audit status, used when the response write fails after the daemon already
+// decided. Mirrors the original approved-undelivered marker for ALL verdicts
+// (F1) so a write-lost denied/timeout is logged distinctly from a delivered
+// one. An unknown/error status keeps its own string (no -undelivered suffix:
+// there is no decided verdict to strand).
+func undeliveredStatus(s backend.ResultStatus) string {
+	switch s {
+	case backend.StatusApproved:
+		return "approved-undelivered"
+	case backend.StatusDenied:
+		return "denied-undelivered"
+	case backend.StatusTimeout:
+		return "timeout-undelivered"
+	default:
+		return s.String()
+	}
+}
+
 // respondError writes an {status: error} response with the given
 // reason, records an audit event with status "error", and returns nil
 // to the caller (the protocol level always writes a line; the caller
 // only sees a non-nil error on hard I/O failure).
 func (d *Daemon) respondError(conn io.Writer, reqID, reason string) error {
-	resp := signResponse{RequestID: reqID, Status: "error", Error: reason}
+	resp := signResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		if auditErr := d.audit(signRequest{RequestID: reqID}, "error", ""); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", auditErr)
@@ -430,7 +586,7 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	}
 
 	if result.Status != backend.StatusApproved {
-		resp := grantResponse{RequestID: req.RequestID, Status: result.Status.String()}
+		resp := grantResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
 		if err := writeJSONLine(conn, resp); err != nil {
 			d.auditGrant(req, result.Status.String(), result.ApprovedBy)
 			return fmt.Errorf("write grant response: %w", err)
@@ -458,7 +614,7 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	}
 	d.grantsMu.Unlock()
 
-	resp := grantResponse{RequestID: req.RequestID, Status: "approved", GrantID: gid, ExpiryUnix: expiry.Unix()}
+	resp := grantResponse{RequestID: req.RequestID, Status: "approved", GrantID: gid, ExpiryUnix: expiry.Unix(), ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		// Approved + stored but the response did not reach the MCP.
 		// Record the asymmetry distinctly, mirroring the sign path's
@@ -494,7 +650,7 @@ func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
 	}
 	d.grantsMu.Unlock()
 
-	resp := revokeGrantResponse{RequestID: req.RequestID, Status: "approved"}
+	resp := revokeGrantResponse{RequestID: req.RequestID, Status: "approved", ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		d.auditRevokeGrant(req, "approved")
 		return fmt.Errorf("write revoke-grant response: %w", err)
@@ -505,7 +661,7 @@ func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
 
 // respondGrantError writes a grant "error" response and audits it.
 func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
-	resp := grantResponse{RequestID: reqID, Status: "error", Error: reason}
+	resp := grantResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		d.auditGrant(grantRequest{RequestID: reqID}, "error", "")
 		return fmt.Errorf("write grant error response: %w", err)
@@ -514,9 +670,99 @@ func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
 	return nil
 }
 
+// handleListGrants processes a "list_grants" request: a READ-ONLY query of
+// the in-memory standing-grant table. Like revoke_grant it needs NO human
+// approval and never touches the backend — it only reports state, it grants
+// no capability and leaks no key material. It exists so the MCP can re-learn
+// the daemon's authoritative grant state after a request_grant whose
+// verdict-write was lost (phantom-live grant).
+//
+// It RLocks d.grantsMu, iterates the table, SKIPS any grant whose expiry is
+// at-or-before now() (a dead grant is never reported), applies the optional
+// alias filter, and copies the commands slice defensively. Every request
+// produces exactly one audit row, matching the daemon's "every request is
+// audited" contract.
+func (d *Daemon) handleListGrants(conn io.ReadWriter, line []byte) error {
+	var req listGrantsRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if jerr := dec.Decode(&req); jerr != nil {
+		return d.respondListGrantsError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if req.RequestID == "" {
+		return d.respondListGrantsError(conn, "", "missing request_id")
+	}
+
+	now := d.now()
+	var out []grantInfo
+	d.grantsMu.RLock()
+	for alias, g := range d.grants {
+		if req.Alias != "" && alias != req.Alias {
+			continue
+		}
+		// Never report a dead/phantom-expired grant. Mirrors matchGrant's
+		// expiry guard: at-or-before now() is dead.
+		if !g.expiry.After(now) {
+			continue
+		}
+		out = append(out, grantInfo{
+			Alias:      g.alias,
+			Scope:      g.scope,
+			Commands:   append([]string(nil), g.commands...),
+			GrantID:    g.id,
+			ExpiryUnix: g.expiry.Unix(),
+		})
+	}
+	d.grantsMu.RUnlock()
+
+	resp := listGrantsResponse{RequestID: req.RequestID, Status: "ok", Grants: out, ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditListGrants(req, "list_grants")
+		return fmt.Errorf("write list-grants response: %w", err)
+	}
+	d.auditListGrants(req, "list_grants")
+	return nil
+}
+
+// respondListGrantsError writes a list-grants "error" response and audits it.
+func (d *Daemon) respondListGrantsError(conn io.Writer, reqID, reason string) error {
+	resp := listGrantsResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditListGrants(listGrantsRequest{RequestID: reqID}, "error")
+		return fmt.Errorf("write list-grants error response: %w", err)
+	}
+	d.auditListGrants(listGrantsRequest{RequestID: reqID}, "error")
+	return nil
+}
+
+// auditListGrants writes one audit row for a list_grants request. The
+// "command" slot carries a synthetic descriptor so a grep over the audit
+// log surfaces the read-only query alongside per-command signing. A
+// read-only "list_grants" status is fine — no verdict was rendered.
+func (d *Daemon) auditListGrants(req listGrantsRequest, status string) {
+	desc := "list_grants"
+	if req.Alias != "" {
+		desc = fmt.Sprintf("list_grants alias=%s", req.Alias)
+	}
+	var servers []string
+	if req.Alias != "" {
+		servers = []string{req.Alias}
+	}
+	ev := AuditEvent{
+		TS:        d.now().UTC(),
+		RequestID: req.RequestID,
+		Status:    status,
+		Commands:  []string{desc},
+		Servers:   servers,
+	}
+	if err := d.Audit.Write(ev); err != nil {
+		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	}
+}
+
 // respondRevokeGrantError writes a revoke-grant "error" response and audits it.
 func (d *Daemon) respondRevokeGrantError(conn io.Writer, reqID, reason string) error {
-	resp := revokeGrantResponse{RequestID: reqID, Status: "error", Error: reason}
+	resp := revokeGrantResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
 		d.auditRevokeGrant(revokeGrantRequest{RequestID: reqID}, "error")
 		return fmt.Errorf("write revoke-grant error response: %w", err)
@@ -699,7 +945,17 @@ func (d *Daemon) audit(req signRequest, status, approvedBy string) error {
 	cmds := make([]string, len(req.Commands))
 	servers := make([]string, len(req.Commands))
 	for i, c := range req.Commands {
-		cmds[i] = c.Cmd
+		// Redact a secret embedded in the command STRING before persisting it
+		// (F5). The audit log carries the full command text of every approval
+		// request; a `printf 'PASSWORD=...'` would otherwise land verbatim.
+		// Fail-OPEN: on an internal redactor error, record the raw command
+		// rather than drop the audit line. Benign commands pass through, and a
+		// Daemon with no ruleset wired (nil) records verbatim too.
+		red, ok := redact.RedactString(c.Cmd, d.RedactSalt, d.RedactRules)
+		if !ok {
+			red = c.Cmd
+		}
+		cmds[i] = red
 		servers[i] = c.Server
 	}
 	ev := AuditEvent{
@@ -709,6 +965,15 @@ func (d *Daemon) audit(req signRequest, status, approvedBy string) error {
 		Commands:   cmds,
 		Servers:    servers,
 		ApprovedBy: approvedBy,
+		// First-class auth_mode (F4-B4): same helper as the socket response so
+		// the authoritative log carries both WHO (approved_by) and HOW
+		// (auth_mode) and the two never drift. Gated on the APPROVAL STATE via
+		// the already-mapped status string: an approval is "approved" OR
+		// "approved-undelivered" (HasPrefix "approved"), so an approved-
+		// undelivered still records human/grant, while denied/denied-undelivered
+		// /timeout/timeout-undelivered/error all record "" — even though the
+		// real Telegram backend hands the denier's name through approvedBy.
+		AuthMode: authMode(strings.HasPrefix(status, "approved"), approvedBy),
 	}
 	if err := d.Audit.Write(ev); err != nil {
 		return fmt.Errorf("audit: %w", err)
@@ -754,7 +1019,20 @@ func newGrantID() (string, error) {
 }
 
 // writeJSONLine marshals v and writes it followed by a newline.
+//
+// Immediately before the write it RESETS the connection's write deadline to
+// now + sigwire.ResponseWriteGrace (see setWriteGrace). serveOne bounds the
+// approval WAIT to SignerHandlerTimeout - ResponseWriteGrace, so a verdict
+// that resolves at the wait deadline would otherwise have ~zero budget left
+// to write its response line — the verdict would race the connection to
+// teardown and the MCP would see a bare EOF / i-o-timeout with no sentinel
+// (F1: verdict-undelivered). The reset hands every response write a fresh,
+// non-racing budget regardless of how long the wait took. Centralised here
+// so no verdict/error write site (respond, respondError, the grant/revoke
+// paths) can be missed. It no-ops for non-deadline writers, so test fakes
+// that pass a *bytes.Buffer are unaffected.
 func writeJSONLine(w io.Writer, v any) error {
+	setWriteGrace(w)
 	b, err := jsonMarshal(v)
 	if err != nil {
 		return err
@@ -762,6 +1040,17 @@ func writeJSONLine(w io.Writer, v any) error {
 	b = append(b, '\n')
 	_, err = w.Write(b)
 	return err
+}
+
+// setWriteGrace resets w's write deadline to now + sigwire.ResponseWriteGrace
+// when w is a deadline-capable connection. The response helpers take a plain
+// io.Writer (so tests can pass a *bytes.Buffer), hence the type assertion:
+// it applies the fresh write budget to a real *net.Conn and is a no-op for
+// anything that does not expose SetDeadline.
+func setWriteGrace(w io.Writer) {
+	if c, ok := w.(interface{ SetDeadline(time.Time) error }); ok {
+		_ = c.SetDeadline(time.Now().Add(sigwire.ResponseWriteGrace))
+	}
 }
 
 // jsonMarshal is a thin alias kept so the daemon imports encoding/json

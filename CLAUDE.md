@@ -4,9 +4,9 @@ The cross-tool source of truth is `AGENTS.md`. Read it now — Codex and any oth
 
 ## SSHGate-specific notes for Claude Code
 
-This is a Claude Code plugin. The agent (MCP) tool surface is exactly **seven
+This is a Claude Code plugin. The agent (MCP) tool surface is exactly **eight
 tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
-`request_grant`, `revoke_grant`:
+`request_grant`, `revoke_grant`, `list_grants`:
 
 - `sshgate.run(alias, command)` — run one command on a registered server
 - `sshgate.run_batch(alias, commands[])` — run several commands; writes bulk-approve in one Telegram tap
@@ -15,6 +15,7 @@ tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
 - `sshgate.revoke_server(alias)` — uninstall gate from a server (requires Telegram approval)
 - `sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)` — request a standing grant so matching writes auto-sign for a window (≤ 24h); needs a distinct human Telegram approval, the agent can only request one
 - `sshgate.revoke_grant(alias)` — drop a server's standing grant (de-escalation only — always safe, no approval)
+- `sshgate.list_grants(alias?)` — list the signer's live standing grants (read-only, no approval); use to reconcile after a request_grant timeout
 
 **Provisioning is NOT an agent tool.** There is deliberately no `add_server`
 on the MCP surface: a new machine is onboarded by a human at a terminal with
@@ -42,6 +43,12 @@ When the user asks to debug, diagnose, or operate a remote server:
 3. For fixes, queue writes into `sshgate.run_batch` so the user approves all in ONE Telegram tap.
 4. ALWAYS show the user the list of planned writes before calling run_batch.
 5. After fixes, re-run a read health check.
+
+**Phantom-live grant after a `request_grant` error/timeout.** If `request_grant`
+returns an error or times out, the grant may still have gone live (the human
+approved, but the response did not get back to you). Call `sshgate.list_grants`
+to check the true state before re-requesting — re-requesting would prompt the
+human a second time and risk a double grant.
 
 See `skills/debugging-remote-servers/SKILL.md` for the full skill.
 
@@ -88,3 +95,8 @@ and the error messages below.
   log out/in for the group to take effect, **restart Claude Code**, run `/mcp` to
   confirm the `sshgate` MCP server is live, then writes will work.
 - If a write is denied by the user via Telegram → DO NOT re-submit. Ask why; propose alternatives.
+- If a write fails with a **verdict-undelivered** error (`verdict undelivered — the
+  signer decided but the response did not arrive; a human may have DENIED this`) →
+  DO NOT auto-retry. A denied write must never be silently re-submitted. Check
+  `sshgate.status` and the Telegram approval thread; only resubmit if you confirm
+  it was NOT a denial.

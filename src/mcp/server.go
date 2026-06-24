@@ -12,6 +12,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/mcp/livelog"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
+	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
 // isCleanShutdown reports whether err is one of the expected
@@ -84,6 +85,12 @@ const ToolNameRequestGrant = "request_grant"
 // approval). Claude Code's surface name is "mcp__sshgate__revoke_grant".
 const ToolNameRevokeGrant = "revoke_grant"
 
+// ToolNameListGrants reports the signer's in-memory LIVE standing grants
+// (read-only; no approval). It lets the agent reconcile true grant state
+// after a request_grant whose verdict-write was lost (the phantom-live
+// grant). Claude Code's surface name is "mcp__sshgate__list_grants".
+const ToolNameListGrants = "list_grants"
+
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
@@ -112,6 +119,31 @@ type Server struct {
 	Runner  *tools.Runner
 	Logger  *log.Logger
 	LiveLog *livelog.Log
+
+	// RedactSalt + RedactRules scrub a secret embedded in the COMMAND
+	// STRING before it is written to the Tier-6b live log (F5). The salt is
+	// a per-process random 32 bytes generated ONCE at startup; the ruleset
+	// is rules.Combined() compiled ONCE at startup (the MCP is a
+	// long-running daemon — never compile per-command). Both are wired by
+	// main. A zero salt + nil rules is a valid no-op: RedactString
+	// fast-paths nil rules and logs the command verbatim, so a Server built
+	// without them (older tests) still works.
+	RedactSalt  [32]byte
+	RedactRules []redact.Rule
+}
+
+// redactCommand scrubs a command string about to be written to the live
+// log, reusing the server's per-process salt + compiled ruleset. FAIL-OPEN:
+// if RedactString reports an internal error, the raw command is logged
+// rather than the audit line being dropped. A benign command (no secret
+// pattern) and a server with no ruleset wired both return the input
+// unchanged.
+func (s *Server) redactCommand(cmd string) string {
+	red, ok := redact.RedactString(cmd, s.RedactSalt, s.RedactRules)
+	if !ok {
+		return cmd
+	}
+	return red
 }
 
 // Serve runs the MCP server over the provided stdio pipes. It
@@ -187,6 +219,16 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Description: "Revoke (drop) a server's standing grant so writes prompt for approval again. De-escalation only — always safe, needs no approval, and is a no-op if no grant exists.",
 	}, s.revokeGrantHandler)
 
+	// list_grants — reports the signer's in-memory LIVE standing grants.
+	// READ-ONLY: no approval, no capability granted, no key material — it
+	// only reports state. Use it to reconcile after a request_grant timeout:
+	// if the verdict-write was lost the grant can be live while the agent saw
+	// only an error, and this is the way to re-learn its id / scope / expiry.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNameListGrants,
+		Description: "List live standing grants the signer currently holds (optionally filtered to one alias). Read-only, no approval, always safe. Use it to reconcile after a request_grant timeout — a grant can be live even though you saw an error, and this re-learns its grant_id, scope, and expiry. Expired grants are never listed; grants die on signer restart.",
+	}, s.listGrantsHandler)
+
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
 		Writer: writerCloser{out},
@@ -227,14 +269,21 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 		stdout, stderr = "", ""
 	}
 	s.LiveLog.Log(livelog.Entry{
-		Server:         in.Alias,
-		Command:        in.Command,
+		Server: in.Alias,
+		// Redact a secret embedded in the command STRING before it lands in
+		// the at-rest live log (F5). Fail-open; benign commands pass through.
+		Command:        s.redactCommand(in.Command),
 		Classification: out.Kind,
 		ExitCode:       out.ExitCode,
 		Approved:       out.Approved,
-		Revealed:       out.Revealed,
-		Stdout:         stdout,
-		Stderr:         stderr,
+		// AuthMode (F4) is the single human-vs-grant surface: "human" for a
+		// real-time tap, "grant:<id>" for a standing-grant auto-sign, "" for a
+		// read. It is metadata, NOT secret output, so it is KEPT even for a
+		// revealed write (whose stdout/stderr were blanked above).
+		AuthMode: out.AuthMode,
+		Revealed: out.Revealed,
+		Stdout:   stdout,
+		Stderr:   stderr,
 	})
 	// Also pack a TextContent block so older MCP clients (without
 	// structured content support) see a human-readable result.
@@ -275,15 +324,26 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		if r.Revealed {
 			stdout, stderr = "", ""
 		}
+		// AuthMode (F4) applies only to a WRITE: the one batch sign request
+		// authorised the writes, so each write carries the batch-level
+		// auth_mode ("human" / "grant:<id>"); the reads ran direct, never
+		// part of the approval, so they carry no auth mode — mirroring the
+		// Approved logic on the line below.
+		authMode := ""
+		if r.Kind == "write" {
+			authMode = out.AuthMode
+		}
 		s.LiveLog.Log(livelog.Entry{
-			Server:         out.Server,
-			Command:        r.Command,
+			Server: out.Server,
+			// Redact a secret embedded in the command STRING (F5). Fail-open.
+			Command:        s.redactCommand(r.Command),
 			Classification: r.Kind,
 			ExitCode:       r.ExitCode,
 			// A read inside an approved batch is correctly Approved:false — the
 			// single bulk approval only authorised the batch's WRITES; the reads
 			// ran direct and were never part of the human tap.
 			Approved: out.Approved && r.Kind == "write",
+			AuthMode: authMode,
 			Revealed: r.Revealed,
 			Stdout:   stdout,
 			Stderr:   stderr,
@@ -440,6 +500,41 @@ func (s *Server) revokeGrantHandler(ctx context.Context, _ *mcpsdk.CallToolReque
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: fmt.Sprintf("standing grant on %s revoked (writes will prompt again)", out.Alias)}},
 	}, out, nil
+}
+
+// listGrantsHandler is the typed handler for sshgate.list_grants. It is
+// read-only — only a true infrastructure error (nil dependency, transport
+// failure, or a too-old daemon) surfaces as a Go error; a successful read
+// carries the live grants in the structured ListGrantsOutput.
+func (s *Server) listGrantsHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.ListGrantsInput) (*mcpsdk.CallToolResult, tools.ListGrantsOutput, error) {
+	out, err := s.Runner.ListGrants(ctx, in)
+	if err != nil {
+		s.Logger.Printf("list_grants alias=%s err=%v", in.Alias, err)
+		return nil, tools.ListGrantsOutput{}, err
+	}
+	s.Logger.Printf("list_grants alias=%s grants=%d", in.Alias, len(out.Grants))
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatListGrantsSummary(out)}},
+	}, out, nil
+}
+
+// formatListGrantsSummary renders a short human summary for the fallback
+// TextContent block. Structured content carries the full ListGrantsOutput.
+func formatListGrantsSummary(out tools.ListGrantsOutput) string {
+	if len(out.Grants) == 0 {
+		return "no live standing grants"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d live grant(s):", len(out.Grants))
+	for _, g := range out.Grants {
+		fmt.Fprintf(&b, "\n  %s  scope=%s grant_id=%s expires_unix=%d", g.Alias, g.Scope, g.GrantID, g.ExpiryUnix)
+		if g.Scope == "commands" {
+			for _, c := range g.Commands {
+				fmt.Fprintf(&b, "\n    - %s", c)
+			}
+		}
+	}
+	return b.String()
 }
 
 // listServersHandler is the typed handler for sshgate.list_servers.

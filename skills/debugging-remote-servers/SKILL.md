@@ -6,11 +6,11 @@ description: This skill should be used when the user asks to debug, diagnose, or
 # Debugging remote servers with SSHGate
 
 SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly seven tools — `sshgate.run`, `sshgate.run_batch`,
+tool surface is exactly eight tools — `sshgate.run`, `sshgate.run_batch`,
 `sshgate.list_servers`, `sshgate.status`, `sshgate.revoke_server`,
-`sshgate.request_grant`, and `sshgate.revoke_grant` — and debugging mostly
-uses the first three (the grant pair is for unattended write windows; see
-**Standing grants** below). Read commands run instantly. Write
+`sshgate.request_grant`, `sshgate.revoke_grant`, and `sshgate.list_grants` —
+and debugging mostly uses the first three (the grant tools are for unattended
+write windows; see **Standing grants** below). Read commands run instantly. Write
 commands need the user to tap a Telegram approval button on their phone.
 Optimise for: fast diagnosis, one approval per fix, no surprises.
 
@@ -73,8 +73,17 @@ unattended build), ask for a **standing grant** instead of N approvals:
 - **`sshgate.revoke_grant(alias)`** drops the grant early. Pure
   de-escalation: always safe, no approval, no-op if none exists. Drop a grant
   as soon as the window's work is done.
+- **`sshgate.list_grants(alias?)`** lists the signer's live standing grants
+  (optionally filtered to one alias). Read-only, no approval, always safe — it
+  reports state, never changes it.
 
 Always show the user the exact scope + command set before requesting.
+
+**Phantom-live grant after a `request_grant` error/timeout.** If `request_grant`
+returns an error or times out, the grant may still have gone live — the human
+approved, but the response didn't make it back to you. Call `sshgate.list_grants`
+to check the true state *before* re-requesting. Re-requesting blindly would
+prompt the human a second time and risk a double grant.
 
 ## Secret-reveal — the rare "see a value" escape hatch
 
@@ -186,6 +195,12 @@ resubmitting the same batch is rude and (for the first three) hopeless.
 - **Timeout** (`approval timed out`) — the approval window elapsed
   (signer's default is ~5 minutes / 300s). The user was probably away. Tell them and
   offer to re-send when they're ready, but don't auto-resubmit.
+- **Verdict undelivered** (`verdict undelivered — the signer decided but the
+  response did not arrive; a human may have DENIED this`) — the signer reached a
+  decision but its response never got back to you, so a Deny may be hiding behind
+  this. **Do NOT auto-retry** — a denied write must never be silently
+  re-submitted. Check `sshgate.status` and the Telegram approval thread; resubmit
+  only once you confirm it was not a denial.
 - **Signer permission denied** (`signer socket … is present but not
   accessible (permission denied) — your shell/session is not yet in the
   sshgatesigner group`) — the daemon is ALIVE; the current Claude Code

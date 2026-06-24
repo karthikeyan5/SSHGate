@@ -34,6 +34,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -246,13 +247,10 @@ func run() int {
 func execChild(cmd string, reveal bool, captureLimit int) (int, gate.ExecResult) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	// Compile the redaction ruleset lazily — only this execute path needs
-	// it. A test may inject redactRules beforehand (the package-var seam);
-	// honour that and compile the real ruleset only when it is unset.
-	rules := redactRules
-	if rules == nil {
-		rules = redactrules.Combined()
-	}
+	// Resolve the redaction ruleset lazily via auditRules() — only this
+	// execute path (and the command-string audit redaction) needs it; a
+	// deny/verify-fail/probe path that never reaches here pays nothing.
+	rules := auditRules()
 	res, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
 		SessionSalt:  sessionSalt,
 		Rules:        rules,
@@ -266,6 +264,52 @@ func execChild(cmd string, reveal bool, captureLimit int) (int, gate.ExecResult)
 		return exitGeneric, res
 	}
 	return res.ExitCode, res
+}
+
+// auditRulesOnce + cachedAuditRules MEMOIZE the production ruleset compile so
+// redactrules.Combined() (the ~1 MB regex compile) runs at most ONCE per gate
+// process. This is distinct from the redactRules test-injection seam: when
+// that seam is nil (production) the two consumers of auditRules() within one
+// gate invocation — output redaction (execChild) and command-string redaction
+// (redactAuditCommand) — would otherwise each trigger a fresh Combined(),
+// paying the compile twice per executed write. The cache collapses them to one.
+var (
+	auditRulesOnce   sync.Once
+	cachedAuditRules []redact.Rule
+)
+
+// auditRules resolves the redaction ruleset the gate scrubs with. It is the
+// single compile point shared by output redaction (execChild) and
+// command-string redaction (redactAuditCommand): a test may inject the
+// redactRules package-var seam (the explicit override — returned verbatim,
+// uncached), otherwise the real v1.2 ruleset (redactrules.Combined() —
+// sshgate-native + gitleaks-vendored) is compiled ONCE via auditRulesOnce and
+// cached for the rest of the process. Compiling lazily keeps the
+// deny/verify-fail/probe paths free of the ~1 MB regex-compile cost, and the
+// once-cache guarantees the two consumers within a single executed write share
+// ONE compile rather than triggering it twice.
+func auditRules() []redact.Rule {
+	if redactRules != nil {
+		return redactRules
+	}
+	auditRulesOnce.Do(func() {
+		cachedAuditRules = redactrules.Combined()
+	})
+	return cachedAuditRules
+}
+
+// redactAuditCommand scrubs a command string about to be persisted to the
+// Tier-6a audit log, reusing the gate's per-process sessionSalt + the same
+// ruleset used for output redaction. It is FAIL-OPEN: if RedactString
+// reports an internal error, the raw command is logged rather than the audit
+// line being dropped — observability of "what ran" must never be blocked by
+// the redactor. A benign command (no secret pattern) is returned unchanged.
+func redactAuditCommand(cmd string) string {
+	red, ok := redact.RedactString(cmd, sessionSalt, auditRules())
+	if !ok {
+		return cmd
+	}
+	return red
 }
 
 // auditFullCaptureLimit bounds the per-stream bytes the gate buffers for
@@ -313,8 +357,11 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	}
 	rc, res := execChild(cmd, reveal, captureLimit)
 	audit.Record(gate.AuditRecord{
-		TS:             time.Now().UTC().Unix(),
-		Command:        cmd,
+		TS: time.Now().UTC().Unix(),
+		// Redact a secret embedded in the command STRING before persisting it
+		// to the system-of-record. The redactor already scrubs output; the
+		// command string is the symmetric at-rest sink (F5). Fail-open.
+		Command:        redactAuditCommand(cmd),
 		Classification: classification,
 		ApprovalStatus: approval,
 		ExitCode:       rc,
@@ -344,8 +391,11 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 // because there is no output metadata. The write is fail-open.
 func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int) {
 	audit.Record(gate.AuditRecord{
-		TS:             time.Now().UTC().Unix(),
-		Command:        cmd,
+		TS: time.Now().UTC().Unix(),
+		// Redact a secret embedded in the command string even on the no-exec
+		// (denial / admin-verb) path — a denied command can still carry a
+		// secret in its text (F5). Fail-open.
+		Command:        redactAuditCommand(cmd),
 		Classification: classification,
 		ApprovalStatus: approval,
 		ExitCode:       exit,

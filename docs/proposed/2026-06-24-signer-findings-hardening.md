@@ -1,0 +1,160 @@
+# Signer/MCP hardening — 6 findings from the 2026-06-23 migration test run
+
+Status: **spec, approved to build** (Karthi ratified the two design forks 2026-06-24).
+Branch: `fix/signer-hardening-2026-06-24` off `main@5f47a16`. No push until the batch is complete.
+
+Source: a migration test run surfaced 6 findings (F1–F6). Each was code-grounded against the real
+tree by a parallel investigation (one investigator per finding + a protocol cartographer). This spec
+records the confirmed verdicts, the locked design decisions, and the build sequencing.
+
+## The unifying root cause
+
+The multi-hour opacity of the 2026-06-23 outage traces to **one thing**: the daemon emits error
+responses with an **empty `request_id`** (`respondError(conn, "", …)`), which the MCP client masked as
+an opaque `request_id "" != r_…`. Two fixes kill that masking at both ends:
+- **F3** — the client surfaces `resp.Error` when `request_id==""` (already done for `Sign`; mirror to
+  the grant client).
+- **F6** — the daemon **echoes the request_id from the lenient peek**, so even a malformed/version
+  error carries a correlatable id instead of `""`.
+
+## Key invariants every fix respects
+
+- **The gate stays STATELESS.** New state lives in the signer daemon. The gate never learns about
+  grants; an auto-signed grant signature is **byte-identical** to a human-approved one by design.
+- **No change to the signed payload (`sigwire.SigPayload`).** All protocol evolution rides the
+  **MCP↔signer Unix-socket RPC** (gate-invisible), never the gate-bound signature. So no deployed
+  gate is affected by any fix here.
+- **`omitempty` preserves legacy wire shape** (the discipline already used for `Host`/`Reveal`).
+- **Telegram is input-only for the agent.** Provisioning stays human-only.
+
+---
+
+## Decisions (locked)
+
+| Fork | Decision |
+|------|----------|
+| **F2** grant re-query | **Add an 8th MCP tool `list_grants`** (Karthi ratified an 8-tool surface; update CLAUDE.md/AGENTS.md + the MCP server-instructions). Read-only, no approval. |
+| **F5** gate forensic audit | **Redact command strings everywhere, including the gate-side `audit.log`.** Never persist a secret; operator sees a correlatable marker. |
+| **F1** fail-safe direction | **Strict**: a lost verdict = possible-deny → stop, do NOT auto-retry, surface to the human. Matches "if denied, don't resubmit." |
+| **F4** live-log vocabulary | Full `auth_mode: "human" \| "grant:<id>"` (the agent already gets its own grant_id from `request_grant`). Add a first-class `auth_mode` to the signer audit too (decouple from the `approved_by` prefix). |
+| **F6** version semantics | **Exact-match** single int `sigwire.ProtoVersion` (not a negotiated range). Decoupled from the human-facing semver. |
+
+---
+
+## Per-finding spec
+
+### F1 — Verdict-undelivered race [HIGH] — no wire change
+A single absolute conn deadline covers read + approval-wait + response-write (`socket.go` serveOne),
+so a verdict resolving near the deadline has zero budget to write → the agent sees EOF/`i/o timeout`
+with no `ErrDenied`/`ErrTimeout` sentinel → classified as a generic retryable error. A denied write
+can be silently re-attempted. (The repo's own `socket_handlertimeout_test.go` documents this.)
+
+Fix:
+1. `sigwire.ResponseWriteGrace = 5 * time.Second`. In `serveOne`, set the initial conn deadline +
+   `connCtx` to a **wait budget** = `SignerHandlerTimeout - ResponseWriteGrace`; pass a
+   `resetWriteDeadline func()` into the handler that sets `conn.SetDeadline(now + ResponseWriteGrace)`.
+   The daemon calls it **immediately before each `writeJSONLine`** (verdict + error paths), so the
+   write always has a fresh, non-racing budget. Max conn lifetime stays ≤ `SignerHandlerTimeout`;
+   `ClientSignTimeout` still dominates. (No timeout-value changes — the grace is carved from the
+   existing 30s slack; assert `ApprovalWindow + ResponseWriteGrace ≤ SignerHandlerTimeout <
+   ClientSignTimeout` by construction.)
+2. New sentinel `sign.ErrVerdictUnknown`. In `client.go` (Sign) **and** `grant_client.go` (roundtrip):
+   after the request was fully written, if the read fails with `io.EOF` or a net timeout AND
+   `ctx.Err()==nil`, return `ErrVerdictUnknown` instead of the bare wrapped error.
+3. `run.go`/`run_batch.go`: classify `ErrVerdictUnknown` explicitly → fail-safe agent guidance
+   ("the signer decided but the response didn't arrive — a human may have DENIED this; do NOT
+   auto-retry; check `sshgate.status` / `list_grants` and the Telegram thread before resubmitting").
+4. Daemon audit: record `denied-undelivered` / `timeout-undelivered` (mirror the existing
+   `approved-undelivered`) so the asymmetry is logged for ALL verdicts.
+
+### F2 — Phantom-live grant [HIGH] — 8th tool
+`request_grant` stores the grant LIVE under lock **before** the response write; a write failure leaves
+a live standing grant the agent believes failed (no grant_id/expiry/scope). No verb to learn true
+state.
+
+Fix: new **read-only** socket kind `list_grants` (no backend, no approval, like `revoke_grant`):
+RLock `d.grants`, filter live (`expiry > now`), optional alias filter, return
+`[]{alias, scope, commands, grant_id, expiry_unix}`. Mirror in `grant_client.ListGrants`, a new
+`tools/list_grants.go` (`Runner.ListGrants`), register the 8th tool in `server.go` (read-only), extend
+the `SignClient` interface. Old daemon → `unsupported kind` → MCP surfaces gracefully ("daemon too old
+to list grants"). Do **not** persist grants (in-memory-only is deliberate). Idempotent re-request is
+**deferred**. Docs: CLAUDE.md / AGENTS.md / MCP server-instructions go from 7 → 8 tools.
+
+### F3 — grant_client masks `resp.Error` [MED] — 16 LOC
+Mirror the merged `client.go` 2b carve-out into `RequestGrant` and `RevokeGrant`: an
+`if resp.RequestID=="" && resp.Status=="error"` block surfacing `resp.Error` **before** the strict id
+compare. Built in Group 1 alongside F6 (same files).
+
+### F4 — Audit auth-mode [LOW, downgraded] — socket-response field, gate untouched
+The signer already distinguishes human vs grant (`approved_by="grant:<id>"` vs the approver name,
+test-pinned). Gaps: the live-log's `approved:true` is ambiguous and its comment falsely says "a human
+approved."
+
+Fix:
+- **Part A (bug):** fix the `livelog.go` `Approved` comment.
+- **Part B:** add `auth_mode` (`omitempty`) to the `signResponse` socket struct (client uses plain
+  `json.Unmarshal` → backward-compatible). Derive from `result.ApprovedBy` (`grant:` prefix → that
+  value; else approved → `"human"`; else empty) via a shared `authModeFromApprovedBy` helper. Thread
+  through `client.go` (return a `SignResult{Signed, AuthMode}`), `run.go` (`RunOutput.AuthMode`),
+  `server.go` → `livelog.Entry.AuthMode` (run + run_batch).
+- **Part B4:** first-class `auth_mode` on the signer `AuditEvent` (set via the same helper).
+- **Gate:** no field; add a one-line comment near `ApprovalStatus` noting the gate cannot/must not
+  distinguish grant from human.
+
+### F5 — Redact command strings [LOW] — redact everywhere
+The redactor only runs over command OUTPUT. A secret embedded in the command string lands verbatim in
+the gate audit, signer audit, MCP live-log, and the Telegram approval message.
+
+Fix: new `redact.RedactString(s, salt, rules) (string, bool)` reusing the streaming Writer + `Combined()`
+ruleset (fail-open: on error return input + `false`). Apply at every command-string sink (all four
+shipped):
+- gate `execAndAudit` + `auditNoExec` (reuse the gate's existing salt + lazily-compiled `auditRules`);
+- MCP live-log run + run_batch (new per-process salt + `Combined()` on `Server`);
+- signer `audit()` (new per-process salt + `Combined()` on `Daemon`);
+- Telegram approval **and** grant-approval message (`formatApprovalMessage` /
+  `formatGrantApprovalMessage`) — **shipped 2026-06-24, the 4th sink** (Karthi's decision, same date).
+  Redaction is **secret-only**: only the matched secret substring is replaced by the per-session marker,
+  the command SHAPE stays visible, so the human approver still sees WHAT runs (and that a secret is
+  present) — just not the literal secret, which therefore never reaches Telegram's servers. It is
+  **display-only**: the signed/executed command is the RAW request command, untouched (the format
+  functions only read `req.Commands`). The backend reuses the SAME per-process salt + already-compiled
+  `Combined()` slice as the `Daemon` (wired once in `cmd/sshgate-signer-telegram/main.go`); a backend
+  with no ruleset wired (nil) renders verbatim via `RedactString`'s nil-rules fast-path.
+Documented residual gap (NOT closed here): `mysql -p<secret>` (password-as-CLI-flag) has no covering
+rule — a ruleset concern, separate ticket. Pin it with an XFAIL test so it isn't silently assumed
+fixed.
+
+### F6 — Wire/protocol version stamp [MED] — lenient peek, daemon-first
+A naive version field **re-creates the outage**: an old daemon's `DisallowUnknownFields` rejects the
+new `proto_version` field itself. Solve by checking the version in the **lenient `kindPeek` pre-pass**,
+before any strict decode.
+
+Fix:
+- `sigwire/protocol.go`: `const ProtoVersion = 1`.
+- `kindPeek` gains `ProtoVersion int` **and** `RequestID string` (both lenient). After the peek
+  unmarshal: if `peek.ProtoVersion != 0 && peek.ProtoVersion != sigwire.ProtoVersion` →
+  `respondError(conn, peek.RequestID, "proto_version mismatch: client vN vs daemon vM — signer and MCP
+  are different builds; rebuild and restart both")`.
+- The daemon **echoes `peek.RequestID`** on the malformed-peek and version-mismatch errors (was `""`)
+  — closing the empty-id masking at the source.
+- Add `proto_version` (`omitempty`) to the sign/grant/revoke **request** structs (daemon + client);
+  the client SETS it = `sigwire.ProtoVersion`. Add to the response structs too (daemon sets it).
+- `omitempty` + absent-⇒-accept-as-legacy keeps the legacy shape byte-identical, so a transitional
+  peer is safe. Single-operator deploy order (restart signer, then relaunch sessions) satisfies
+  daemon-first automatically; the field protects the **next** skew, not retroactively this one.
+
+---
+
+## Build sequencing (files overlap → sequential, one branch)
+
+1. **Group 1 — Diagnosability: F3 + F6** (`grant_client.go`, `daemon.go` peek, `client.go`,
+   `sigwire/protocol.go`). Delivers "never debug a blind skew again."
+2. **Group 2 — HIGH races: F1 + F2** (`socket.go`, `daemon.go`, `client.go`, `grant_client.go`,
+   new `tools/list_grants.go`, `server.go`, docs).
+3. **Group 3 — Forensics: F4 + F5** (`livelog.go`, `server.go`, `run.go`, `daemon.go`,
+   `signer/audit.go`, `redact/scrub.go`, gate `main.go`, `telegram.go`).
+
+After each group: orchestrator runs `make vet && go test -race ./... && make build`, reviews the diff,
+runs spec + quality review, commits. After all three: triple-lens review (correctness +
+spec-conformance + security) over the full diff, fix real findings, final `make preflight`, then merge
+`--no-ff` into local `main`. **No push** (batched per Karthi).

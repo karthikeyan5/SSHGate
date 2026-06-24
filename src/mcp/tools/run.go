@@ -60,13 +60,21 @@ type RunOutput struct {
 	// can record THAT a reveal happened while blanking the raw secret. Never
 	// set on the read or ordinary-write paths.
 	Revealed bool `json:"revealed,omitempty"`
+	// AuthMode (F4) records HOW a write was authorised, threaded up from the
+	// signer's socket response: "human" = a real-time Telegram tap;
+	// "grant:<id>" = a standing-grant auto-sign; "" for reads (and an old
+	// signer that omits it). It is metadata for the MCP live-log's
+	// human-vs-grant distinction, not a secret. Never set on the read path.
+	AuthMode string `json:"auth_mode,omitempty"`
 }
 
 // SignClient is the subset of sign.Client that Runner needs. It
 // exists so tests can inject a fake without standing up the
 // signer socket.
 type SignClient interface {
-	Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) ([]signpkg.Signed, error)
+	// Sign returns a SignResult (the signed wire strings + the F4 auth-mode
+	// marker reporting human-vs-grant) on approval, or a sentinel error.
+	Sign(ctx context.Context, requestID string, cmds []signpkg.CmdReq) (signpkg.SignResult, error)
 	// RequestGrant asks the signer to mint a standing grant (one human
 	// approval → auto-sign matching writes for the window). Returns the
 	// grant id + Unix expiry on approval.
@@ -74,6 +82,10 @@ type SignClient interface {
 	// RevokeGrant drops the standing grant for alias (de-escalation; no
 	// approval needed).
 	RevokeGrant(ctx context.Context, requestID, alias string) error
+	// ListGrants reports the signer's in-memory LIVE standing grants
+	// (optionally filtered to alias). Read-only: no approval, no backend.
+	// Used to reconcile true grant state after a request_grant timeout.
+	ListGrants(ctx context.Context, requestID, alias string) ([]signpkg.GrantInfo, error)
 }
 
 // SSHRunner is the subset of ssh.Client that Runner needs. It
@@ -252,28 +264,32 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// Reveal/Reason ride along ONLY on this single-command sign request — a
 	// reveal is single-command by construction (run_batch carries no reveal).
 	// The signer copies Reveal into the SIGNED payload; the gate enforces it.
-	signed, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl, Host: e.Fingerprint, Reveal: reveal, Reason: reason}})
+	res, err := r.Sign.Sign(ctx, reqID, []signpkg.CmdReq{{Server: alias, Cmd: cmd, TTLSec: ttl, Host: e.Fingerprint, Reveal: reveal, Reason: reason}})
 	if err != nil {
 		// Preserve the sentinel for the MCP layer, but enrich the
 		// message with actionable remediation (permission vs Tier-1 vs
 		// dead daemon). r.remediateSignErr keeps errors.Is intact.
 		return RunOutput{Kind: "write"}, r.remediateSignErr(err)
 	}
-	if len(signed) != 1 {
-		return RunOutput{Kind: "write"}, fmt.Errorf("tools: expected 1 signature; got %d", len(signed))
+	if len(res.Signed) != 1 {
+		return RunOutput{Kind: "write"}, fmt.Errorf("tools: expected 1 signature; got %d", len(res.Signed))
 	}
-	wireCmd := signed[0].Sig + " " + cmd
+	wireCmd := res.Signed[0].Sig + " " + cmd
+	// authMode (F4) reports HOW the signer authorised this write — "human"
+	// (real-time tap) or "grant:<id>" (standing-grant auto-sign); "" for an
+	// old signer. It rides up into the live log's human-vs-grant field.
+	authMode := res.AuthMode
 
 	stdout, stderr, exit, err := r.SSH.Run(ctx, e.Host, e.User, e.Port, wireCmd)
 	if err != nil {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal},
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
 			fmt.Errorf("ssh exec: %w", err)
 	}
 	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
 	// the well-known gate codes so the model gets remediation rather than
 	// a bare "exit 77/65".
 	if note := gateDenyNote(exit); note != "" {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal},
+		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
 			fmt.Errorf("tools: %s", note)
 	}
 	return RunOutput{
@@ -283,6 +299,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		Kind:     "write",
 		Approved: true,
 		Revealed: reveal,
+		AuthMode: authMode,
 	}, nil
 }
 
@@ -301,6 +318,15 @@ func readOnlyWriteErr(alias string) error {
 // present-but-dead daemon.
 func (r *Runner) remediateSignErr(err error) error {
 	switch {
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		// FAIL-SAFE: the signer reached a decision but its response never
+		// arrived (the connection dropped/timed out after the request was
+		// sent). A human may have DENIED this write — auto-retrying could
+		// re-attempt something a human explicitly refused. Tell the agent to
+		// STOP and verify out-of-band before resubmitting. Sentinel preserved.
+		return fmt.Errorf(
+			"tools: the signer reached a decision but the response did not arrive — a human may have DENIED this write. Do NOT auto-retry. Check sshgate.status and the Telegram approval thread to confirm the verdict before resubmitting: %w",
+			err)
 	case errors.Is(err, signpkg.ErrSignerPermission):
 		return fmt.Errorf(
 			"tools: signer socket %s is present but not accessible (permission denied) — your shell/session is not yet in the sshgatesigner group. Log out and back in, then relaunch Claude Code, before writes will work: %w",
