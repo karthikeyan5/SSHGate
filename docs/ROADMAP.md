@@ -29,6 +29,19 @@ For the security model these items extend, see [design.md](design.md) and
 
 These are the highest-priority forward items.
 
+- **Route approvals through the shared messaging layer (strategic anchor).** The
+  signer currently embeds its own chat-channel integration — long-poll, backoff,
+  update ingestion, message formatting. A separate in-house messaging system
+  already solves that surface robustly (durable inbound queue, connectivity
+  notifications, delivery retries). The direction is to make SSHGate *consume*
+  that layer — as a plugin or a narrow call/API surface — rather than
+  re-implement it. This deletes the signer's bespoke poller, which is the source
+  of several verdict-delivery and concurrency gaps in the operational-hardening
+  set below; those are marked "(subsumed)" because they resolve for free once
+  approvals ride the shared layer. Evaluate and decide this **before** investing
+  further in the signer's own chat integration — it is the anchoring decision for
+  the next SSHGate pass.
+
 - **Standing grants, secret-reveal, per-server binding, audit trail (in progress).**
   A bundle that all touches the signed payload, so it ships as one wire change:
   signer-issued **standing grants** (scope `all` or an exact command-set, ≤24h,
@@ -109,7 +122,14 @@ These are the highest-priority forward items.
   consistent with `run`/`status`/`revoke_server`). **Recommended right after the
   grants/reveal/audit set, but NOT blocking the migration:** with a standing
   grant on the target box the manual `nohup` launch already auto-signs, so this
-  is a UX upgrade rather than a prerequisite.
+  is a UX upgrade rather than a prerequisite. A multi-server production run
+  reinforced this and refined the shape: a `run_async` launcher plus **read-class**
+  `job_status` / `job_tail` / `job_wait`, which also removes the brittle
+  exact-string `nohup` launcher a `commands`-scoped grant must match verbatim.
+  **Prerequisite before any foreground multi-GB transfer:** verify against the
+  gate source whether an approved `run` execution is actually unbounded or has a
+  client read-deadline / exec wall-clock cap — an unverified cap would kill a
+  large `rsync` mid-transfer on the single most irreversible step.
   - *Context (settles three related questions):* multi-**connection**
     concurrency already works natively — sshd forks a separate gate process per
     connection and the gate is stateless per-connection, so multiple
@@ -143,6 +163,74 @@ These are the highest-priority forward items.
 
 - **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
   posture and merge the deferred redactor work.
+
+---
+
+## Operational hardening (surfaced by a multi-server production run)
+
+Driving a real multi-server operational workload through the gate surfaced a set
+of reliability, safety, and ergonomics gaps. Ranked by impact. Several are
+resolved for free by the "route approvals through the shared messaging layer"
+anchor above and are marked *(subsumed)*.
+
+- **Client sign-budget must outlast the approval window (fixed).** The MCP sign
+  client's per-request budget was a hardcoded value far shorter than the human
+  approval window, so the client abandoned the socket minutes before a human
+  could be expected to approve — stranding an approved *or* denied verdict as an
+  opaque "verdict undelivered" timeout on *every* verdict, not just a
+  last-second deny. Now sourced from the single sigwire source of truth
+  (`ClientSignTimeout > SignerHandlerTimeout > ApprovalWindow`) with a
+  regression test, so it can never silently drift again. Follow-on: confirm the
+  MCP host imposes no shorter per-tool-call deadline of its own.
+
+- **Output-value redaction must be default-deny, not allowlist-by-name
+  (security).** Read-path redaction keys off known field *names*, so a secret in
+  an unknown-named field passes through raw into agent context and the audit
+  log. Add value-shaped, default-deny detectors (token/key/secret field shapes,
+  high-entropy values in secret-named fields) as the primary layer, keeping the
+  name allowlist as a secondary layer. Distinct from the already-shipped
+  command-string redaction, which covers the *input* command, not *output*
+  values.
+
+- **Distinguish DENY from TIMEOUT at the agent surface; persist verdicts.** When
+  a verdict is not delivered, the agent cannot tell "human denied" from "network
+  hiccup" — the worst ambiguity for a near-irreversible write. Persist each
+  resolved verdict server-side keyed by request id and add a read-only verb so
+  the client can re-read the true outcome (approved/denied/timeout) after a lost
+  response, mirroring the existing grant-list reconcile path. *(Largely subsumed
+  — reliable delivery removes most of the ambiguity.)*
+
+- **Per-command re-sign within an approved batch.** A single approval mints one
+  short signature window for a whole multi-command batch, so slow early commands
+  can expire the window and already-approved later commands then fail as
+  expired. Re-sign each command at its own start, or return a structured
+  expired/ran/skipped result instead of opaque per-command failures. A standing
+  grant already mitigates this (granted commands re-sign fresh).
+
+- **Targeted single-server reachability check (`ping`).** A cheap, short-timeout,
+  single-server up/down check (READ-class, no approval), so probing one box does
+  not cost a full SSH dial timeout or a fan-out across every server. Optionally a
+  **background monitor** that watches reachability continuously and surfaces a
+  notification when a threshold is crossed (consecutive drops / latency spike) —
+  the push-notification path is a natural fit for the shared-messaging anchor
+  above.
+
+- **Per-command output cap.** An optional output byte cap with an explicit
+  truncation marker, so a single large read (a deep directory walk) cannot
+  exhaust the agent's context. Reads should be safe-by-default against
+  multi-megabyte output.
+
+- **`stop_on_error` default for read batches.** Read/inventory batches
+  legitimately contain commands that exit non-zero (absent file, empty crontab);
+  aborting the whole batch on the first is the wrong default for reads. Default
+  to continue-on-error for read-classified batches; keep stop-on-error for write
+  batches where ordering matters.
+
+- **Concurrent gated approvals *(subsumed)*.** Firing several gated calls at once
+  can cross-reject when the local tool-permission prompt and the approval channel
+  assume a single pending request. Queue concurrent gated calls or key multiple
+  in-flight approvals by request id. Routing approvals through the shared layer,
+  with per-request delivery, is the clean fix.
 
 ---
 
