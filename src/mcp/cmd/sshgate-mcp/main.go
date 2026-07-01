@@ -41,13 +41,23 @@ import (
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 const (
 	defaultSignerSock = "/run/sshgatesigner/sock"
-	// signTimeout covers the signer-side approval window (60s for
-	// Telegram in v2) plus a couple of seconds of socket slack.
-	signTimeout = 75 * time.Second
+	// signTimeout is the MCP sign client's total per-request budget
+	// (dial + write + read). It MUST outlast the signer's whole
+	// connection handler — and therefore the full human approval window —
+	// so a verdict that resolves late is DELIVERED, not stranded as
+	// "verdict undelivered". Sourced from sigwire's single source of
+	// truth, which guarantees ClientSignTimeout > SignerHandlerTimeout >
+	// ApprovalWindow by construction. Do NOT replace this with a
+	// hand-rolled literal: a hardcoded 75s against the 5-minute approval
+	// window (the client abandoning the socket ~4 min early) was the
+	// 2026-07-01 verdict-undelivered root cause. See
+	// TestSignTimeoutOutlastsSignerHandler.
+	signTimeout = sigwire.ClientSignTimeout
 	// sshTimeout bounds a single SSH dial+exec.
 	sshTimeout = 30 * time.Second
 )

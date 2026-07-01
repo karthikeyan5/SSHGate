@@ -5,7 +5,32 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
+
+// TestSignTimeoutOutlastsSignerHandler pins the fix for the 2026-07-01
+// verdict-undelivered incident. The MCP sign client's total per-request
+// budget (signTimeout, wired into the sign client in buildServer) MUST
+// outlast the signer's whole connection handler — and therefore the full
+// human approval window — or the client abandons the socket mid-approval
+// and a decided verdict (approve OR deny) is stranded as an opaque
+// "verdict undelivered" i/o timeout. The original bug was a hardcoded 75s
+// budget against a 5-minute approval window, so the client gave up ~4
+// minutes early on every slow tap. The budget must be sourced from the
+// single sigwire source of truth, never a hand-rolled literal, so the four
+// timeouts can never silently drift again.
+func TestSignTimeoutOutlastsSignerHandler(t *testing.T) {
+	t.Parallel()
+	if signTimeout < sigwire.SignerHandlerTimeout {
+		t.Fatalf("signTimeout(%v) < sigwire.SignerHandlerTimeout(%v); the MCP client must outlive the signer's connection handler so an approved (or denied) verdict is delivered, not stranded as verdict-undelivered",
+			signTimeout, sigwire.SignerHandlerTimeout)
+	}
+	if signTimeout != sigwire.ClientSignTimeout {
+		t.Errorf("signTimeout(%v) != sigwire.ClientSignTimeout(%v); the client budget must be sourced from sigwire's single source of truth, not a separate literal, so ClientSignTimeout > SignerHandlerTimeout > ApprovalWindow can never drift",
+			signTimeout, sigwire.ClientSignTimeout)
+	}
+}
 
 // TestBuildServer_KeylessStartup asserts that buildServer succeeds when
 // the SSH key file does not exist (Tier-1 fresh install: /reload-plugins
